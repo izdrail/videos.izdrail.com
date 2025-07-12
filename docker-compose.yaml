@@ -1,56 +1,27 @@
 version: '3.9'
-
 services:
-  video.izdrail.com:
+  horoscope.izdrail.com:
     build:
       context: .
       dockerfile: Dockerfile
       args:
         WWWUSER: '${WWWUSER:-1000}'
         WWWGROUP: '${WWWGROUP:-1001}'
-    image: izdrail/video.izdrail.com
-    container_name: video.izdrail.com
+    image: izdrail/horoscope.izdrail.com
+    container_name: horoscope.izdrail.com
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     ports:
       - '1602:1602'
-      - '1603:1603'
     environment:
       WWWUSER: '${WWWUSER}'
       WWWGROUP: '${WWWGROUP}'
       LARAVEL_SAIL: 1
       IGNITION_LOCAL_SITES_PATH: '${PWD}'
-      OLLAMA_BASE_URL: 'http://ollama:11434'
-      OLLAMA_MODEL: 'qwen:1.8b'
     volumes:
       - '.:/app'
     networks:
       - sail
-    depends_on:
-      - ollama
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama2
-    ports:
-      - '11434:11434'
-    environment:
-      - OLLAMA_ORIGINS=*
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - sail
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-volumes:
-  ollama_data:
-    driver: local
 
 networks:
   sail:
