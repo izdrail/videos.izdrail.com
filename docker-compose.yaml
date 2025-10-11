@@ -1,14 +1,14 @@
 version: '3.9'
 services:
-  horoscope.izdrail.com:
+  videos.izdrail.com:
     build:
       context: .
       dockerfile: Dockerfile
       args:
         WWWUSER: '${WWWUSER:-1000}'
         WWWGROUP: '${WWWGROUP:-1001}'
-    image: izdrail/horoscope.izdrail.com
-    container_name: horoscope.izdrail.com
+    image: izdrail/videos.izdrail.com
+    container_name: videos.izdrail.com
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     ports:

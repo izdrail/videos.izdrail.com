@@ -1,6 +1,6 @@
 #!/bin/sh -l
 # Define variables
-IMAGE_PROD=izdrail/video.izdrail.com:latest
+IMAGE_PROD=izdrail/videos.izdrail.com:latest
 DOCKERFILE=Dockerfile
 DOCKER_COMPOSE_FILE=docker-compose.yaml
 DOCKER_COMPOSE_FILE_PROD=docker-compose.yaml

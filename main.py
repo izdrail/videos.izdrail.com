@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Text-to-Video Generator with Per-Sentence Audio Synchronization and Unsplash API Integration
-Creates videos with perfectly synchronized audio and dynamic background images from Unsplash
+Text-to-Video Generator with Per-Sentence Audio Synchronization, Unsplash API, and Background Music
+Creates videos with perfectly synchronized audio, dynamic background images, and background music
 
 IMPROVEMENTS:
 1. Larger text (50%+ of image coverage)
@@ -11,6 +11,7 @@ IMPROVEMENTS:
 5. Progress tracking for video generation
 6. Better resource cleanup
 7. Configurable text sizing parameters
+8. Background music support with volume mixing
 """
 
 import os
@@ -53,17 +54,19 @@ class Config:
         self.ROOT_DIR = Path(__file__).parent
         self.VOICE_SAMPLES_DIR = self.ROOT_DIR / "voice_samples"
         self.IMAGES_DIR = self.ROOT_DIR / "background_images"
+        self.MUSIC_DIR = self.ROOT_DIR / "background_music"  # NEW
         self.TEMP_DIR = self.ROOT_DIR / "temp"
         self.OUTPUT_DIR = self.ROOT_DIR / "output"
 
-        for dir_path in [self.VOICE_SAMPLES_DIR, self.IMAGES_DIR, self.TEMP_DIR, self.OUTPUT_DIR]:
+        for dir_path in [self.VOICE_SAMPLES_DIR, self.IMAGES_DIR, self.MUSIC_DIR,
+                         self.TEMP_DIR, self.OUTPUT_DIR]:
             dir_path.mkdir(exist_ok=True)
 
         self.STANDARD_VOICE_NAME = "Standard Voice (Non-Cloned)"
         self.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
         os.environ["COQUI_TOS_AGREED"] = "1"
 
-        # IMPROVED: Configurable text sizing parameters
+        # Configurable text sizing parameters
         self.TEXT_SIZE_CONFIG = {
             'target_coverage': 0.5,  # 50% of image
             'initial_font_size': 150,
@@ -71,6 +74,14 @@ class Config:
             'max_font_size': 200,
             'wrap_width_range': (15, 35),
             'margin_percentage': 0.05,  # 5% margin on each side
+        }
+
+        # Background music configuration
+        self.MUSIC_CONFIG = {
+            'voice_volume_db': 0,      # Keep voice at normal level
+            'music_volume_db': -20,    # Reduce music by 20dB (much quieter)
+            'fade_in_duration': 2000,  # 2 seconds fade in
+            'fade_out_duration': 2000, # 2 seconds fade out
         }
 
 
@@ -81,31 +92,21 @@ class UnsplashAPI:
         self.base_url = "https://api.unsplash.com"
         self.client_id = None
         self.cache = {}  # Simple in-memory cache for images
-        self.cache_limit = 50  # IMPROVED: Limit cache size
+        self.cache_limit = 50
 
     def set_client_id(self, client_id: str):
         """Set the Unsplash API client ID."""
         self.client_id = client_id
 
     def _manage_cache(self):
-        """IMPROVED: Manage cache size to prevent memory issues."""
+        """Manage cache size to prevent memory issues."""
         if len(self.cache) > self.cache_limit:
-            # Remove oldest entries
             items_to_remove = len(self.cache) - self.cache_limit
             for key in list(self.cache.keys())[:items_to_remove]:
                 del self.cache[key]
 
     def search_photos(self, query: str, per_page: int = 10) -> List[Dict]:
-        """
-        Search for photos on Unsplash.
-
-        Args:
-            query: Search keyword
-            per_page: Number of results to fetch (max 30)
-
-        Returns:
-            List of photo data dictionaries
-        """
+        """Search for photos on Unsplash."""
         if not self.client_id:
             raise ValueError("Unsplash client ID not set")
 
@@ -127,16 +128,7 @@ class UnsplashAPI:
             return []
 
     def download_image(self, photo_url: str) -> Optional[Image.Image]:
-        """
-        Download an image from Unsplash.
-
-        Args:
-            photo_url: URL of the image to download
-
-        Returns:
-            PIL Image object or None if download fails
-        """
-        # Check cache first
+        """Download an image from Unsplash."""
         if photo_url in self.cache:
             return self.cache[photo_url].copy()
 
@@ -145,7 +137,6 @@ class UnsplashAPI:
             response.raise_for_status()
             img = Image.open(BytesIO(response.content))
 
-            # IMPROVED: Cache management
             self._manage_cache()
             self.cache[photo_url] = img.copy()
             return img
@@ -154,59 +145,41 @@ class UnsplashAPI:
             return None
 
     def get_random_image(self, query: str, size: Tuple[int, int] = (1280, 720)) -> Optional[Image.Image]:
-        """
-        Get a random image from Unsplash based on search query.
-
-        Args:
-            query: Search keyword
-            size: Desired image size (width, height)
-
-        Returns:
-            PIL Image object or None
-        """
+        """Get a random image from Unsplash based on search query."""
         photos = self.search_photos(query, per_page=10)
 
         if not photos:
             print(f"[Unsplash] No images found for query: '{query}'")
             return None
 
-        # Select a random photo
         photo = random.choice(photos)
-
-        # Get the regular size URL (good balance between quality and size)
         photo_url = photo.get("urls", {}).get("regular")
 
         if not photo_url:
             return None
 
-        # Download and process the image
         img = self.download_image(photo_url)
 
         if img:
-            # Convert to RGB if necessary
             if img.mode != 'RGB':
                 img = img.convert('RGB')
 
-            # Resize to target size
             img = img.resize(size, Image.Resampling.LANCZOS)
-
-            # Apply darkening and blur for better text readability
             enhancer = ImageEnhance.Brightness(img)
             img = enhancer.enhance(0.6)
             img = img.filter(ImageFilter.GaussianBlur(radius=1))
 
-            # Trigger download endpoint (Unsplash API guidelines)
             download_url = photo.get("links", {}).get("download_location")
             if download_url and self.client_id:
                 try:
                     requests.get(download_url, params={"client_id": self.client_id}, timeout=5)
                 except:
-                    pass  # Non-critical
+                    pass
 
         return img
 
     def clear_cache(self):
-        """IMPROVED: Clear the image cache."""
+        """Clear the image cache."""
         self.cache.clear()
 
 
@@ -315,9 +288,8 @@ class VideoGenerator:
             font_paths.extend([Path("/usr/share/fonts/truetype"), Path.home() / ".fonts"])
 
         discovered = []
-        # IMPROVED: Extended font list with better preferences
         common_fonts = [
-            "arialbd.ttf", "Arial Bold.ttf",  # Bold fonts first for better visibility
+            "arialbd.ttf", "Arial Bold.ttf",
             "calibrib.ttf", "Calibri Bold.ttf",
             "arial.ttf", "Arial.ttf",
             "calibri.ttf", "Calibri.ttf",
@@ -330,11 +302,9 @@ class VideoGenerator:
             if path.is_dir():
                 for font_name in common_fonts:
                     font_file = None
-                    # Check direct path
                     if (path / font_name).exists():
                         font_file = path / font_name
                     else:
-                        # Search recursively
                         for found in path.rglob(font_name):
                             font_file = found
                             break
@@ -346,17 +316,7 @@ class VideoGenerator:
 
     def get_background_image(self, size: Tuple[int, int], unsplash_keyword: Optional[str] = None) -> Optional[
         Image.Image]:
-        """
-        Get a background image - either from Unsplash or local directory.
-
-        Args:
-            size: Image size (width, height)
-            unsplash_keyword: Keyword to search on Unsplash (if provided)
-
-        Returns:
-            PIL Image object or None
-        """
-        # Try Unsplash first if keyword is provided
+        """Get a background image - either from Unsplash or local directory."""
         if unsplash_keyword and self.unsplash.client_id:
             print(f"[Video] Fetching image from Unsplash: '{unsplash_keyword}'")
             img = self.unsplash.get_random_image(unsplash_keyword, size)
@@ -364,7 +324,6 @@ class VideoGenerator:
                 return img
             print("[Video] Falling back to local images...")
 
-        # Fallback to local images
         image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.gif']
         image_files = []
 
@@ -389,87 +348,147 @@ class VideoGenerator:
 
         return None
 
+    def get_random_background_music(self) -> Optional[Path]:
+        """
+        Get a random MP3 file from the background_music directory.
+
+        Returns:
+            Path to MP3 file or None if no music found
+        """
+        music_extensions = ['*.mp3', '*.MP3']
+        music_files = []
+
+        if self.config.MUSIC_DIR.exists():
+            for ext in music_extensions:
+                music_files.extend(glob.glob(os.path.join(self.config.MUSIC_DIR, ext)))
+
+        if music_files:
+            selected = random.choice(music_files)
+            print(f"[Music] Selected: {os.path.basename(selected)}")
+            return Path(selected)
+
+        print("[Music] No background music found in background_music/ folder")
+        return None
+
+    def mix_audio_with_music(self, voice_audio_path: Path,
+                            music_path: Optional[Path] = None,
+                            output_path: Optional[Path] = None) -> Path:
+        """
+        Mix voice audio with background music at lower volume.
+
+        Args:
+            voice_audio_path: Path to the main voice audio
+            music_path: Path to background music (optional, will pick random if None)
+            output_path: Output path (optional, will generate if None)
+
+        Returns:
+            Path to the mixed audio file
+        """
+        if music_path is None:
+            music_path = self.get_random_background_music()
+
+        if music_path is None or not music_path.exists():
+            print("[Music] No background music - using voice only")
+            return voice_audio_path
+
+        try:
+            # Load audio files
+            voice = AudioSegment.from_file(str(voice_audio_path))
+            music = AudioSegment.from_file(str(music_path))
+
+            voice_duration = len(voice)
+
+            # Apply volume adjustments
+            cfg = self.config.MUSIC_CONFIG
+            voice = voice + cfg['voice_volume_db']
+            music = music + cfg['music_volume_db']
+
+            # Loop music if it's shorter than voice
+            if len(music) < voice_duration:
+                loops_needed = (voice_duration // len(music)) + 1
+                music = music * loops_needed
+
+            # Trim music to match voice duration
+            music = music[:voice_duration]
+
+            # Add fade in/out to music for smooth start/end
+            music = music.fade_in(cfg['fade_in_duration']).fade_out(cfg['fade_out_duration'])
+
+            # Mix the audio (overlay)
+            mixed = voice.overlay(music)
+
+            # Export mixed audio
+            if output_path is None:
+                output_path = self.config.TEMP_DIR / f"mixed_audio_{uuid.uuid4()}.mp3"
+
+            mixed.export(str(output_path), format="mp3", bitrate="192k")
+            print(f"[Music] Mixed audio created successfully")
+
+            return output_path
+
+        except Exception as e:
+            print(f"[Music] Error mixing audio: {e}")
+            return voice_audio_path
+
     def _create_text_image(self, text: str, size: Tuple[int, int] = (1280, 720),
                            bg_color: Tuple[int, int, int] = (74, 144, 226),
                            unsplash_keyword: Optional[str] = None) -> Path:
-        """
-        IMPROVED: Create an image with large text overlay (50%+ coverage) and background.
-
-        Major improvements:
-        - Targets 50% minimum image coverage
-        - Better font size optimization
-        - Tests multiple wrap widths to find optimal layout
-        - Increased default font sizes
-        - Better visual hierarchy with larger shadows
-        """
+        """Create an image with large text overlay (50%+ coverage) and background."""
         background = self.get_background_image(size, unsplash_keyword)
         img = background.copy() if background else Image.new('RGB', size, bg_color)
 
         draw = ImageDraw.Draw(img)
 
-        # IMPROVED: Use config for text sizing
         cfg = self.config.TEXT_SIZE_CONFIG
         margin = int(size[0] * cfg['margin_percentage'])
         text_width = size[0] - (margin * 2)
 
-        # Calculate target text area (50% of image by default)
         target_text_area = (size[0] * size[1]) * cfg['target_coverage']
 
         font_path = self.available_fonts[0] if self.available_fonts else None
 
-        # IMPROVED: Start with much larger font
         font_size = cfg['initial_font_size']
         min_font_size = cfg['min_font_size']
         max_font_size = cfg['max_font_size']
 
         font = ImageFont.truetype(str(font_path), font_size) if font_path else ImageFont.load_default()
 
-        # Initial wrap
         wrap_width = 20
         wrapped_text = textwrap.fill(text, width=wrap_width)
 
-        # IMPROVED: Smart font sizing algorithm
         best_font_size = min_font_size
         best_wrapped = wrapped_text
         best_area = 0
 
-        # Try different font sizes
         for test_font_size in range(max_font_size, min_font_size - 1, -5):
             test_font = ImageFont.truetype(str(font_path), test_font_size) if font_path else ImageFont.load_default()
 
-            # Try different wrap widths for this font size
             for w in range(cfg['wrap_width_range'][0], cfg['wrap_width_range'][1]):
                 test_wrapped = textwrap.fill(text, width=w)
                 bbox = draw.textbbox((0, 0), test_wrapped, font=test_font)
                 text_w = bbox[2] - bbox[0]
                 text_h = bbox[3] - bbox[1]
 
-                # Check if text fits within margins
                 if text_w <= text_width and text_h <= size[1] * 0.85:
                     text_area = text_w * text_h
 
-                    # Prefer larger text that meets target coverage
                     if text_area >= target_text_area:
                         best_font_size = test_font_size
                         best_wrapped = test_wrapped
                         best_area = text_area
-                        break  # Found good size, use it
+                        break
                     elif text_area > best_area:
-                        # Track best option even if below target
                         best_font_size = test_font_size
                         best_wrapped = test_wrapped
                         best_area = text_area
 
-            # If we found a size that meets target, stop searching
             if best_area >= target_text_area:
                 break
 
-        # Use best configuration found
         font_size = best_font_size
         wrapped_text = best_wrapped
         font = ImageFont.truetype(str(font_path), font_size) if font_path else ImageFont.load_default()
 
-        # Get final text dimensions
         text_bbox = draw.textbbox((0, 0), wrapped_text, font=font)
         text_w, text_h = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
         text_pos = ((size[0] - text_w) // 2, (size[1] - text_h) // 2)
@@ -477,10 +496,9 @@ class VideoGenerator:
         coverage_percentage = (text_w * text_h / (size[0] * size[1]) * 100)
         print(f"[Video] Font size: {font_size}px, Text coverage: {coverage_percentage:.1f}% of image")
 
-        # IMPROVED: Larger semi-transparent background
         overlay = Image.new('RGBA', size, (0, 0, 0, 0))
         overlay_draw = ImageDraw.Draw(overlay)
-        padding = 40  # Increased padding
+        padding = 40
         rect_coords = [
             text_pos[0] - padding, text_pos[1] - padding,
             text_pos[0] + text_w + padding, text_pos[1] + text_h + padding
@@ -490,14 +508,12 @@ class VideoGenerator:
         img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
         draw = ImageDraw.Draw(img)
 
-        # IMPROVED: Larger shadow for better contrast
         shadow_offset = 4
         for offset in [(-shadow_offset, -shadow_offset), (shadow_offset, -shadow_offset),
                        (-shadow_offset, shadow_offset), (shadow_offset, shadow_offset)]:
             draw.text((text_pos[0] + offset[0], text_pos[1] + offset[1]),
                       wrapped_text, font=font, fill="black", align="center")
 
-        # Draw main text
         draw.text(text_pos, wrapped_text, font=font, fill="white", align="center")
 
         image_path = self.config.TEMP_DIR / f"slide_{uuid.uuid4()}.png"
@@ -507,20 +523,16 @@ class VideoGenerator:
     @staticmethod
     def split_into_sentences(text: str) -> List[str]:
         """Split text into sentences intelligently."""
-        # Handle common abbreviations to avoid incorrect splits
         text = re.sub(r'\bDr\.', 'Dr<dot>', text)
         text = re.sub(r'\bMr\.', 'Mr<dot>', text)
         text = re.sub(r'\bMrs\.', 'Mrs<dot>', text)
         text = re.sub(r'\bMs\.', 'Ms<dot>', text)
         text = re.sub(r'\b([A-Z])\.', r'\1<dot>', text)
 
-        # Split on sentence boundaries
         sentences = re.split(r'(?<=[.!?])\s+', text)
 
-        # Restore dots
         sentences = [s.replace('<dot>', '.').strip() for s in sentences if s.strip()]
 
-        # Ensure sentences end with punctuation
         for i, sentence in enumerate(sentences):
             if not sentence.endswith(('.', '!', '?')):
                 sentences[i] = sentence + '.'
@@ -531,9 +543,7 @@ class VideoGenerator:
                                   bg_color: Tuple[int, int, int] = (74, 144, 226),
                                   unsplash_keyword: Optional[str] = None,
                                   progress_callback=None) -> Path:
-        """
-        IMPROVED: Create video with progress tracking and better error handling.
-        """
+        """Create video with progress tracking and better error handling."""
         size = (1280, 720)
         clips = []
         temp_image_paths = []
@@ -542,28 +552,23 @@ class VideoGenerator:
 
         for i, (sentence, audio_path) in enumerate(zip(sentences, audio_paths)):
             try:
-                # Get audio duration
                 audio_segment = AudioSegment.from_file(str(audio_path))
                 duration_sec = len(audio_segment) / 1000.0
 
                 print(f"  Slide {i + 1}/{len(sentences)}: {duration_sec:.2f}s - '{sentence[:50]}...'")
 
-                # IMPROVED: Progress callback
                 if progress_callback:
                     progress_callback(i + 1, len(sentences), f"Creating slide {i + 1}")
 
-                # Create image for this sentence
                 image_path = self._create_text_image(sentence, size, bg_color, unsplash_keyword)
                 temp_image_paths.append(image_path)
 
-                # Create video clip with exact audio duration
                 audio_clip = AudioFileClip(str(audio_path))
                 video_clip = ImageClip(str(image_path), duration=duration_sec).set_audio(audio_clip)
                 clips.append(video_clip)
 
             except Exception as e:
                 print(f"[Video] Error creating slide {i + 1}: {e}")
-                # IMPROVED: Continue with other slides instead of failing completely
                 continue
 
         if not clips:
@@ -586,7 +591,6 @@ class VideoGenerator:
             threads=4
         )
 
-        # IMPROVED: Better cleanup with error handling
         for path in temp_image_paths:
             try:
                 path.unlink(missing_ok=True)
@@ -627,18 +631,20 @@ class TextToVideoGenerator:
                        bg_color: Tuple[int, int, int] = (74, 144, 226),
                        unsplash_keyword: Optional[str] = None,
                        unsplash_client_id: Optional[str] = None,
+                       enable_background_music: bool = True,
+                       music_volume_db: int = -20,
                        progress_callback=None) -> Dict:
-        """
-        IMPROVED: Generate video with better error handling and progress tracking.
-        """
+        """Generate video with optional background music."""
         if not text or not text.strip():
             return {"error": "Text cannot be empty", "success": False}
 
-        # IMPROVED: Validate inputs
         if len(text) > 10000:
             return {"error": "Text is too long (max 10,000 characters)", "success": False}
 
-        # Set Unsplash client ID if provided
+        # Update music volume in config if provided
+        if music_volume_db != self.config.MUSIC_CONFIG['music_volume_db']:
+            self.config.MUSIC_CONFIG['music_volume_db'] = music_volume_db
+
         if unsplash_client_id and unsplash_client_id.strip():
             self.video_generator.unsplash.set_client_id(unsplash_client_id.strip())
 
@@ -647,15 +653,19 @@ class TextToVideoGenerator:
         session_dir.mkdir(exist_ok=True)
 
         audio_paths = []
+        music_path = None
 
         try:
-            # Split text into sentences
             print("Splitting text into sentences...")
             sentences = self.video_generator.split_into_sentences(text)
             print(f"Found {len(sentences)} sentences")
 
             if len(sentences) > 100:
                 return {"error": "Too many sentences (max 100)", "success": False}
+
+            # Get background music if enabled
+            if enable_background_music:
+                music_path = self.video_generator.get_random_background_music()
 
             # Generate audio for each sentence
             print("\nGenerating audio for each sentence...")
@@ -666,13 +676,23 @@ class TextToVideoGenerator:
                     progress_callback(i + 1, len(sentences) * 2, f"Generating audio {i + 1}/{len(sentences)}")
 
                 audio_path = self.tts_manager.generate_speech(sentence, speaker_id)
+
+                # Mix with background music if enabled
+                if enable_background_music and music_path:
+                    mixed_audio_path = self.config.TEMP_DIR / f"mixed_sentence_{i}_{uuid.uuid4()}.wav"
+                    audio_path = self.video_generator.mix_audio_with_music(
+                        audio_path,
+                        music_path,
+                        mixed_audio_path
+                    )
+
                 audio_paths.append(audio_path)
 
             # Combine all audio files for the final MP3
             print("\nCombining audio files...")
             combined_audio = AudioSegment.empty()
             for audio_path in audio_paths:
-                segment = AudioSegment.from_wav(audio_path)
+                segment = AudioSegment.from_file(str(audio_path))
                 combined_audio += segment
 
             audio_mp3_path = session_dir / f"audio_{timestamp}.mp3"
@@ -683,7 +703,6 @@ class TextToVideoGenerator:
 
             def video_progress(current, total, message):
                 if progress_callback:
-                    # Offset by number of sentences for audio generation
                     progress_callback(len(sentences) + current, len(sentences) * 2, message)
 
             video_temp_path = self.video_generator.create_video_per_sentence(
@@ -698,7 +717,8 @@ class TextToVideoGenerator:
                 "audio_path": str(audio_mp3_path),
                 "video_path": str(video_final_path),
                 "output_directory": str(session_dir),
-                "sentence_count": len(sentences)
+                "sentence_count": len(sentences),
+                "background_music": enable_background_music and music_path is not None
             }
 
         except Exception as e:
@@ -708,7 +728,6 @@ class TextToVideoGenerator:
             return {"error": str(e), "success": False}
 
         finally:
-            # IMPROVED: Always cleanup temporary audio files
             for audio_path in audio_paths:
                 try:
                     audio_path.unlink(missing_ok=True)
@@ -724,10 +743,10 @@ def setup_ui(generator: TextToVideoGenerator):
                    .large-text textarea { font-size: 16px !important; }
                    .progress-bar { margin: 10px 0; }
                    """) as demo:
-        gr.Markdown("# 🎬 Text-to-Video Generator with Perfect Audio Sync")
+        gr.Markdown("# 🎬 Text-to-Video Generator with Background Music")
         gr.Markdown(
             "Convert your text into a video with **perfectly synchronized** audio, "
-            "**large readable text (50%+ coverage)**, and **dynamic backgrounds from Unsplash**. "
+            "**background music**, **large readable text (50%+ coverage)**, and **dynamic backgrounds from Unsplash**. "
             "Each sentence gets its own slide with precisely matched audio duration."
         )
 
@@ -752,6 +771,22 @@ def setup_ui(generator: TextToVideoGenerator):
                         value="#4A90E2"
                     )
 
+                gr.Markdown("### 🎵 Background Music Settings")
+                with gr.Row():
+                    enable_music = gr.Checkbox(
+                        label="Enable Background Music",
+                        value=True,
+                        info="Add background music from background_music/ folder"
+                    )
+                    music_volume = gr.Slider(
+                        minimum=-40,
+                        maximum=-5,
+                        value=-20,
+                        step=1,
+                        label="Music Volume (dB)",
+                        info="Lower values = quieter music (relative to voice)"
+                    )
+
                 gr.Markdown("### 🖼️ Unsplash Background Settings")
                 with gr.Row():
                     unsplash_keyword = gr.Textbox(
@@ -766,7 +801,6 @@ def setup_ui(generator: TextToVideoGenerator):
                         info="Get your free API key from unsplash.com/developers"
                     )
 
-                # IMPROVED: Progress indicator
                 progress_bar = gr.Textbox(
                     label="Progress",
                     value="Ready to generate...",
@@ -786,15 +820,26 @@ def setup_ui(generator: TextToVideoGenerator):
             "### 📖 How it works:\n"
             "1. Your text is split into sentences\n"
             "2. Audio is generated for each sentence individually\n"
-            "3. Each sentence gets its own slide with a **large, readable text (50%+ of image)**\n"
-            "4. Slides are shown for exactly as long as their audio plays\n"
-            "5. All slides are combined into one synchronized video\n\n"
-            "### ✨ Key Improvements:\n"
+            "3. Background music is mixed with voice audio (if enabled)\n"
+            "4. Each sentence gets its own slide with **large, readable text (50%+ of image)**\n"
+            "5. Slides are shown for exactly as long as their audio plays\n"
+            "6. All slides are combined into one synchronized video\n\n"
+            "### ✨ Key Features:\n"
+            "- **Background Music**: Add instrumental music at a lower volume\n"
             "- **Larger text**: Text now occupies at least 50% of the image area\n"
             "- **Smart font sizing**: Automatically finds the optimal font size and layout\n"
             "- **Better readability**: Enhanced shadows and contrast\n"
             "- **Progress tracking**: See real-time progress during generation\n"
             "- **Better error handling**: More robust with detailed error messages\n\n"
+            "### 🎵 Background Music Instructions:\n"
+            "1. Create a `background_music/` folder in the same directory as this script\n"
+            "2. Add your MP3 files to this folder\n"
+            "3. A random music file will be selected for each video\n"
+            "4. Music will loop if shorter than the voice audio\n"
+            "5. Music volume is automatically reduced (default: -20dB)\n"
+            "6. Adjust the music volume slider to make it louder or quieter\n"
+            "7. Music fades in at the start and fades out at the end\n\n"
+            "**Recommended:** Use instrumental music without vocals for best results\n\n"
             "### 🖼️ Background Image Priority:\n"
             "1. **Unsplash API** (if keyword and client ID provided)\n"
             "2. **Local images** from `background_images/` folder\n"
@@ -808,8 +853,9 @@ def setup_ui(generator: TextToVideoGenerator):
             "**Free tier:** 50 requests/hour"
         )
 
-        def generate_video_wrapper(text, speaker, bg_color_hex, keyword, client_id, progress=gr.Progress()):
-            """IMPROVED: Wrapper with progress tracking."""
+        def generate_video_wrapper(text, speaker, bg_color_hex, keyword, client_id,
+                                   enable_music, music_vol, progress=gr.Progress()):
+            """Wrapper with progress tracking."""
             if not text or not text.strip():
                 return None, None, "❌ Error: Please enter some text", "Ready to generate..."
 
@@ -817,7 +863,7 @@ def setup_ui(generator: TextToVideoGenerator):
             bg_color_hex = bg_color_hex.lstrip('#')
             bg_color = tuple(int(bg_color_hex[i:i + 2], 16) for i in (0, 2, 4))
 
-            # Clean up keyword
+            # Clean up keyword and client_id
             keyword = keyword.strip() if keyword else None
             client_id = client_id.strip() if client_id else None
 
@@ -832,13 +878,17 @@ def setup_ui(generator: TextToVideoGenerator):
 
             result = generator.generate_video(
                 text, speaker, bg_color, keyword, client_id,
+                enable_background_music=enable_music,
+                music_volume_db=music_vol,
                 progress_callback=update_progress
             )
 
             if result.get("success"):
+                music_status = "✓ With background music" if result.get("background_music") else "○ Voice only"
                 final_status = (
                     f"✅ Video created successfully!\n\n"
                     f"**Sentences processed:** {result['sentence_count']}\n\n"
+                    f"**Audio:** {music_status}\n\n"
                     f"**Output Directory:** `{result['output_directory']}`\n\n"
                     f"**Text Coverage:** Large text optimized for readability (50%+ of image)"
                 )
@@ -854,19 +904,21 @@ def setup_ui(generator: TextToVideoGenerator):
 
         generate_button.click(
             fn=generate_video_wrapper,
-            inputs=[text_input, speaker_dropdown, bg_color_picker, unsplash_keyword, unsplash_client_id],
+            inputs=[text_input, speaker_dropdown, bg_color_picker, unsplash_keyword,
+                   unsplash_client_id, enable_music, music_volume],
             outputs=[audio_output, video_output, status_output, progress_bar]
         )
 
-        # IMPROVED: Add example
+        # Add examples
         gr.Examples(
             examples=[
                 ["Welcome to our presentation. Today we will explore the future of technology. Artificial intelligence is transforming our world. Let's discover what's possible together.",
-                 "Standard Voice (Non-Cloned)", "#4A90E2", "technology", ""],
+                 "Standard Voice (Non-Cloned)", "#4A90E2", "technology", "", True, -20],
                 ["The ocean is a vast and mysterious place. It covers over seventy percent of Earth's surface. Marine life is incredibly diverse. Conservation efforts are critical for our future.",
-                 "Standard Voice (Non-Cloned)", "#1E3A8A", "ocean", ""],
+                 "Standard Voice (Non-Cloned)", "#1E3A8A", "ocean", "", True, -20],
             ],
-            inputs=[text_input, speaker_dropdown, bg_color_picker, unsplash_keyword, unsplash_client_id],
+            inputs=[text_input, speaker_dropdown, bg_color_picker, unsplash_keyword,
+                   unsplash_client_id, enable_music, music_volume],
             label="📝 Example Texts"
         )
 
@@ -878,17 +930,23 @@ if __name__ == "__main__":
         print("\n❌ Missing required libraries. Please install:")
         print("pip install TTS speechbrain pydub moviepy Pillow num2words torch torchaudio gradio requests")
     else:
-        print("\n🎬 Starting Enhanced Text-to-Video Generator...")
-        print("=" * 70)
-        print("IMPROVEMENTS:")
-        print("  ✓ Text now occupies 50%+ of image area")
+        print("\n🎬 Starting Enhanced Text-to-Video Generator with Background Music...")
+        print("=" * 80)
+        print("FEATURES:")
+        print("  ✓ Background music support with volume mixing")
+        print("  ✓ Text occupies 50%+ of image area")
         print("  ✓ Smart font sizing algorithm")
         print("  ✓ Better readability with enhanced shadows")
         print("  ✓ Progress tracking during generation")
         print("  ✓ Improved error handling and validation")
         print("  ✓ Cache management for Unsplash images")
         print("  ✓ Configurable text sizing parameters")
-        print("=" * 70)
+        print("=" * 80)
+        print("\n📁 Required Folders:")
+        print("  • background_music/ - Add your MP3 files here for background music")
+        print("  • background_images/ - Add images for backgrounds (optional)")
+        print("  • voice_samples/ - Add voice samples for cloning (optional)")
+        print("=" * 80)
         print()
         generator = TextToVideoGenerator()
         setup_ui(generator)
