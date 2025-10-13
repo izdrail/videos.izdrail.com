@@ -35,4 +35,4 @@ prod:
 down:
 	docker-compose -f $(DOCKER_COMPOSE_FILE) down
 ssh:
-	docker exec -it video.izdrail.com /bin/bash
+	docker exec -it videos.izdrail.com /bin/bash
