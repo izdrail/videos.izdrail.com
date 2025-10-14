@@ -84,7 +84,6 @@ class KeywordExtractor:
         for ent in doc.ents:
             if ent.label_ in {'GPE', 'LOC', 'EVENT', 'WORK_OF_ART'}:
                 candidates.append(ent.text.lower())
-            # Skip ORG/PRODUCT
 
         keyword_freq = Counter(candidates)
         return [word for word, count in keyword_freq.most_common(top_n)]
@@ -346,6 +345,7 @@ class VideoGenerator:
         self.config = config
         self.font_path = self._discover_fonts()
         self.pexels = PexelsAPI()
+        self.keyword_extractor = KeywordExtractor()
 
     def _discover_fonts(self) -> str:
         font_paths = []
@@ -388,7 +388,7 @@ class VideoGenerator:
         return "DejaVuSans"
 
     def _try_keywords_for_video(self, sentence: str) -> Optional[Path]:
-        candidates = self.keyword_extractor.get_keyword_candidates(sentence, top_n=5)
+        candidates = self.keyword_extractor.extract_keywords(sentence, top_n=5)
         for kw in candidates:
             print(f"[Pexels] Trying keyword: '{kw}' for sentence")
             video_path = self.pexels.get_random_video(kw, self.config.VIDEO_SIZE)
@@ -682,6 +682,7 @@ class TextToVideoGenerator:
                        enable_background_music: bool = True,
                        music_volume_db: int = -15,
                        add_call_to_action: bool = True,
+                       use_random_voices: bool = False,
                        progress_callback=None) -> Dict:
         if not text or not text.strip():
             return {"error": "Text cannot be empty", "success": False}
@@ -716,13 +717,27 @@ class TextToVideoGenerator:
         try:
             if enable_background_music:
                 music_path = self.video_generator.get_random_background_music()
-            for i, sentence in enumerate(sentences):
+
+            # Generate random voices for each sentence if enabled
+            if use_random_voices:
+                voices_for_sentences = [random.choice(self.available_voices) for _ in sentences]
+                print(f"[Voice] Using random voices per sentence")
+                for i, voice in enumerate(voices_for_sentences):
+                    print(f"[Voice] Sentence {i+1}: {voice}")
+            else:
+                voices_for_sentences = [speaker_id] * len(sentences)
+
+            for i, (sentence, voice) in enumerate(zip(sentences, voices_for_sentences)):
                 if progress_callback:
-                    progress_callback(i + 1, len(sentences) * 2, f"Audio {i + 1}/{len(sentences)}")
-                audio_path = self.tts_manager.generate_speech(sentence, speaker_id)
+                    voice_name = voice if len(voice) < 30 else voice[:27] + "..."
+                    progress_callback(i + 1, len(sentences) * 2, f"Audio {i + 1}/{len(sentences)} ({voice_name})")
+                audio_path = self.tts_manager.generate_speech(sentence, voice)
                 audio_paths.append(audio_path)
+
+            # Use the last voice or the selected speaker_id for CTA
             if add_call_to_action:
-                cta_audio_path = self.tts_manager.generate_speech(self.config.CTA_MESSAGE, speaker_id)
+                cta_voice = speaker_id if not use_random_voices else voices_for_sentences[-1]
+                cta_audio_path = self.tts_manager.generate_speech(self.config.CTA_MESSAGE, cta_voice)
 
             def video_progress(current, total, message):
                 if progress_callback:
@@ -802,6 +817,8 @@ class TextToVideoGenerator:
                 "video_format": "9:16 Portrait (1080x1920)",
                 "text_colors": "Random vibrant colors",
                 "video_backgrounds": "Pexels API" if pexels_api_key else "Local videos",
+                "random_voices": use_random_voices,
+                "voices_used": voices_for_sentences if use_random_voices else None,
             }
         except Exception as e:
             print(f"[Error] Video generation failed: {e}")
@@ -823,19 +840,19 @@ class TextToVideoGenerator:
 
 def setup_ui(generator: TextToVideoGenerator):
     with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"),
-                   title="Portrait Video Generator with Per-Sentence Keywords") as demo:
-        gr.Markdown("# 🎥 Portrait Video Generator (9:16) with Per-Sentence Keywords")
-        gr.Markdown("Each sentence gets its own keyword, background, and **perfect audio sync**!")
+                   title="Portrait Video Generator with Random Voices") as demo:
+        gr.Markdown("# 🎥 Portrait Video Generator (9:16) with Random Voices Per Sentence")
+        gr.Markdown("Each sentence gets its own keyword, background, voice, and **perfect audio sync**!")
         with gr.Row():
             with gr.Column():
                 text_input = gr.Textbox(
                     label="Enter Your Text",
-                    placeholder="Each sentence → unique keyword → perfect sync!",
+                    placeholder="Each sentence → unique keyword & voice → perfect sync!",
                     lines=8
                 )
                 with gr.Row():
                     speaker_dropdown = gr.Dropdown(
-                        label="Voice",
+                        label="Voice (used when Random Voices disabled)",
                         choices=generator.available_voices,
                         value=generator.config.STANDARD_VOICE_NAME
                     )
@@ -845,6 +862,11 @@ def setup_ui(generator: TextToVideoGenerator):
                     )
                 enable_cta = gr.Checkbox(label="Add Call-to-Action Slide", value=True)
                 enable_music = gr.Checkbox(label="Enable Background Music", value=True)
+                use_random_voices = gr.Checkbox(
+                    label="🎙️ Use Random Voice Per Sentence",
+                    value=False,
+                    info="Each sentence will use a different random voice from available voices"
+                )
                 music_volume = gr.Slider(-40, -5, value=-15, step=1, label="Music Volume (dB)")
                 with gr.Row():
                     pexels_keyword = gr.Textbox(
@@ -864,7 +886,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 status_output = gr.Markdown()
 
         def generate_wrapper(text, speaker, bg_hex, keyword, api_key,
-                             enable_music, music_vol, enable_cta, progress=gr.Progress()):
+                             enable_music, music_vol, enable_cta, random_voices, progress=gr.Progress()):
             if not text or not text.strip():
                 return None, None, "❌ Error: Please enter some text", "Ready..."
             bg_hex = bg_hex.lstrip('#')
@@ -884,15 +906,25 @@ def setup_ui(generator: TextToVideoGenerator):
                 enable_background_music=enable_music,
                 music_volume_db=music_vol,
                 add_call_to_action=enable_cta,
+                use_random_voices=random_voices,
                 progress_callback=update_progress
             )
             if result.get("success"):
+                voices_info = ""
+                if result.get('random_voices') and result.get('voices_used'):
+                    voices_list = result['voices_used']
+                    voices_summary = ', '.join([v[:20] + '...' if len(v) > 20 else v for v in voices_list[:5]])
+                    if len(voices_list) > 5:
+                        voices_summary += f" ... ({len(voices_list)} total)"
+                    voices_info = f"\n- Voices Used: {voices_summary}"
+
                 status = f"""✅ **Video Created Successfully!**
 **Details:**
 - Sentences: {result['sentence_count']}
 - Format: {result['video_format']}
 - Background Music: {'Yes' if result['background_music'] else 'No'}
 - CTA Slide: {'Yes' if result['cta_included'] else 'No'}
+- Random Voices: {'Yes' if result.get('random_voices') else 'No'}{voices_info}
 - Output: `{result['output_directory']}`
 """
                 return result["audio_path"], result["video_path"], status, "✅ Complete!"
@@ -902,7 +934,7 @@ def setup_ui(generator: TextToVideoGenerator):
         generate_button.click(
             fn=generate_wrapper,
             inputs=[text_input, speaker_dropdown, bg_color_picker, pexels_keyword,
-                    pexels_api_key, enable_music, music_volume, enable_cta],
+                    pexels_api_key, enable_music, music_volume, enable_cta, use_random_voices],
             outputs=[audio_output, video_output, status_output, progress_bar]
         )
         gr.Markdown("""
@@ -911,7 +943,11 @@ def setup_ui(generator: TextToVideoGenerator):
         - Each slide uses **its own TTS audio** → no drift
         - Background music added **after video assembly**
         - Per-sentence keywords for relevant visuals
-        """)
+        - **NEW**: Random voice per sentence for maximum variety!
+
+        ### 🎙️ Available Voices: {}
+        Add more voices by creating folders in `voice_samples/` with a `reference.wav` file.
+        """.format(len(generator.available_voices)))
 
     demo.launch(server_name="0.0.0.0", server_port=1602, share=False)
 
@@ -920,10 +956,10 @@ if __name__ == "__main__":
     if not MODELS_AVAILABLE:
         print("\n❌ Missing required libraries. Please install:")
         print("pip install TTS speechbrain pydub moviepy Pillow num2words torch torchaudio gradio requests spacy")
-        print("python -m spacy download en_core_web_sm")
+        print("python -m spacy download en_core_web_md")
     else:
         print("\n" + "=" * 80)
-        print("🎥 PORTRAIT VIDEO GENERATOR WITH PER-SENTENCE KEYWORDS & PERFECT SYNC")
+        print("🎥 PORTRAIT VIDEO GENERATOR WITH RANDOM VOICES & PERFECT SYNC")
         print("=" * 80)
         if SPACY_AVAILABLE:
             print("✅ spaCy NLP: Enabled")
@@ -932,4 +968,8 @@ if __name__ == "__main__":
         print("\nStarting application...")
         print("=" * 80 + "\n")
         generator = TextToVideoGenerator()
+        print(f"🎙️ Available voices: {len(generator.available_voices)}")
+        for voice in generator.available_voices:
+            print(f"   - {voice}")
+        print()
         setup_ui(generator)
