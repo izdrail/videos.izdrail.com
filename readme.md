@@ -125,8 +125,12 @@ python main.py
 Then open:
 
 ```
-http://localhost:1602
+http://localhost:1602  # Main video generator
+http://localhost:1603  # Slides generator
+http://localhost:1604  # Meme generator
 ```
+
+> **Note:** Port `11434` is also exposed for Ollama API integration.
 
 ---
 
