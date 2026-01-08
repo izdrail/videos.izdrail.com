@@ -122,7 +122,6 @@ project_root/
 ├── output/                   # Generated videos & audio
 ├── main.py                   # Main video generator
 ├── slides-main.py            # Slides video generator
-└── meme-main.py              # Meme video generator
 ```
 
 ---
@@ -140,7 +139,6 @@ Then open:
 ```
 http://localhost:1602  # Main video generator
 http://localhost:1603  # Slides generator
-http://localhost:1604  # Meme generator
 ```
 
 > **Note:** Port `11434` is also exposed for Ollama API integration.
@@ -196,7 +194,7 @@ The codebase has been refactored following SOLID principles to improve maintaina
 - ✅ **Massive code de-duplication**: Reduced footprint by ~1,500 lines
 - ✅ **Improved maintainability** with single source of truth in `core/`
 - ✅ **Better testability** with modularized components
-- ✅ **Consistent behavior** across all three generators
+- ✅ **Consistent behavior** across all generators
 
 ---
 

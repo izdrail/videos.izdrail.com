@@ -42,11 +42,11 @@ RUN apt-get update && apt-get upgrade -y && \
 COPY requirements.txt .
 
 RUN python3 -m venv /opt/venv && \
-    . /opt/venv/bin/activate && \
-    pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt kokoro soundfile && \
-    pip install --no-cache-dir torch torchvision torchaudio && \
-    pip install --no-cache-dir safetensors
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt kokoro soundfile && \
+    /opt/venv/bin/pip install --no-cache-dir torch torchvision torchaudio && \
+    /opt/venv/bin/pip install --no-cache-dir safetensors && \
+    rm -rf /root/.cache/pip
 
 # ========================================
 # Pre-download models (XTTS, SpeechBrain)

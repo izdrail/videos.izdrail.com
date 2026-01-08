@@ -14,7 +14,6 @@ services:
     ports:
       - '1602:1602'
       - '1603:1603'
-      - '1604:1604'
       - '11434:11434'
     environment:
       WWWUSER: '${WWWUSER}'
