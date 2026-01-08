@@ -1,0 +1,27 @@
+.idea
+.env
+
+# Generated outputs
+output/
+backup_output/
+temp/
+generated_images_cache/
+sd_generated_images/
+tmpdir_tts/
+tmpdir_vocoder/
+background_videos/
+background_images/
+background_music/
+voice_samples/
+
+# Logs and caches
+*.log
+generation_cache.db
+__pycache__/
+venv/
+.venv/
+
+# Root level temporary files
+/*.mp4
+/*.png
+/*.wav

@@ -1,0 +1,31 @@
+version: '3.9'
+services:
+  videos.izdrail.com:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        WWWUSER: '${WWWUSER:-1000}'
+        WWWGROUP: '${WWWGROUP:-1001}'
+    image: izdrail/videos.izdrail.com
+    container_name: videos.izdrail.com
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    ports:
+      - '1602:1602'
+      - '1603:1603'
+      - '1604:1604'
+      - '11434:11434'
+    environment:
+      WWWUSER: '${WWWUSER}'
+      WWWGROUP: '${WWWGROUP}'
+      LARAVEL_SAIL: 1
+      IGNITION_LOCAL_SITES_PATH: '${PWD}'
+    volumes:
+      - '.:/app'
+    networks:
+      - sail
+
+networks:
+  sail:
+    driver: bridge
