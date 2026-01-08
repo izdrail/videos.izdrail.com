@@ -47,3 +47,4 @@ moviepy
 diffusers==0.30
 accelerate
 yt-dlp
+torchcodec

@@ -99,6 +99,15 @@ export PEXELS_API_KEY="your_api_key_here"
 
 ```plaintext
 project_root/
+├── core/                     # 🆕 Shared core modules (SOLID refactoring)
+│   ├── config.py             # Centralized configuration
+│   ├── database.py           # TTS & video caching
+│   ├── utils/
+│   │   └── pytorch_compat.py # PyTorch 2.6+ compatibility
+│   ├── media/                # Media API clients (coming soon)
+│   ├── nlp/                  # Keyword extraction (coming soon)
+│   ├── ai/                   # AI components (coming soon)
+│   └── tts/                  # TTS management (coming soon)
 ├── background_images/        # Local fallback images (optional)
 ├── background_videos/        # Local fallback videos
 ├── background_music/         # Music tracks (.mp3/.wav)
@@ -109,7 +118,9 @@ project_root/
 │       └── reference.wav
 ├── temp/                     # Temporary files
 ├── output/                   # Generated videos & audio
-└── main.py                   # Entry script (contains UI + logic)
+├── main.py                   # Main video generator
+├── slides-main.py            # Slides video generator
+└── meme-main.py              # Meme video generator
 ```
 
 ---
@@ -163,6 +174,27 @@ http://localhost:1604  # Meme generator
     * Background music + CTA slide added
 
 Result: 🔥 A ready-to-upload TikTok/YouTube Short!
+
+---
+
+## 🏗️ Architecture & Code Quality
+
+### SOLID Principles Refactoring
+
+The codebase has been refactored following SOLID principles to improve maintainability and reduce code duplication:
+
+- **Single Responsibility**: Each module has one clear purpose
+- **DRY (Don't Repeat Yourself)**: Shared components extracted to `core/` modules
+- **Centralized Configuration**: All apps use unified `Config` class
+- **Unified Caching**: Single `GenerationDB` for all TTS and video caching
+- **PyTorch Compatibility**: Centralized PyTorch 2.6+ secure loading setup
+
+### Benefits
+
+- ✅ **Reduced code duplication** by ~200+ lines
+- ✅ **Improved maintainability** with single source of truth
+- ✅ **Better testability** with modular components
+- ✅ **Consistent behavior** across all three generators
 
 ---
 
