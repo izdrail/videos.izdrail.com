@@ -10,802 +10,67 @@ import sqlite3
 import hashlib
 import numpy as np
 import traceback
+import threading
+import textwrap
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
-import torch
-import threading
-import torchaudio
 
-# Fix for PyTorch 2.6+ secure loading - comprehensive TTS allowlist
-try:
-    from TTS.tts.configs.xtts_config import XttsConfig
-    from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
-    from TTS.config.shared_configs import BaseDatasetConfig
-    from TTS.tts.configs.shared_configs import BaseAudioConfig
-    torch.serialization.add_safe_globals([
-        XttsConfig, XttsAudioConfig, XttsArgs, 
-        BaseDatasetConfig, BaseAudioConfig
-    ])
-except ImportError as e:
-    print(f"[WARNING] Could not import TTS classes for PyTorch allowlist: {e}")
+import torch
+import torchaudio
 import gradio as gr
 from moviepy.editor import (
-    AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
-    concatenate_videoclips, ColorClip, vfx, ImageSequenceClip
+    AudioFileClip, ImageSequenceClip, ImageClip, VideoFileClip, CompositeVideoClip,
+    concatenate_videoclips, ColorClip, vfx
 )
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 from pydub import AudioSegment
 from pydub.effects import normalize, low_pass_filter
 from num2words import num2words
-import textwrap
 from dotenv import load_dotenv
+
+# Import core modules
+from core.utils.pytorch_compat import setup_pytorch_security
+from core.config import Config
+from core.database import GenerationDB
+from core.media.manager import MediaManager
+from core.nlp.keyword_extractor import KeywordExtractor
+from core.ai.stable_diffusion import StableDiffusionManager, SD_AVAILABLE
+from core.tts.manager import TTSManager
+from core.utils.audio import improve_audio_quality, remove_metallic_artifacts
+
+# Global setups
+setup_pytorch_security()
+load_dotenv()
 
 # Enforce CPU globally
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 torch.backends.cudnn.enabled = False
-torch.set_num_threads(4)  # Optional: limit CPU threads
-load_dotenv()
-
-# Stable Diffusion imports
-try:
-    from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
-    SD_AVAILABLE = True
-except ImportError:
-    print("[SD] Stable Diffusion not available. Install with: pip install diffusers transformers accelerate")
-    SD_AVAILABLE = False
-
-# Spacy AI API Configuration
-SPACY_AVAILABLE = True # Always True since we use external API
-nlp = None # No local NLP object needed
+torch.set_num_threads(4)
 
 # Fix PIL.ANTIALIAS deprecation
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
 
-try:
-    from speechbrain.pretrained import HIFIGAN, Tacotron2
-    from TTS.api import TTS
-    MODELS_AVAILABLE = True
-except ImportError as e:
-    print(f"TTS libraries not found: {e}")
-    MODELS_AVAILABLE = False
-
-# =============== DATABASE SETUP ===============
-class GenerationDB:
-    def __init__(self, db_path: Path = Path("generation_cache.db")):
-        self.db_path = db_path
-        self.init_db()
-        self.lock = threading.Lock()
-    
-    def init_db(self):
-        # Ensure directory exists for db
-        if not self.db_path.parent.exists():
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Check if tts_cache table exists
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tts_cache'")
-            table_exists = cursor.fetchone() is not None
-            
-            speaker_id_exists = False
-            if table_exists:
-                # Check columns using PRAGMA
-                cursor.execute("PRAGMA table_info(tts_cache)")
-                columns = [info[1] for info in cursor.fetchall()]
-                speaker_id_exists = 'speaker_id' in columns
-                
-                if not speaker_id_exists:
-                    print("[DB] Schema mismatch: 'speaker_id' missing in tts_cache. Recreating table...")
-                    cursor.execute("DROP TABLE tts_cache")
-                    conn.commit() # Ensure drop is committed before creating
-            
-            # Create tables
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS tts_cache (
-                    text_hash TEXT PRIMARY KEY,
-                    speaker_id TEXT NOT NULL,
-                    audio_path TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS video_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    input_hash TEXT UNIQUE,
-                    video_path TEXT,
-                    audio_path TEXT,
-                    output_dir TEXT,
-                    sentence_count INTEGER,
-                    created_at TEXT
-                )
-            """)
-            conn.commit()
-    
-    def get_cached_tts(self, text: str, speaker_id: str) -> Optional[Path]:
-        text_hash = hashlib.sha256(f"{text}_{speaker_id}".encode()).hexdigest()
-        with self.lock, sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                "SELECT audio_path FROM tts_cache WHERE text_hash = ? AND speaker_id = ?",
-                (text_hash, speaker_id)
-            )
-            row = cur.fetchone()
-            if row and Path(row[0]).exists():
-                return Path(row[0])
-        return None
-
-    def save_tts(self, text: str, speaker_id: str, audio_path: Path):
-        text_hash = hashlib.sha256(f"{text}_{speaker_id}".encode()).hexdigest()
-        with self.lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO tts_cache (text_hash, speaker_id, audio_path, created_at) VALUES (?, ?, ?, ?)",
-                (text_hash, speaker_id, str(audio_path), datetime.now().isoformat())
-            )
-    
-    def get_cached_video(self, input_params: Dict) -> Optional[Dict]:
-        param_str = "|".join(str(v) for k, v in sorted(input_params.items()) if k not in {'progress_callback'})
-        input_hash = hashlib.sha256(param_str.encode()).hexdigest()
-        with self.lock, sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                "SELECT video_path, audio_path, output_dir, sentence_count FROM video_logs WHERE input_hash = ?",
-                (input_hash,)
-            )
-            row = cur.fetchone()
-            if row and all(Path(p).exists() for p in row[:2] if p):
-                return {
-                    "video_path": row[0],
-                    "audio_path": row[1],
-                    "output_directory": row[2],
-                    "sentence_count": row[3],
-                    "success": True
-                }
-        return None
-
-    def save_video(self, input_params: Dict, result: Dict):
-        param_str = "|".join(str(v) for k, v in sorted(input_params.items()) if k not in {'progress_callback'})
-        input_hash = hashlib.sha256(param_str.encode()).hexdigest()
-        with self.lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO video_logs
-                (input_hash, video_path, audio_path, output_dir, sentence_count, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    input_hash,
-                    result.get("video_path"),
-                    result.get("audio_path"),
-                    result.get("output_directory"),
-                    result.get("sentence_count", 0),
-                    datetime.now().isoformat()
-                )
-            )
-
 # Initialize global DB
 DB = GenerationDB()
+
+# DATABASE Setup handled by core.database
 
 # =============== MEDIA SOURCE CACHE ===============
 _media_source_cache = {}
 _used_keywords = set()
 
-# =============== STABLE DIFFUSION MANAGER (CPU ONLY) ===============
-class StableDiffusionManager:
-    def __init__(self, model_path: str = "/models/stable-diffusion-v1-5", device: str = "cpu"):
-        self.model_path = model_path
-        self.device = "cpu"  # Enforce CPU
-        self.pipe = None
-        self.generation_cache = {}
-        self.cache_dir = Path("sd_generated_images")
-        self.cache_dir.mkdir(exist_ok=True)
-        self.lock = threading.Lock()
-        print(f"[SD] Initializing Stable Diffusion on {self.device}...")
-        self._load_model()
-    
-    def _load_model(self):
-        try:
-            self.pipe = StableDiffusionPipeline.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.float32,
-                safety_checker=None
-            ).to(self.device)
-            print("[SD] Model loaded successfully on CPU.")
-        except Exception as e:
-            print(f"[SD] Failed to load model from {self.model_path}: {e}")
-            self.pipe = None
-    
-    def create_prompt(self, sentence: str, keyword: Optional[str] = None) -> str:
-        if keyword:
-            return f"high quality cinematic photo of {keyword}, inspired by '{sentence}', ultra-detailed, 4k lighting"
-        return f"high quality cinematic photo inspired by '{sentence}', ultra-detailed, 4k lighting"
-    
-    def generate_image(
-        self,
-        sentence: str,
-        keyword: Optional[str] = None,
-        size: Tuple[int, int] = (1080, 1920)
-    ) -> Optional[Path]:
-        if not self.pipe:
-            print("[SD] Model not loaded, cannot generate image.")
-            return None
-        cache_key = f"{keyword}_{hash(sentence)}" if keyword else f"{hash(sentence)}"
-        if cache_key in self.generation_cache:
-            cached_path = self.generation_cache[cache_key]
-            if cached_path.exists():
-                print(f"[SD] Using cached image for: {keyword or sentence[:40]}...")
-                return cached_path
-        print(f"[SD] Generating image for: {keyword or sentence[:60]}...")
-        prompt = self.create_prompt(sentence, keyword)
-        negative_prompt = "blurry, low quality, distorted, ugly, bad anatomy, watermark, text, signature"
-        width, height = 360, 768
-        num_inference_steps = 25  # Reduce for CPU
-        guidance_scale = 7.5
-        with self.lock:
-            try:
-                with torch.no_grad():
-                    result = self.pipe(
-                        prompt=prompt,
-                        negative_prompt=negative_prompt,
-                        num_inference_steps=num_inference_steps,
-                        guidance_scale=guidance_scale,
-                        width=width,
-                        height=height,
-                    )
-            except Exception as e:
-                print(f"[SD] Generation error: {e}")
-                return None
-        image = result.images[0].resize(size, Image.LANCZOS)
-        output_path = self.cache_dir / f"sd_{cache_key}_{uuid.uuid4().hex[:8]}.png"
-        image.save(output_path, "PNG", quality=95)
-        self.generation_cache[cache_key] = output_path
-        print(f"[SD] Image generated and saved: {output_path}")
-        return output_path
+# Stable Diffusion handled by core.ai
 
-# =============== OLLAMA KEYWORD EXTRACTOR ===============
-class OllamaKeywordExtractor:
-    def __init__(self, model: str = "gemma3:270m"):
-        self.model = model
-        self.url = os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate")
-        self.cache = {}
-        print(f"[Ollama] Using model: {self.model} at {self.url}")
-    
-    def extract_keywords(self, text: str, top_n: int = 5) -> List[str]:
-        cache_key = f"{text[:100]}_{top_n}"
-        if cache_key in self.cache:
-            return self.cache[cache_key]
-        prompt = (
-            f"Extract up to {top_n} relevant, concrete, visual keywords from this sentence. "
-            "Return only a comma-separated list of lowercase words or short phrases (max 3 words each). "
-            "Avoid abstract concepts, stop words, or brand names.\n"
-            f"Sentence: \"{text}\"\nKeywords:"
-        )
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.3, "num_predict": 64}
-        }
-        try:
-            response = requests.post(self.url, json=payload, timeout=20)
-            if response.status_code == 200:
-                raw = response.json().get("response", "").strip()
-                keywords = [kw.strip() for kw in raw.split(",") if kw.strip()]
-                result = keywords[:top_n]
-                self.cache[cache_key] = result
-                return result
-        except Exception as e:
-            print(f"[Ollama] Error: {e}")
-        return []
+# Keyword Extraction handled by core.nlp
 
-class KeywordExtractor:
-    def __init__(self):
-        self.ollama_extractor = OllamaKeywordExtractor()
-        self.nlp = nlp if SPACY_AVAILABLE else None
-        self.relevant_pos = {'NOUN', 'PROPN', 'ADJ'}
-        self.exclude_words = {
-            'thing', 'things', 'something', 'someone', 'way', 'time', 'day',
-            'year', 'week', 'month', 'people', 'person', 'place', 'lot',
-            'vodafone', 'apple', 'samsung', 'google', 'microsoft', 'amazon',
-            'facebook', 'meta', 'tesla', 'nike', 'adidas', 'coca-cola', 'pepsi'
-        }
-    
-    def extract_keywords(self, text: str, top_n: int = 5) -> List[str]:
-        ollama_keywords = self.ollama_extractor.extract_keywords(text, top_n)
-        if ollama_keywords:
-            return ollama_keywords
-        
-        if not text.strip():
-            return []
+# Config and APIs handled by core.config and core.media
 
-        # Use external Spacy API
-        spacy_url = os.getenv("SPACY_API_URL", "https://spacy.izdrail.com")
-        try:
-            # 1. Try POS tagging
-            pos_resp = requests.post(f"{spacy_url}/pos", json={"text": text.lower()}, timeout=10)
-            candidates = []
-            if pos_resp.status_code == 200:
-                data = pos_resp.json() # Assuming the API returns a list of token dicts
-                for token in data:
-                    pos = token.get('pos')
-                    word = token.get('text')
-                    is_stop = token.get('is_stop', False)
-                    if (pos in self.relevant_pos and 
-                        not is_stop and 
-                        len(word) > 2 and 
-                        word.isalpha() and 
-                        word not in self.exclude_words):
-                        candidates.append(word)
-
-            # 2. Try NER
-            ner_resp = requests.post(f"{spacy_url}/ner", json={"sections": [text.lower()]}, timeout=10)
-            if ner_resp.status_code == 200:
-                # API seems to return result based on common fastapi-spacy patterns
-                # Based on /ner summary "Recognize Named Entities"
-                ner_data = ner_resp.json()
-                if isinstance(ner_data, list) and len(ner_data) > 0:
-                    entities = ner_data[0].get('entities', [])
-                    for ent in entities:
-                        if ent.get('label') in {'GPE', 'LOC', 'EVENT', 'WORK_OF_ART'}:
-                            candidates.append(ent.get('text').lower())
-
-            if not candidates:
-                return []
-                
-            keyword_freq = Counter(candidates)
-            return [word for word, count in keyword_freq.most_common(top_n)]
-        except Exception as e:
-            print(f"[NLP] External API error: {e}")
-            return []
-    
-    def get_best_unique_keyword(self, text: str) -> Optional[str]:
-        global _used_keywords
-        keywords = self.extract_keywords(text, top_n=10)
-        for kw in keywords:
-            if kw not in _used_keywords:
-                _used_keywords.add(kw)
-                return kw
-        if keywords:
-            return keywords[0]
-        return None
-    
-    def sanitize_keyword(self, keyword: str) -> Optional[str]:
-        """Clean keyword for API: remove bullets, newlines, extra spaces."""
-        if not keyword:
-            return None
-        keyword = re.sub(r'[\*\-•]|\n', '', keyword)  # Remove bullets/newlines
-        keyword = re.sub(r'\s+', ' ', keyword).strip()  # Normalize spaces
-        keyword = ' '.join(keyword.split()[:4])  # Keep first 4 words
-        return keyword if len(keyword) > 2 else None
-
-# =============== CONFIG ===============
-class Config:
-    def __init__(self):
-        self.ROOT_DIR = Path(__file__).parent
-        self.VOICE_SAMPLES_DIR = self.ROOT_DIR / "voice_samples"
-        self.IMAGES_DIR = self.ROOT_DIR / "background_images"
-        self.VIDEOS_DIR = self.ROOT_DIR / "background_videos"
-        self.MUSIC_DIR = self.ROOT_DIR / "background_music"
-        self.TEMP_DIR = self.ROOT_DIR / "temp"
-        self.OUTPUT_DIR = self.ROOT_DIR / "output"
-        self.SD_MODEL_DIR = self.ROOT_DIR / "models" / "stable-diffusion-v1-5"
-        self.VIDEO_OVERLAYS_DIR = self.ROOT_DIR / "video-overlays"
-        for dir_path in [self.VOICE_SAMPLES_DIR, self.IMAGES_DIR, self.VIDEOS_DIR,
-                         self.MUSIC_DIR, self.TEMP_DIR, self.OUTPUT_DIR, self.VIDEO_OVERLAYS_DIR]:
-            dir_path.mkdir(exist_ok=True)
-        self.STANDARD_VOICE_NAME = "Standard Voice (Non-Cloned)"
-        self.DEVICE = "cpu"  # Enforced CPU
-        os.environ["COQUI_TOS_AGREED"] = "1"
-        self.INTRO_MESSAGE = "Welcome to our channel!"
-        self.CTA_MESSAGE = "Like, share, and subscribe to our channel!"
-        self.VIDEO_WIDTH = 1080
-        self.VIDEO_HEIGHT = 1920
-        self.VIDEO_SIZE = (self.VIDEO_WIDTH, self.VIDEO_HEIGHT)
-        self.TEXT_SIZE_CONFIG = {
-            'font_size': 50,
-            'line_spacing': 1.2,
-            'max_width': 900,
-            'bottom_margin': 150,
-        }
-        self.LOGO_CONFIG = {
-            'max_width': 100,
-            'max_height': 100,
-            'position': 'top-left',
-            'margin': 30,
-            'opacity': 0.9,
-        }
-        self.CIRCLE_OVERLAY_CONFIG = {
-            'diameter': 300,
-            'position': 'top-right',
-            'margin': 50,
-            'border_width': 5,
-            'border_color': (255, 255, 255),
-            'opacity': 1.0,
-        }
-        self.TRANSITION_CONFIG = {
-            'duration': 0.5,
-        }
-        self.MUSIC_CONFIG = {
-            'voice_volume_db': 0,
-            'music_volume_db': -5,
-            'fade_in_duration': 1000,
-            'fade_out_duration': 1000,
-            'crossfade_duration': 500,
-        }
-        self.AUDIO_QUALITY_CONFIG = {
-            'sample_rate': 22050,
-            'low_pass_cutoff': 6000,
-            'normalize_audio': True,
-            'remove_silence_threshold': -40,
-            'apply_compression': True,
-            'high_pass_cutoff': 80,
-            'apply_warmth': True,
-            'reduce_sibilance': True,
-        }
-        self.MAX_PARALLEL_SLIDES = 3  # Reduce for CPU
-        self.MIXED_MODE_SD_RATIO = 0.2
-        self.VIDEO_PRESET = 'ultrafast'
-        self.VIDEO_CRF = 28
-
-# =============== APIs (Giphy, Pexels) ===============
-class GiphyAPI:
-    def __init__(self):
-        self.base_url = "https://api.giphy.com/v1/gifs/search"
-        self.api_key = os.getenv("GIPHY_API_KEY")
-        self.download_cache = {}
-        self.search_cache = {}
-        self.cache_limit = 30
-
-    def _manage_cache(self):
-        if len(self.download_cache) > self.cache_limit:
-            items_to_remove = len(self.download_cache) - self.cache_limit
-            for key in list(self.download_cache.keys())[:items_to_remove]:
-                del self.download_cache[key]
-
-    def search_gif(self, query: str, rating: str = "g", limit: int = 5) -> Optional[str]:
-        if not self.api_key:
-            print("[GIPHY] GIPHY_API_KEY not set in environment.")
-            return None
-        # Sanitize query before using
-        query = re.sub(r'[\*\-•]|\n', '', query)
-        query = re.sub(r'\s+', ' ', query).strip()[:50]
-        
-        cache_key = f"{query}_{rating}_{limit}"
-        if cache_key in self.search_cache:
-            gifs = self.search_cache[cache_key]
-            if gifs:
-                gif = random.choice(gifs)
-                mp4_url = gif.get("images", {}).get("original_mp4", {}).get("mp4")
-                if mp4_url:
-                    return mp4_url
-                gif_url = gif.get("images", {}).get("original", {}).get("url")
-                if gif_url and gif_url.endswith(".gif"):
-                    return gif_url
-        params = {"api_key": self.api_key, "q": query, "limit": limit, "rating": rating, "lang": "en"}
-        try:
-            response = requests.get(self.base_url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            gifs = data.get("data", [])
-            if gifs:
-                self.search_cache[cache_key] = gifs
-            if not gifs:
-                return None
-            for gif in gifs:
-                mp4_url = gif.get("images", {}).get("original_mp4", {}).get("mp4")
-                if mp4_url:
-                    return mp4_url
-                gif_url = gif.get("images", {}).get("original", {}).get("url")
-                if gif_url and gif_url.endswith(".gif"):
-                    return gif_url
-            return None
-        except Exception as e:
-            print(f"[GIPHY] Error: {e}")
-            return None
-
-    def download_gif_or_mp4(self, url: str, output_path: Path) -> bool:
-        if output_path.exists():
-            return True
-        if url in self.download_cache:
-            try:
-                cache_path = self.download_cache[url]
-                if cache_path.exists():
-                    shutil.copy(cache_path, output_path)
-                    return True
-            except Exception as e:
-                print(f"[GIPHY] Cache error: {e}")
-        try:
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            self.download_cache[url] = output_path
-            self._manage_cache()
-            return True
-        except Exception as e:
-            print(f"[GIPHY] Download error: {e}")
-            if output_path.exists():
-                output_path.unlink(missing_ok=True)
-            return False
-
-    def get_random_gif_video(self, query: str, size: Tuple[int, int] = (1080, 1920)) -> Optional[Path]:
-        # Sanitize query
-        query = re.sub(r'[\*\-•]|\n', '', query)
-        query = re.sub(r'\s+', ' ', query).strip()
-        
-        gif_url = self.search_gif(query)
-        if not gif_url:
-            return None
-        ext = ".mp4" if gif_url.endswith(".mp4") else ".gif"
-        keyword_folder = Path("background_videos") / query.lower().replace(' ', '_')
-        keyword_folder.mkdir(parents=True, exist_ok=True)
-        temp_path = keyword_folder / f"giphy_{uuid.uuid4().hex[:8]}{ext}"
-        if self.download_gif_or_mp4(gif_url, temp_path):
-            if ext == ".gif":
-                try:
-                    clip = VideoFileClip(str(temp_path))
-                    target_duration = max(10.0, clip.duration)
-                    loops = int(target_duration / clip.duration) + 1
-                    looped_clip = concatenate_videoclips([clip] * loops)
-                    looped_clip = looped_clip.subclip(0, target_duration)
-                    mp4_path = temp_path.with_suffix(".mp4")
-                    looped_clip.write_videofile(str(mp4_path), codec="libx264", audio=False, logger=None, preset="ultrafast")
-                    clip.close()
-                    looped_clip.close()
-                    temp_path.unlink(missing_ok=True)
-                    return mp4_path
-                except Exception as e:
-                    print(f"[GIPHY] GIF-to-MP4 conversion failed: {e}")
-                    return temp_path
-            return temp_path
-        return None
-
-class PexelsAPI:
-    def __init__(self):
-        self.base_url = "https://api.pexels.com/videos"
-        self.api_key = os.getenv("PEXELS_API_KEY")
-        self.download_cache = {}
-        self.search_cache = {}
-        self.cache_limit = 30
-
-    def _manage_cache(self):
-        if len(self.download_cache) > self.cache_limit:
-            items_to_remove = len(self.download_cache) - self.cache_limit
-            for key in list(self.download_cache.keys())[:items_to_remove]:
-                del self.download_cache[key]
-
-    def search_videos(self, query: str, orientation: str = "portrait", size: str = "medium", per_page: int = 15,
-                      page: int = 1) -> List[Dict]:
-        if not self.api_key:
-            print("[Pexels] PEXELS_API_KEY not set in environment.")
-            return []
-        
-        # Sanitize query
-        query = re.sub(r'[\*\-•]|\n', '', query)
-        query = re.sub(r'\s+', ' ', query).strip()
-        
-        cache_key = f"{query}_{orientation}_{size}_{per_page}_{page}"
-        if cache_key in self.search_cache:
-            return self.search_cache[cache_key]
-        url = f"{self.base_url}/search"
-        headers = {"Authorization": self.api_key}
-        params = {"query": query, "orientation": orientation, "size": size, "per_page": min(per_page, 80), "page": page}
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            videos = data.get("videos", [])
-            if videos:
-                self.search_cache[cache_key] = videos
-            return videos
-        except requests.exceptions.RequestException as e:
-            print(f"[Pexels] Error: {e}")
-            return []
-
-    def download_video(self, video_url: str, output_path: Path) -> bool:
-        if output_path.exists():
-            return True
-        if video_url in self.download_cache:
-            try:
-                cache_path = self.download_cache[video_url]
-                if cache_path.exists():
-                    shutil.copy(cache_path, output_path)
-                    return True
-            except Exception as e:
-                print(f"[Pexels] Cache error: {e}")
-        try:
-            response = requests.get(video_url, timeout=30, stream=True)
-            response.raise_for_status()
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            self.download_cache[video_url] = output_path
-            self._manage_cache()
-            return True
-        except Exception as e:
-            print(f"[Pexels] Download error: {e}")
-            if output_path.exists():
-                output_path.unlink(missing_ok=True)
-            return False
-
-    def get_random_video(self, query: str, size: Tuple[int, int] = (1080, 1920)) -> Optional[Path]:
-        if not query:
-            return None
-            
-        # Sanitize query
-        query = re.sub(r'[\*\-•]|\n', '', query)
-        query = re.sub(r'\s+', ' ', query).strip()
-        
-        videos = self.search_videos(query, orientation="portrait", size="medium", per_page=15)
-        if not videos:
-            return None
-        video = random.choice(videos)
-        video_id = video.get("id")
-        video_files = video.get("video_files", [])
-        portrait_videos = [v for v in video_files if v.get("width", 0) < v.get("height", 0)]
-        if not portrait_videos:
-            return None
-        portrait_videos.sort(key=lambda v: abs((v.get("width", 0) * v.get("height", 0)) - (size[0] * size[1])))
-        selected_video = portrait_videos[0]
-        video_url = selected_video.get("link")
-        if not video_url:
-            return None
-        keyword_folder = Path("background_videos") / query.lower().replace(' ', '_')
-        keyword_folder.mkdir(parents=True, exist_ok=True)
-        temp_video_path = keyword_folder / f"pexels_{video_id}_{uuid.uuid4().hex[:8]}.mp4"
-        if self.download_video(video_url, temp_video_path):
-            return temp_video_path
-        return None
-
-# =============== TTS MANAGER WITH CACHING ===============
-class TTSManager:
-    def __init__(self, config: Config):
-        self.config = config
-        self.voice_model = None
-        self.standard_models: Dict[str, any] = {}
-        self._load_models()
-    
-    def _load_models(self):
-        if not MODELS_AVAILABLE:
-            return
-        try:
-            self.voice_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.config.DEVICE)
-            print("[TTS] Coqui XTTS loaded")
-        except Exception as e:
-            print(f"[TTS] Coqui error loading models:")
-            traceback.print_exc()
-            self.voice_model = None
-        try:
-            sb_cache = os.environ.get('SPEECHBRAIN_CACHE', '/opt/speechbrain_models')
-            self.standard_models['tacotron2'] = Tacotron2.from_hparams(
-                source="speechbrain/tts-tacotron2-ljspeech", 
-                savedir=f"{sb_cache}/tts-tacotron2-ljspeech"
-            )
-            self.standard_models['hifi_gan'] = HIFIGAN.from_hparams(
-                source="speechbrain/tts-hifigan-ljspeech", 
-                savedir=f"{sb_cache}/tts-hifigan-ljspeech"
-            )
-            print("[TTS] SpeechBrain loaded")
-        except Exception as e:
-            print(f"[TTS] SpeechBrain error: {e}")
-    
-    @staticmethod
-    def preprocess_text(text: str) -> str:
-        return re.sub(r'\d+', lambda m: num2words(int(m.group(0))), text)
-    
-    def remove_metallic_artifacts(self, waveforms: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        try:
-            waveforms = waveforms * 0.4
-            waveforms = torchaudio.functional.lowpass_biquad(waveforms, sample_rate, cutoff_freq=5500, Q=0.707)
-            waveforms = torchaudio.functional.lowpass_biquad(waveforms, sample_rate, cutoff_freq=4800, Q=0.707)
-            try:
-                waveforms = torchaudio.functional.bandreject_biquad(waveforms, sample_rate, central_freq=3000, Q=1.5)
-            except Exception:
-                pass
-            waveforms = torchaudio.functional.highpass_biquad(waveforms, sample_rate, cutoff_freq=100, Q=0.707)
-            waveforms = torchaudio.functional.lowpass_biquad(waveforms, sample_rate, cutoff_freq=6200, Q=1.0)
-            max_val = waveforms.abs().max()
-            if max_val > 0.85:
-                waveforms = waveforms / (max_val * 1.15)
-            waveforms = torch.tanh(waveforms * 1.2) * 0.85
-            try:
-                waveforms = torchaudio.functional.spectral_subtract(waveforms, noise_estimate=None, noise_reduction_amount=0.4)
-            except Exception:
-                pass
-            threshold = 0.6
-            ratio = 2.5
-            above_threshold = waveforms.abs() > threshold
-            compressed = waveforms.clone()
-            compressed[above_threshold] = torch.sign(waveforms[above_threshold]) * (
-                threshold + (waveforms[above_threshold].abs() - threshold) / ratio
-            )
-            waveforms = compressed
-            waveforms = waveforms * 0.85
-            return waveforms
-        except Exception as e:
-            print(f"[TTS] Warning in remove_metallic_artifacts: {e}")
-            return waveforms * 0.3
-
-    def improve_audio_quality(self, audio_path: Path) -> Path:
-        try:
-            audio = AudioSegment.from_file(str(audio_path))
-            cfg = self.config.AUDIO_QUALITY_CONFIG
-            if audio.frame_rate != cfg['sample_rate']:
-                audio = audio.set_frame_rate(cfg['sample_rate'])
-            audio = audio - 6
-            audio = audio.high_pass_filter(100)
-            audio = low_pass_filter(audio, 4500)
-            if cfg['reduce_sibilance']:
-                audio = audio.low_pass_filter(6000)
-            if cfg['apply_warmth']:
-                warm_audio = audio.low_pass_filter(350) + 2
-                audio = audio.overlay(warm_audio - 20)
-            if cfg['apply_compression']:
-                audio = audio.compress_dynamic_range(threshold=-30.0, ratio=1.8, attack=20.0, release=200.0)
-            if cfg['normalize_audio']:
-                audio = normalize(audio, headroom=0.3)
-            audio = audio.strip_silence(silence_len=150, silence_thresh=cfg['remove_silence_threshold'], padding=150)
-            audio = audio.fade_in(150).fade_out(150)
-            improved_path = self.config.TEMP_DIR / f"improved_{audio_path.name}"
-            audio.export(str(improved_path), format="wav", parameters=["-q:a", "0"])
-            return improved_path
-        except Exception as e:
-            print(f"[TTS] Audio improvement warning: {e}")
-            return audio_path
-
-    def generate_speech(self, text: str, speaker_id: str) -> Path:
-        # Check DB cache first
-        cached = DB.get_cached_tts(text, speaker_id)
-        if cached:
-            print(f"[TTS] Using cached audio for speaker '{speaker_id}': {cached}")
-            return cached
-        if not text.strip():
-            raise ValueError("Text cannot be empty.")
-        processed_text = self.preprocess_text(text)
-        temp_wav_path = self.config.TEMP_DIR / f"tts_{uuid.uuid4()}.wav"
-        try:
-            if speaker_id == self.config.STANDARD_VOICE_NAME:
-                if not self.standard_models:
-                    raise ValueError("Standard TTS models unavailable.")
-                tacotron2 = self.standard_models['tacotron2']
-                hifi_gan = self.standard_models['hifi_gan']
-                mel_outputs, mel_lengths, alignments = tacotron2.encode_text(processed_text)
-                mel_spec = mel_outputs[0]
-                if mel_spec.min() < 0:
-                    mel_spec = (mel_spec + 2.5) / 5
-                if len(mel_spec.shape) == 2:
-                    mel_spec = mel_spec.unsqueeze(0)
-                waveforms = hifi_gan.decode_batch(mel_spec)
-                sample_rate = 22050
-                waveforms = self.remove_metallic_artifacts(waveforms, sample_rate)
-                torchaudio.save(str(temp_wav_path), waveforms.squeeze(1).to(torch.float32), sample_rate)
-            else:
-                if not self.voice_model:
-                    raise ValueError("Voice cloning model unavailable.")
-                reference_audio = self.config.VOICE_SAMPLES_DIR / speaker_id / "reference.wav"
-                if not reference_audio.exists():
-                    raise FileNotFoundError(f"Reference audio not found for '{speaker_id}'.")
-                self.voice_model.tts_to_file(
-                    text=processed_text,
-                    file_path=str(temp_wav_path),
-                    speaker_wav=str(reference_audio),
-                    language="en",
-                    split_sentences=False,
-                )
-            if not temp_wav_path.exists():
-                raise RuntimeError("TTS generation failed — no output file created.")
-            improved_path = self.improve_audio_quality(temp_wav_path)
-            if improved_path != temp_wav_path:
-                temp_wav_path.unlink(missing_ok=True)
-            # Save to DB
-            DB.save_tts(text, speaker_id, improved_path)
-            return improved_path
-        except Exception as e:
-            if temp_wav_path.exists():
-                temp_wav_path.unlink(missing_ok=True)
-            raise e
+# TTS Management handled by core.tts
 
 # =============== VIDEO EFFECTS, CIRCLE OVERLAY ===============
 class VideoEffectsManager:
@@ -972,8 +237,7 @@ class VideoGenerator:
     def __init__(self, config: Config):
         self.config = config
         self.font_path = self._discover_fonts()
-        self.pexels = PexelsAPI()
-        self.giphy = GiphyAPI()
+        self.media_manager = MediaManager()
         self.keyword_extractor = KeywordExtractor()
         self.logo_clip = self._load_logo()
         self.effects_manager = VideoEffectsManager()
@@ -982,7 +246,7 @@ class VideoGenerator:
         if SD_AVAILABLE:
             try:
                 sd_model_path = str(config.SD_MODEL_DIR) if config.SD_MODEL_DIR.exists() else "/models/stable-diffusion-v1-5"
-                self.sd_manager = StableDiffusionManager(model_path=sd_model_path, device=config.DEVICE)
+                self.sd_manager = StableDiffusionManager(model_path=sd_model_path)
                 print("[SD] Stable Diffusion enabled for background generation")
             except Exception as e:
                 print(f"[SD] Could not initialize Stable Diffusion: {e}")
@@ -1145,7 +409,7 @@ class VideoGenerator:
             return None
         keyword = pexels_keyword or self.keyword_extractor.get_best_unique_keyword(text)
         print(f"[Single Image Mode] Generating AI image for: {keyword or 'full text'}")
-        image_path = self.sd_manager.generate_image(text, keyword)
+        image_path = self.sd_manager.generate_image(text, keyword=keyword)
         if image_path:
             _media_source_cache["single_image_mode"] = 'sd'
             print(f"[Single Image Mode] Image generated: {image_path}")
@@ -1194,46 +458,30 @@ class VideoGenerator:
         if media_type == "sd_only":
             if self.sd_manager:
                 keyword = pexels_keyword or (self.keyword_extractor.get_best_unique_keyword(sentence) if sentence else None)
-                image_path = self.sd_manager.generate_image(sentence or "abstract art", keyword)
+                image_path = self.sd_manager.generate_image(sentence or "abstract art", keyword=keyword)
                 if image_path:
                     _media_source_cache[keyword or "default"] = 'sd'
                     return image_path
             return None
 
-        # Step 1: Try Pexels/Giphy with explicit keyword
-        if pexels_keyword:
-            sanitized_kw = self.keyword_extractor.sanitize_keyword(pexels_keyword)
-            if sanitized_kw:
-                # Try Pexels first
-                video_path = self.pexels.get_random_video(sanitized_kw, self.config.VIDEO_SIZE)
+        # Step 1: Try searching for videos via MediaManager
+        if pexels_keyword or sentence:
+            # Collect all candidate keywords
+            search_keywords = []
+            if pexels_keyword:
+                search_keywords.append(self.keyword_extractor.sanitize_keyword(pexels_keyword))
+            if sentence:
+                search_keywords.extend(self.keyword_extractor.extract_keywords(sentence, top_n=5))
+            
+            for kw in search_keywords:
+                if not kw: continue
+                # MediaManager handles Pexels, Giphy, YouTube
+                video_path = self.media_manager.get_random_media(kw, self.config.VIDEO_SIZE)
                 if video_path:
-                    _media_source_cache[sanitized_kw] = 'pexels'
-                    return video_path
-                # Then Giphy
-                video_path = self.giphy.get_random_gif_video(sanitized_kw, self.config.VIDEO_SIZE)
-                if video_path:
-                    _media_source_cache[sanitized_kw] = 'giphy'
-                    return video_path
-
-        # Step 2: Try sentence-based keywords
-        if sentence:
-            candidates = self.keyword_extractor.extract_keywords(sentence, top_n=5)
-            for kw in candidates:
-                sanitized_kw = self.keyword_extractor.sanitize_keyword(kw)
-                if not sanitized_kw:
-                    continue
-                # Pexels
-                video_path = self.pexels.get_random_video(sanitized_kw, self.config.VIDEO_SIZE)
-                if video_path:
-                    _media_source_cache[sanitized_kw] = 'pexels'
-                    return video_path
-                # Giphy
-                video_path = self.giphy.get_random_gif_video(sanitized_kw, self.config.VIDEO_SIZE)
-                if video_path:
-                    _media_source_cache[sanitized_kw] = 'giphy'
+                    _media_source_cache[kw] = 'media_manager'
                     return video_path
 
-        # Step 3: Try local background videos
+        # Step 2: Try local background videos
         video_extensions = ['*.mp4', '*.MP4', '*.mov', '*.MOV']
         video_files = []
         if self.config.VIDEOS_DIR.exists():
@@ -1242,10 +490,10 @@ class VideoGenerator:
         if video_files:
             return Path(random.choice(video_files))
 
-        # Step 4: ONLY FALL BACK TO STABLE DIFFUSION IF ALL VIDEO SOURCES FAIL
+        # Step 3: ONLY FALL BACK TO STABLE DIFFUSION IF ALL VIDEO SOURCES FAIL
         if self.sd_manager and (use_sd or media_type == "mixed"):
             keyword = pexels_keyword or (self.keyword_extractor.get_best_unique_keyword(sentence) if sentence else None)
-            image_path = self.sd_manager.generate_image(sentence or "abstract background", keyword)
+            image_path = self.sd_manager.generate_image(sentence or "abstract background", keyword=keyword)
             if image_path:
                 _media_source_cache[keyword or "default"] = 'sd'
                 return image_path

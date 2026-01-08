@@ -99,15 +99,17 @@ export PEXELS_API_KEY="your_api_key_here"
 
 ```plaintext
 project_root/
-├── core/                     # 🆕 Shared core modules (SOLID refactoring)
+├── core/                     # 🛡️ Shared core modules (SOLID architecture)
 │   ├── config.py             # Centralized configuration
-│   ├── database.py           # TTS & video caching
+│   ├── database.py           # TTS & video caching (GenerationDB)
 │   ├── utils/
-│   │   └── pytorch_compat.py # PyTorch 2.6+ compatibility
-│   ├── media/                # Media API clients (coming soon)
-│   ├── nlp/                  # Keyword extraction (coming soon)
-│   ├── ai/                   # AI components (coming soon)
-│   └── tts/                  # TTS management (coming soon)
+│   │   ├── pytorch_compat.py # PyTorch secure loading
+│   │   ├── audio.py         # Shared audio processing
+│   │   └── video.py         # Shared video processing utilities
+│   ├── media/                # Media API clients (Pexels, Giphy, YouTube)
+│   ├── nlp/                  # Keyword extraction (Mistral:7b / Spacy)
+│   ├── ai/                   # AI components (Stable Diffusion)
+│   └── tts/                  # TTS management (Kokoro, XTTS v2)
 ├── background_images/        # Local fallback images (optional)
 ├── background_videos/        # Local fallback videos
 ├── background_music/         # Music tracks (.mp3/.wav)
@@ -191,9 +193,9 @@ The codebase has been refactored following SOLID principles to improve maintaina
 
 ### Benefits
 
-- ✅ **Reduced code duplication** by ~200+ lines
-- ✅ **Improved maintainability** with single source of truth
-- ✅ **Better testability** with modular components
+- ✅ **Massive code de-duplication**: Reduced footprint by ~1,500 lines
+- ✅ **Improved maintainability** with single source of truth in `core/`
+- ✅ **Better testability** with modularized components
 - ✅ **Consistent behavior** across all three generators
 
 ---
@@ -202,13 +204,15 @@ The codebase has been refactored following SOLID principles to improve maintaina
 
 | Layer      | Technology                       |
 | ---------- | -------------------------------- |
-| NLP        | spaCy `en_core_web_md`           |
-| TTS        | Coqui TTS (XTTS v2), SpeechBrain |
-| Video      | MoviePy, PIL, NumPy              |
-| Audio      | PyDub                            |
-| UI         | Gradio                           |
-| API        | Pexels                           |
-| ML Backend | PyTorch                          |
+| NLP        | Mistral:7b / spaCy `en_core_web_md` |
+| TTS        | Kokoro-82M, Coqui XTTS v2           |
+| Video      | MoviePy, FFmpeg, PIL, NumPy         |
+| Audio      | PyDub                               |
+| AI Generic | Stable Diffusion                    |
+| UI         | Gradio                              |
+| API        | Pexels, Giphy, YouTube              |
+| DB         | SQLite3                             |
+| ML Backend | PyTorch                             |
 
 ---
 

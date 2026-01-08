@@ -40,6 +40,16 @@ from moviepy.editor import (
     concatenate_videoclips, ColorClip
 )
 
+# Core imports
+from core.config import Config
+from core.database import GenerationDB, DB
+from core.nlp.keyword_extractor import KeywordExtractor
+from core.ai.stable_diffusion import StableDiffusionManager, SD_AVAILABLE
+from core.media.manager import MediaManager
+from core.tts.manager import TTSManager
+from core.utils.audio import improve_audio_quality, remove_metallic_artifacts
+from core.utils.video import get_video_duration, has_audio_stream, is_video_file, sanitize_url_filename
+
 # Handle PIL compatibility
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
@@ -49,274 +59,33 @@ torch.backends.cudnn.enabled = False
 torch.set_num_threads(4)
 load_dotenv()
 
-# ================= DATABASE =================
-class GenerationDB:
-    def __init__(self, db_path: Path = Path("generation_cache.db")):
-        self.db_path = db_path
-        self.lock = threading.Lock()
-        self.init_db()
+# Get shared config
+config_instance = Config()
+SUPPORTED_LANGUAGES = config_instance.SUPPORTED_LANGUAGES
 
-    def init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            # Check if old tts_cache table exists with old schema
-            try:
-                cursor = conn.execute("PRAGMA table_info(tts_cache)")
-                columns = [row[1] for row in cursor.fetchall()]
-                if "speaker_id" in columns and "voice_id" not in columns:
-                    print("[DB] Migrating old tts_cache schema...")
-                    # Create new table with correct schema
-                    conn.execute("""CREATE TABLE tts_cache_new (
-                        text_hash TEXT PRIMARY KEY,
-                        voice_id TEXT,
-                        language TEXT,
-                        audio_path TEXT,
-                        created_at TEXT
-                    )""")
-                    # Copy data
-                    conn.execute("""
-                        INSERT INTO tts_cache_new (text_hash, voice_id, language, audio_path, created_at)
-                        SELECT text_hash, speaker_id, 'en-US', audio_path, created_at FROM tts_cache
-                    """)
-                    # Drop old table and rename
-                    conn.execute("DROP TABLE tts_cache")
-                    conn.execute("ALTER TABLE tts_cache_new RENAME TO tts_cache")
-                    conn.commit()
-                    print("[DB] Migration complete")
-            except Exception as e:
-                print(f"[DB] Migration check: {e}")
-                # Create fresh table
-                pass
+# DB instance for compatibility
+DB_INSTANCE = DB
 
-            # Ensure tts_cache exists with correct schema
-            conn.execute("""CREATE TABLE IF NOT EXISTS tts_cache (
-                text_hash TEXT PRIMARY KEY,
-                voice_id TEXT,
-                language TEXT,
-                audio_path TEXT,
-                created_at TEXT
-            )""")
 
-            # Create or update video_logs table
-            cursor = conn.execute("PRAGMA table_info(video_logs)")
-            columns = [row[1] for row in cursor.fetchall()]
-
-            # Create table if it doesn't exist
-            if not columns:
-                conn.execute("""CREATE TABLE video_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    input_hash TEXT UNIQUE,
-                    video_path TEXT,
-                    audio_path TEXT,
-                    output_dir TEXT,
-                    sentence_count INTEGER,
-                    created_at TEXT,
-                    processing_time REAL,
-                    system_stats TEXT
-                )""")
-            else:
-                # Add missing columns if they don't exist
-                if "processing_time" not in columns:
-                    print("[DB] Adding processing_time column to video_logs")
-                    conn.execute("ALTER TABLE video_logs ADD COLUMN processing_time REAL")
-
-                if "system_stats" not in columns:
-                    print("[DB] Adding system_stats column to video_logs")
-                    conn.execute("ALTER TABLE video_logs ADD COLUMN system_stats TEXT")
-
-            conn.commit()
-
-    def get_cached_tts(self, text: str, voice_id: str, language: str) -> Optional[Path]:
-        text_hash = hashlib.sha256(f"{text}_{voice_id}_{language}".encode()).hexdigest()
-        with self.lock, sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT audio_path FROM tts_cache WHERE text_hash = ?",
-                (text_hash,)
-            ).fetchone()
-            if row and Path(row[0]).exists():
-                return Path(row[0])
-        return None
-
-    def save_tts(self, text: str, voice_id: str, language: str, audio_path: Path):
-        text_hash = hashlib.sha256(f"{text}_{voice_id}_{language}".encode()).hexdigest()
-        with self.lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO tts_cache (text_hash, voice_id, language, audio_path, created_at) VALUES (?, ?, ?, ?, ?)",
-                (text_hash, voice_id, language, str(audio_path), datetime.now().isoformat())
-            )
-
-    def save_video(self, input_params: Dict, result: Dict, processing_time: float):
-        param_str = "|".join(str(v) for k, v in sorted(input_params.items()))
-        input_hash = hashlib.sha256(param_str.encode()).hexdigest()
-        with self.lock, sqlite3.connect(self.db_path) as conn:
-            system_stats = str({
-                "memory_used_mb": 0,  # Placeholder - could be enhanced with actual memory usage
-                "timestamp": datetime.now().isoformat()
-            })
-            conn.execute("""
-                INSERT OR REPLACE INTO video_logs
-                (input_hash, video_path, audio_path, output_dir, sentence_count, created_at, processing_time, system_stats)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                input_hash,
-                result.get("video_path"),
-                result.get("audio_path"),
-                result.get("output_directory"),
-                result.get("sentence_count", 0),
-                datetime.now().isoformat(),
-                processing_time,
-                system_stats
-            ))
-
-DB = GenerationDB()
+# ================= KOKORO TTS MANAGER (Legacy Wrapper) =================
 
 # ================= KOKORO TTS MANAGER =================
 class KokoroTTSManager:
-    """Text-to-Speech using Kokoro-82M with multi-language support"""
-    # Voice mappings by language
-    VOICE_MAP = {
-        "en-US": ["af_heart", "af_bella", "af_nicole", "am_michael", "am_liam", "am_puck"],
-        "en-GB": ["bf_emma", "bf_isabella", "bm_fable", "bm_george"],
-        "ja": ["jf_alpha", "jf_gongitsune", "jm_kumo"],
-        "zh": ["zf_xiaobei", "zf_xiaoni", "zm_yunxi", "zm_yunyang"],
-        "es": ["ef_dora", "em_alex"],
-        "fr": ["ff_siwis"],
-        "hi": ["hf_alpha", "hm_omega"],
-        "it": ["if_sara", "im_nicola"],
-        "pt-BR": ["pf_dora", "pm_alex"],
-    }
-
-    def __init__(self, config: 'Config', language: str = "en-US"):
+    """Wrapper to maintain compatibility with meme-main.py logic while using core TTSManager"""
+    def __init__(self, config: Config, language: str = "en-US"):
         self.config = config
         self.language = language
-        self.model = None
-        self.generate_fn = None
-        self.available = False
-        self.current_voice = None
-        self._load_model()
-
-    def _load_model(self):
-        """Load Kokoro KPipeline"""
-        try:
-            print(f"[Kokoro] Loading KPipeline for {self.language}...")
-            os.environ['HF_HUB_OFFLINE'] = '1'
-            from kokoro import KPipeline
-
-            # Map language to lang code
-            lang_map = {
-                "en-US": "a",
-                "en-GB": "b",
-                "ja": "j",
-                "zh": "z",
-                "es": "e",
-                "fr": "f",
-                "hi": "h",
-                "it": "i",
-                "pt-BR": "p"
-            }
-            lang_code = lang_map.get(self.language, "a")
-            self.model = KPipeline(lang_code=lang_code)
-            self.available = True
-            print(f"[Kokoro] KPipeline loaded for language {self.language} ({lang_code})")
-        except Exception as e:
-            print(f"[Kokoro] Load error: {e}")
-            import traceback
-            traceback.print_exc()
-            self.available = False
-
+        self.tts_manager = TTSManager(config)
+        self.current_voice = "af_heart"
+        
     def get_available_voices(self) -> List[str]:
-        """Get available voices for current language"""
-        return self.VOICE_MAP.get(self.language, self.VOICE_MAP["en-US"])
-
+        return self.tts_manager.get_available_voices(engine="kokoro")
+        
     def set_voice(self, voice_id: str):
-        """Set the voice for TTS"""
-        if voice_id in self.get_available_voices():
-            self.current_voice = voice_id
-        else:
-            voices = self.get_available_voices()
-            self.current_voice = voices[0] if voices else "af_heart"
-
-    @staticmethod
-    def preprocess_text(text: str) -> str:
-        """Preprocess text for TTS"""
-        # Convert numbers to words
-        text = re.sub(r'\d+', lambda m: num2words(int(m.group())), text)
-        # Clean whitespace
-        return re.sub(r'\s+', ' ', text).strip()
-
-    def improve_audio_quality(self, audio_path: Path) -> Path:
-        """Enhance audio quality with normalization and filtering"""
-        try:
-            audio = AudioSegment.from_file(str(audio_path))
-            audio = audio.set_frame_rate(22050) - 6
-            audio = audio.high_pass_filter(100)
-            audio = low_pass_filter(audio, 4500)
-            try:
-                audio = audio.compress_dynamic_range(threshold=-30.0, ratio=1.8)
-            except Exception:
-                pass
-            audio = normalize(audio, headroom=0.3)
-            improved = self.config.TEMP_DIR / f"improved_{audio_path.name}"
-            audio.export(str(improved), format="wav")
-            return improved
-        except Exception:
-            return audio_path
-
+        self.current_voice = voice_id
+        
     def generate_speech(self, text: str, voice_id: Optional[str] = None) -> Path:
-        """Generate speech using Kokoro KPipeline"""
-        if not voice_id:
-            voice_id = self.current_voice or self.get_available_voices()[0]
-
-        # Check cache
-        cached = DB.get_cached_tts(text, voice_id, self.language)
-        if cached:
-            return cached
-
-        processed = self.preprocess_text(text)
-        temp_path = self.config.TEMP_DIR / f"tts_{uuid.uuid4().hex}.wav"
-
-        try:
-            if not self.available or self.model is None:
-                raise ValueError("Kokoro KPipeline not loaded")
-            import scipy.io.wavfile as wavfile
-
-            # Generate speech - returns generator of (graphemes, phonemes, audio)
-            # Collect all audio chunks
-            all_audio = []
-            for i, (gs, ps, audio) in enumerate(self.model(processed, voice=voice_id, speed=1.0)):
-                all_audio.append(audio)
-
-            if not all_audio:
-                raise RuntimeError("No audio generated")
-
-            # Concatenate all audio chunks
-            full_audio = np.concatenate(all_audio)
-
-            # Normalize
-            full_audio = full_audio / (np.max(np.abs(full_audio)) + 1e-7)
-            full_audio = (full_audio * 32767).astype(np.int16)
-
-            # Save to file (24000 Hz is Kokoro's sample rate)
-            wavfile.write(str(temp_path), 24000, full_audio)
-
-            # Improve quality
-            improved = self.improve_audio_quality(temp_path)
-            if improved != temp_path:
-                try:
-                    temp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-            DB.save_tts(text, voice_id, self.language, improved)
-            return improved
-        except Exception as e:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            print(f"[Kokoro] Speech generation error: {e}")
-            import traceback
-            traceback.print_exc()
-            raise e
+        return self.tts_manager.generate_speech(text, voice_id or self.current_voice, self.language, engine="kokoro")
 
 # ================= CUSTOM MEME API =================
 class CustomMemeAPI:
@@ -366,20 +135,11 @@ class CustomMemeAPI:
                     pass
             return False
 
-# ================= KEYWORD EXTRACTOR =================
-class KeywordExtractor:
-    def extract_keywords(self, text: str, top_n: int = 5) -> List[str]:
-        words = re.findall(r'\b\w{3,}\b', text.lower())
-        freq = Counter(words)
-        return [w for w, _ in freq.most_common(top_n)]
 
-    def get_best_unique_keyword(self, text: str) -> Optional[str]:
-        kws = self.extract_keywords(text, 1)
-        return kws[0] if kws else None
 
 # ================= OLLAMA HUMOUR REWRITER =================
 class OllamaHumourRewriter:
-    def __init__(self, model: str = "gemma3:270m", url: Optional[str] = None, timeout: int = 20):
+    def __init__(self, model: str = "mistral:7b", url: Optional[str] = None, timeout: int = 20):
         self.model = model
         self.url = url or os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate")
         self.timeout = timeout
@@ -462,161 +222,9 @@ class OllamaHumourRewriter:
         return out
 
 # ================= MEME MEDIA MANAGER =================
-class MemeMediaManager:
-    def __init__(self, config: 'Config', session: Optional[requests.Session] = None):
-        self.config = config
-        self.session = session or requests.Session()
-        self.session.headers.update({"User-Agent": "Mozilla/5.0"})
-        self.media_cache_dir = self.config.TEMP_DIR / "media_cache"
-        self.media_cache_dir.mkdir(parents=True, exist_ok=True)
-        self.font_cache = {}
 
-    def _sanitize_url_filename(self, url: str) -> str:
-        parsed = urlparse(url)
-        base = Path(parsed.path).name or hashlib.sha256(url.encode()).hexdigest()[:12]
-        ext = Path(base).suffix
-        if not ext:
-            mime, _ = mimetypes.guess_type(url)
-            ext = {
-                "video/mp4": ".mp4",
-                "video/webm": ".webm",
-                "image/jpeg": ".jpg",
-                "image/png": ".png",
-                "image/gif": ".gif"
-            }.get(mime, ".bin")
-        name = hashlib.sha256(url.encode()).hexdigest()[:20]
-        return f"{name}{ext}"
 
-    def _local_path_for_url(self, url: str) -> Path:
-        fname = self._sanitize_url_filename(url)
-        return self.media_cache_dir / fname
 
-    def download_media(self, url: Optional[str]) -> Optional[Path]:
-        if not url:
-            return None
-
-        local = self._local_path_for_url(url)
-        if local.exists():
-            return local
-
-        try:
-            with self.session.get(url, stream=True, timeout=30) as r:
-                r.raise_for_status()
-                tmp = local.with_suffix(local.suffix + ".tmp")
-                with open(tmp, "wb") as fh:
-                    for chunk in r.iter_content(8192):
-                        if chunk:
-                            fh.write(chunk)
-                tmp.replace(local)
-            return local
-        except Exception as e:
-            try:
-                if local.exists():
-                    local.unlink()
-            except Exception:
-                pass
-            print(f"[MemeMediaManager] download failed for {url}: {e}")
-            return None
-
-    def detect_is_video(self, local_path: Path) -> bool:
-        if not local_path or not local_path.exists():
-            return False
-
-        ext = local_path.suffix.lower()
-        if ext in (".mp4", ".mov", ".avi", ".webm", ".mkv"):
-            return True
-        if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"):
-            return False
-
-        try:
-            probe = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_streams", "-select_streams", "v:0", str(local_path)],
-                capture_output=True, text=True, timeout=8
-            )
-            return bool(probe.stdout.strip())
-        except Exception:
-            return False
-
-    def get_video_duration(self, video_path: Path) -> float:
-        try:
-            result = subprocess.run([
-                'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1', str(video_path)
-            ], capture_output=True, text=True, check=True)
-            return float(result.stdout.strip())
-        except Exception:
-            return 4.0
-
-    def has_audio_stream(self, video_path: Path) -> bool:
-        try:
-            result = subprocess.run([
-                'ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_type',
-                '-of', 'default=noprint_wrappers=1:nokey=1', str(video_path)
-            ], capture_output=True, text=True, check=True)
-            return bool(result.stdout.strip())
-        except Exception:
-            return False
-
-    def prepare_media_for_item(self, media_info: Optional[Dict]) -> Tuple[Optional[Path], bool]:
-        if not media_info:
-            return (None, False)
-
-        url = media_info.get("url") if isinstance(media_info, dict) else str(media_info)
-        if not url:
-            return (None, False)
-
-        local = self.download_media(url)
-        if not local:
-            return (None, False)
-
-        return (local, self.detect_is_video(local))
-
-    def get_font(self, font_path: str, font_size: int):
-        """Cache and return font objects to avoid reloading"""
-        cache_key = f"{font_path}_{font_size}"
-        if cache_key not in self.font_cache:
-            try:
-                self.font_cache[cache_key] = ImageFont.truetype(font_path, font_size)
-            except Exception:
-                self.font_cache[cache_key] = ImageFont.load_default()
-        return self.font_cache[cache_key]
-
-# ================= CONFIG =================
-class Config:
-    def __init__(self):
-        self.ROOT_DIR = Path(__file__).parent.resolve()
-        self.VOICE_SAMPLES_DIR = self.ROOT_DIR / "voice_samples"
-        self.VIDEOS_DIR = self.ROOT_DIR / "background_videos"
-        self.MUSIC_DIR = self.ROOT_DIR / "background_music"
-        self.IMAGES_DIR = self.ROOT_DIR / "background_images"
-        self.TEMP_DIR = self.ROOT_DIR / "temp"
-        self.OUTPUT_DIR = self.ROOT_DIR / "output"
-
-        for d in [self.VOICE_SAMPLES_DIR, self.VIDEOS_DIR, self.MUSIC_DIR,
-                  self.IMAGES_DIR, self.TEMP_DIR, self.OUTPUT_DIR]:
-            d.mkdir(parents=True, exist_ok=True)
-
-        self.DEVICE = "cpu"
-        self.VIDEO_WIDTH = 1080
-        self.VIDEO_HEIGHT = 1920
-        self.VIDEO_SIZE = (self.VIDEO_WIDTH, self.VIDEO_HEIGHT)
-        self.TEXT_SIZE_CONFIG = {'font_size': 50, 'line_spacing': 1.2, 'max_width': 900, 'bottom_margin': 150}
-        self.VIDEO_PRESET = 'ultrafast'
-        self.VIDEO_CRF = 28
-        self.MAX_PARALLEL_SLIDES = 3
-        self.TEMP_AUDIO_DIR = self.TEMP_DIR / "audio_cache"
-        self.TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-        self.MIN_IMAGE_DURATION = 10.0
-        self.BACKUP_OUTPUT_DIR = self.ROOT_DIR / "backup_output"
-        self.BACKUP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    def get_temp_audio_file(self, prefix: str = "audio") -> Path:
-        return self.TEMP_AUDIO_DIR / f"{prefix}_{uuid.uuid4().hex}.wav"
-
-    def get_backup_path(self, original_path: Path) -> Path:
-        """Get a backup path for a file to ensure it's preserved"""
-        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{original_path.name}"
-        return self.BACKUP_OUTPUT_DIR / backup_name
 
 # ================= SENTENCE SPLITTER =================
 class SentenceSplitter:
@@ -671,7 +279,54 @@ class MoviePyVideoGenerator:
         self.custom_api = custom_api
         self.keyword_extractor = KeywordExtractor()
         self.font_path = self._discover_font()
-        self.media_manager = MemeMediaManager(config, self.custom_api.session)
+        self.media_manager = MediaManager(config)
+        self.font_cache = {}
+        self.session = custom_api.session
+        self.media_cache_dir = self.config.TEMP_DIR / "media_cache"
+        self.media_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def download_media(self, url: Optional[str]) -> Optional[Path]:
+        """Download media from URL to cache"""
+        if not url:
+            return None
+        local = self.media_cache_dir / sanitize_url_filename(url)
+        if local.exists():
+            return local
+        try:
+            with self.session.get(url, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                tmp = local.with_suffix(local.suffix + ".tmp")
+                with open(tmp, "wb") as fh:
+                    for chunk in r.iter_content(8192):
+                        if chunk:
+                            fh.write(chunk)
+                tmp.replace(local)
+            return local
+        except Exception as e:
+            print(f"[MoviePy] download failed for {url}: {e}")
+            return None
+
+    def prepare_media_for_item(self, media_info: Any) -> Tuple[Optional[Path], bool]:
+        """Prepare media from info (URL or dict)"""
+        if not media_info:
+            return (None, False)
+        url = media_info.get("url") if isinstance(media_info, dict) else str(media_info)
+        if not url:
+            return (None, False)
+        local = self.download_media(url)
+        if not local:
+            return (None, False)
+        return (local, is_video_file(local))
+
+    def get_font(self, font_path: str, font_size: int):
+        """Cache and return font objects"""
+        cache_key = f"{font_path}_{font_size}"
+        if cache_key not in self.font_cache:
+            try:
+                self.font_cache[cache_key] = ImageFont.truetype(font_path, font_size)
+            except Exception:
+                self.font_cache[cache_key] = ImageFont.load_default()
+        return self.font_cache[cache_key]
 
     def _discover_font(self) -> str:
         system = platform.system()
@@ -692,7 +347,7 @@ class MoviePyVideoGenerator:
         draw = ImageDraw.Draw(img)
 
         try:
-            font = self.media_manager.get_font(self.font_path, self.config.TEXT_SIZE_CONFIG['font_size'])
+            font = self.get_font(self.font_path, self.config.TEXT_SIZE_CONFIG['font_size'])
         except Exception:
             font = ImageFont.load_default()
 
@@ -776,7 +431,7 @@ class MoviePyVideoGenerator:
             tts_duration = len(tts_audio) / 1000.0
 
             if media_path and media_path.exists() and media_is_video:
-                video_duration = self.media_manager.get_video_duration(media_path)
+                video_duration = get_video_duration(media_path)
                 slide_duration = video_duration
             else:
                 slide_duration = max(tts_duration, self.config.MIN_IMAGE_DURATION)
@@ -784,7 +439,7 @@ class MoviePyVideoGenerator:
             original_audio_path = None
             has_original_audio = False
 
-            if media_path and media_path.exists() and media_is_video and self.media_manager.has_audio_stream(media_path):
+            if media_path and media_path.exists() and media_is_video and has_audio_stream(media_path):
                 has_original_audio = True
                 try:
                     clip = VideoFileClip(str(media_path), audio=True)
@@ -1019,14 +674,14 @@ class MoviePyVideoGenerator:
 # ================= MAIN GENERATOR =================
 class TextToVideoGenerator:
     def __init__(self, language: str = "en-US"):
-        self.config = Config()
+        self.config = config_instance
         self.language = language
         self.tts = KokoroTTSManager(self.config, language)
         self.custom_api = CustomMemeAPI()
         self.video_gen = MoviePyVideoGenerator(self.config, self.custom_api)
         self.keyword_extractor = KeywordExtractor()
         self.rewriter = OllamaHumourRewriter()
-        self.media_manager = MemeMediaManager(self.config, self.custom_api.session)
+        self.media_manager = MediaManager(self.config)
         self.voices = self.tts.get_available_voices()
 
     def set_language(self, language: str):
@@ -1078,7 +733,7 @@ class TextToVideoGenerator:
                     media = media_list[0]
                     media_url = media.get("url")
 
-                local_media, is_video = self.media_manager.prepare_media_for_item(media_url)
+                local_media, is_video = self.video_gen.prepare_media_for_item(media_url)
 
                 sentences = self.video_gen.split_into_sentences(rewritten)
                 if not sentences:

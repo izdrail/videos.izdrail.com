@@ -53,8 +53,35 @@ class Config:
         self.TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
         
         # Default messages
-        self.INTRO_MESSAGE = "Welcome to our channel!"
+        self.INTRO_MESSAGES = {
+            'en': "Welcome to our channel!",
+            'zh': "欢迎来到我们的频道！",
+            'es': "¡Bienvenido a nuestro canal!",
+            'hi': "हमारे चैनल में आपका स्वागत है!",
+            'ar': "مرحبا بكم في قناتنا!",
+            'ro': "Bine ați venit pe canalul nostru!"
+        }
+        self.CTA_MESSAGES = {
+            'en': "Like, share, and subscribe!",
+            'zh': "点赞、分享和订阅！",
+            'es': "¡Dale me gusta, comparte y suscríbete!",
+            'hi': "लाइक करें, शेयर करें और सब्सक्राइब करें!",
+            'ar': "أعجبني، شارك، واشترك!",
+            'ro': "Apreciază, distribuie și abonează-te!"
+        }
+        self.INTRO_MESSAGE = self.INTRO_MESSAGES['en']
+        self.CTA_MESSAGE = self.CTA_MESSAGES['en']
         self.OUTRO_MESSAGE = "Thanks for watching! Don't forget to like and subscribe!"
+        
+        # Language configuration
+        self.SUPPORTED_LANGUAGES = {
+            'en': {'name': 'English', 'code': 'en', 'tts_code': 'en', 'kokoro_code': 'a'},
+            'zh': {'name': 'Chinese (Mandarin)', 'code': 'zh-cn', 'tts_code': 'zh-cn', 'kokoro_code': 'z'},
+            'es': {'name': 'Spanish', 'code': 'es', 'tts_code': 'es', 'kokoro_code': 'e'},
+            'hi': {'name': 'Hindi', 'code': 'hi', 'tts_code': 'hi', 'kokoro_code': 'h'},
+            'ar': {'name': 'Arabic', 'code': 'ar', 'tts_code': 'ar', 'kokoro_code': 'a'},
+            'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': 'a'}
+        }
     
     def get_temp_audio_file(self, prefix: str = "audio") -> Path:
         """Generate a temporary audio file path"""
