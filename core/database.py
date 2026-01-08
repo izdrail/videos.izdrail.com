@@ -156,3 +156,6 @@ class GenerationDB:
                     system_stats
                 )
             )
+
+# Default instance for shared use
+DB = GenerationDB()

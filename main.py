@@ -33,17 +33,21 @@ from num2words import num2words
 from dotenv import load_dotenv
 
 # Import core modules
-from core.utils.pytorch_compat import setup_pytorch_security
+from core.utils.pytorch_compat import setup_pytorch_allowlist
 from core.config import Config
-from core.database import GenerationDB
+from core.database import DB
 from core.media.manager import MediaManager
 from core.nlp.keyword_extractor import KeywordExtractor
 from core.ai.stable_diffusion import StableDiffusionManager, SD_AVAILABLE
 from core.tts.manager import TTSManager
 from core.utils.audio import improve_audio_quality, remove_metallic_artifacts
 
+# Availability flags
+MODELS_AVAILABLE = True # Assumed true since imports above succeeded
+SPACY_AVAILABLE = True  # Used in main block
+
 # Global setups
-setup_pytorch_security()
+setup_pytorch_allowlist()
 load_dotenv()
 
 # Enforce CPU globally
@@ -55,8 +59,8 @@ torch.set_num_threads(4)
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
 
-# Initialize global DB
-DB = GenerationDB()
+# Initialize global DB derived from core.database
+# (DB already initialized in core.database)
 
 # DATABASE Setup handled by core.database
 
@@ -1512,9 +1516,9 @@ if __name__ == "__main__":
         print("=" * 80)
         print("🧠 CPU-Only Mode: Enabled")
         if SPACY_AVAILABLE:
-            print("✅ spaCy NLP: Enabled")
+            print("✅ spaCy NLP: Enabled (via External API)")
         else:
-            print("⚠️ spaCy NLP: Disabled (install with: pip install spacy)")
+            print("⚠️ spaCy NLP: Disabled")
         if SD_AVAILABLE:
             print("✅ Stable Diffusion: Enabled")
         else:

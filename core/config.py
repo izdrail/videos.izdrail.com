@@ -29,12 +29,50 @@ class Config:
         # Device configuration
         self.DEVICE = "cpu"
         
+        # Standard voice for default selection
+        self.STANDARD_VOICE_NAME = "Standard Voice (Non-Cloned)"
+        
+        # Additional directory paths
+        self.VIDEO_OVERLAYS_DIR = self.ROOT_DIR / "video-overlays"
+        self.CIRCLE_OVERLAYS_DIR = self.ROOT_DIR / "circle_overlays"
+        self.SD_MODEL_DIR = self.ROOT_DIR / "models/stable-diffusion-v1-5"
+        
+        # Ensure additional directories exist
+        for d in [self.VIDEO_OVERLAYS_DIR, self.CIRCLE_OVERLAYS_DIR]:
+            d.mkdir(parents=True, exist_ok=True)
+            
         # Video configuration
         self.VIDEO_WIDTH = 1080
         self.VIDEO_HEIGHT = 1920
         self.VIDEO_SIZE = (self.VIDEO_WIDTH, self.VIDEO_HEIGHT)
         self.VIDEO_PRESET = 'ultrafast'
         self.VIDEO_CRF = 28
+        self.MIXED_MODE_SD_RATIO = 0.2
+        
+        # Detailed component configurations
+        self.CIRCLE_OVERLAY_CONFIG = {
+            'diameter': 300,
+            'position': 'top-right',
+            'border_width': 5,
+            'border_color': (255, 255, 255),
+            'margin': 20
+        }
+        
+        self.LOGO_CONFIG = {
+            'max_width': 200,
+            'max_height': 100,
+            'opacity': 0.7,
+            'position': 'top-right',
+            'margin': 20
+        }
+        
+        self.MUSIC_CONFIG = {
+            'music_volume_db': -15
+        }
+        
+        self.TRANSITION_CONFIG = {
+            'duration': 1.0
+        }
         
         # Text configuration
         self.TEXT_SIZE_CONFIG = {

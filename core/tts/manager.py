@@ -7,7 +7,7 @@ import uuid
 import torch
 from pathlib import Path
 from typing import List, Dict, Optional
-from ..database import GenerationDB
+from ..database import DB
 from ..utils.audio import improve_audio_quality
 
 # Engine-specific imports handled lazily
@@ -22,7 +22,7 @@ class TTSManager:
         self.config = config
         self.engine = engine
         self.model = None
-        self.db = GenerationDB()
+        self.db = DB
         self.loaded_engine = None
         
     def _load_engine(self, target_engine: str):

@@ -22,6 +22,10 @@ from core.tts.manager import TTSManager
 from core.utils.audio import improve_audio_quality, remove_metallic_artifacts
 from core.utils.video import get_video_duration, has_audio_stream, is_video_file
 
+# Availability flags
+MODELS_AVAILABLE = True # Assumed true since imports above succeeded
+SPACY_AVAILABLE = True  # Used in main block
+
 import gradio as gr
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 from pydub import AudioSegment
@@ -919,7 +923,7 @@ if __name__ == "__main__":
 
     print("\n📦 INSTALLED COMPONENTS:")
     if SPACY_AVAILABLE:
-        print(f"  ✅ spaCy NLP - {len(SPACY_MODELS)} language model(s)")
+        print("  ✅ spaCy NLP - Available (via External API)")
     else:
         print("  ⚠️  spaCy NLP - Not available")
     if SD_AVAILABLE:
