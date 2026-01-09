@@ -5,8 +5,7 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-ENV API_URL=http://localhost:1602 \
-    DEBIAN_FRONTEND=noninteractive \
+ENV DEBIAN_FRONTEND=noninteractive \
     COQUI_TOS_AGREED=1 \
     TTS_HOME=/opt/tts_models \
     SPEECHBRAIN_CACHE=/opt/speechbrain_models \
@@ -72,7 +71,7 @@ ENV HF_HUB_OFFLINE=1 \
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY . .
 
-EXPOSE 1602 1603 1604 11434
+EXPOSE 1603 1604 11434
 
 ENTRYPOINT []
 

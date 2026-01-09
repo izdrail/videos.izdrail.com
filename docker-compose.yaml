@@ -12,7 +12,6 @@ services:
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     ports:
-      - '1602:1602'
       - '1603:1603'
       - '11434:11434'
     environment:

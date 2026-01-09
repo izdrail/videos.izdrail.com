@@ -1,7 +1,3 @@
-fastapi==0.110.0
-uvicorn==0.27.1
-jinja2==3.1.2
-python-multipart==0.0.9
 TTS==0.22.0
 certifi==2022.12.7
 charset-normalizer==3.0.1
@@ -9,13 +5,11 @@ click==8.1.3
 docopt==0.6.2
 ffmpeg-python==0.2.0
 filelock==3.9.0
-Flask==2.2.3
 future==0.18.3
 huggingface-hub>=0.15.1
 HyperPyYAML==1.1.0
 idna==3.4
 importlib-metadata==6.0.0
-itsdangerous==2.1.2
 joblib==1.2.0
 MarkupSafe==2.1.2
 more-itertools==9.0.0
@@ -39,11 +33,9 @@ tqdm==4.64.1
 transformers==4.33.0
 typing_extensions==4.8.0
 urllib3==1.26.14
-Werkzeug==2.2.3
 zipp==3.14.0
 python-dotenv
 gradio 
-moviepy 
 diffusers==0.30
 accelerate
 yt-dlp

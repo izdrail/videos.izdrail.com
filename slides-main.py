@@ -194,115 +194,166 @@ class FFmpegVideoGenerator:
         return random.choice(videos) if videos else None
 
     def _create_text_overlay_png(self, text: str, output_path: Path) -> Path:
-        img = Image.new('RGBA', self.config.VIDEO_SIZE, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+        # 1. Setup dimensions and fonts
+        img_size = self.config.VIDEO_SIZE
         base_font_size = self.config.TEXT_SIZE_CONFIG['font_size']
         if len(text) > 60:
             font_size = max(30, int(base_font_size * (1.0 - (len(text) - 60) / 200)))
         else:
             font_size = base_font_size
+            
         try:
-            if self.font_path and os.path.exists(self.font_path):
-                font = ImageFont.truetype(self.font_path, font_size)
-            else:
-                font = ImageFont.load_default()
+            font = ImageFont.truetype(self.font_path, font_size) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
         except:
             font = ImageFont.load_default()
+
+        # 2. Wrap text and calculate bounding box
         wrapped_text = textwrap.fill(text, width=35)
-        bbox = draw.textbbox((0, 0), wrapped_text, font=font)
+        # Create a temp image to calculate bbox
+        temp_draw = ImageDraw.Draw(Image.new('L', (1, 1)))
+        bbox = temp_draw.textbbox((0, 0), wrapped_text, font=font)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
+        
+        # 3. Create the text mask (white text on black background)
+        padding = 10
+        mask_size = (text_width + padding * 2, text_height + padding * 2)
+        mask_img = Image.new('L', mask_size, 0)
+        mask_draw = ImageDraw.Draw(mask_img)
+        text_pos = (padding, padding)
+        mask_draw.text(text_pos, wrapped_text, font=font, fill=255)
+        
+        # 4. Create gradient image for the text
+        grad_img = create_gradient_image(mask_size, LARAVEL_ACCENT_GRADIENT, "to_right")
+        
+        # 5. Composite text onto final frame
+        final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(final_frame)
         x = (self.config.VIDEO_WIDTH - text_width) // 2
         y = self.config.VIDEO_HEIGHT - text_height - self.config.TEXT_SIZE_CONFIG['bottom_margin']
+        
         stroke_width = 3
         for adj_x in range(-stroke_width, stroke_width + 1):
             for adj_y in range(-stroke_width, stroke_width + 1):
                 if adj_x != 0 or adj_y != 0:
-                    draw.text((x + adj_x, y + adj_y), wrapped_text, font=font, fill='black')
-        draw.text((x, y), wrapped_text, font=font, fill='white')
-        img.save(str(output_path), "PNG")
+                    shadow_draw.text((x + adj_x, y + adj_y), wrapped_text, font=font, fill=(0, 0, 0, 200))
+
+        # Composite the gradient text
+        text_layer = Image.new('RGBA', mask_size, (0, 0, 0, 0))
+        text_layer.paste(grad_img, (0, 0), mask_img)
+        final_frame.paste(text_layer, (x - padding, y - padding), text_layer)
+        
+        final_frame.save(str(output_path), "PNG")
         return output_path
 
     def _create_intro_text_png(self, output_path: Path, language: str = 'en') -> Path:
-        img = Image.new('RGBA', self.config.VIDEO_SIZE, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+        img_size = self.config.VIDEO_SIZE
+        final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(final_frame)
+        
         try:
-            if self.font_path and os.path.exists(self.font_path):
-                font_large = ImageFont.truetype(self.font_path, 100)
-                font_small = ImageFont.truetype(self.font_path, 60)
-            else:
-                font_large = ImageFont.load_default()
-                font_small = ImageFont.load_default()
+            font_large = ImageFont.truetype(self.font_path, 120) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
+            font_small = ImageFont.truetype(self.font_path, 60) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
         except:
             font_large = ImageFont.load_default()
             font_small = ImageFont.load_default()
+            
         intro_msg = self.config.INTRO_MESSAGES.get(language, self.config.INTRO_MESSAGES['en'])
         lines = intro_msg.upper().split()
         main_text = "\n".join(lines[:2]) if len(lines) > 1 else lines[0]
-        bbox = draw.textbbox((0, 0), main_text, font=font_large)
+        
+        # Calculate bbox
+        temp_draw = ImageDraw.Draw(Image.new('L', (1, 1)))
+        bbox = temp_draw.textbbox((0, 0), main_text, font=font_large)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
+        
+        # Create mask and gradient for main text
+        padding = 20
+        mask_size = (text_width + padding * 2, text_height + padding * 2)
+        mask_img = Image.new('L', mask_size, 0)
+        mask_draw = ImageDraw.Draw(mask_img)
+        mask_draw.text((padding, padding), main_text, font=font_large, fill=255)
+        grad_img = create_gradient_image(mask_size, LARAVEL_ACCENT_GRADIENT, "to_right")
+        
+        # Position
         x = (self.config.VIDEO_WIDTH - text_width) // 2
-        y = (self.config.VIDEO_HEIGHT - text_height) // 2 - 80
-        for adj in range(-3, 4):
+        y = (self.config.VIDEO_HEIGHT - text_height) // 2 - 150
+        
+        # Draw shadow
+        for adj in range(-4, 5):
             if adj != 0:
-                draw.text((x + adj, y), main_text, font=font_large, fill='black')
-                draw.text((x, y + adj), main_text, font=font_large, fill='black')
-        draw.text((x, y), main_text, font=font_large, fill='cyan')
+                draw.text((x + adj, y), main_text, font=font_large, fill=(0, 0, 0, 180))
+                draw.text((x, y + adj), main_text, font=font_large, fill=(0, 0, 0, 180))
+        
+        # Paste gradient text
+        text_layer = Image.new('RGBA', mask_size, (0, 0, 0, 0))
+        text_layer.paste(grad_img, (0, 0), mask_img)
+        final_frame.paste(text_layer, (x - padding, y - padding), text_layer)
+        
+        # Secondary text
         if len(lines) > 2:
             sec_text = " ".join(lines[2:]).upper()
-            bbox2 = draw.textbbox((0, 0), sec_text, font=font_small)
+            bbox2 = temp_draw.textbbox((0, 0), sec_text, font=font_small)
             text_width2 = bbox2[2] - bbox2[0]
             x2 = (self.config.VIDEO_WIDTH - text_width2) // 2
-            y2 = int(self.config.VIDEO_HEIGHT * 0.6)
+            y2 = y + text_height + 100
             for adj in range(-2, 3):
                 if adj != 0:
-                    draw.text((x2 + adj, y2), sec_text, font=font_small, fill='black')
-                    draw.text((x2, y2 + adj), sec_text, font=font_small, fill='black')
+                    draw.text((x2 + adj, y2), sec_text, font=font_small, fill=(0,0,0,150))
             draw.text((x2, y2), sec_text, font=font_small, fill='white')
-        img.save(str(output_path), "PNG")
+            
+        final_frame.save(str(output_path), "PNG")
         return output_path
 
     def _create_cta_text_png(self, output_path: Path, language: str = 'en') -> Path:
-        img = Image.new('RGBA', self.config.VIDEO_SIZE, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+        img_size = self.config.VIDEO_SIZE
+        final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(final_frame)
+        
         try:
-            if self.font_path and os.path.exists(self.font_path):
-                font_large = ImageFont.truetype(self.font_path, 110)
-                font_small = ImageFont.truetype(self.font_path, 70)
-            else:
-                font_large = ImageFont.load_default()
-                font_small = ImageFont.load_default()
+            font_large = ImageFont.truetype(self.font_path, 130) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
+            font_small = ImageFont.truetype(self.font_path, 70) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
         except:
             font_large = ImageFont.load_default()
             font_small = ImageFont.load_default()
+            
         cta_msg = self.config.CTA_MESSAGES.get(language, self.config.CTA_MESSAGES['en'])
         parts = cta_msg.split(',')
         main_text = parts[0].strip().upper()
         if len(parts) > 1:
             main_text += "\n" + parts[1].strip().upper()
-        bbox = draw.textbbox((0, 0), main_text, font=font_large)
+            
+        # Calculate bbox
+        temp_draw = ImageDraw.Draw(Image.new('L', (1, 1)))
+        bbox = temp_draw.textbbox((0, 0), main_text, font=font_large)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
+        
+        # Create mask and gradient for main text
+        padding = 20
+        mask_size = (text_width + padding * 2, text_height + padding * 2)
+        mask_img = Image.new('L', mask_size, 0)
+        mask_draw = ImageDraw.Draw(mask_img)
+        mask_draw.text((padding, padding), main_text, font=font_large, fill=255)
+        grad_img = create_gradient_image(mask_size, LARAVEL_ACCENT_GRADIENT, "to_right")
+        
+        # Position
         x = (self.config.VIDEO_WIDTH - text_width) // 2
-        y = (self.config.VIDEO_HEIGHT - text_height) // 2 - 100
-        for adj in range(-3, 4):
+        y = (self.config.VIDEO_HEIGHT - text_height) // 2
+        
+        # Draw shadow
+        for adj in range(-4, 5):
             if adj != 0:
-                draw.text((x + adj, y), main_text, font=font_large, fill='black')
-                draw.text((x, y + adj), main_text, font=font_large, fill='black')
-        draw.text((x, y), main_text, font=font_large, fill='yellow')
-        if len(parts) > 2:
-            sec_text = parts[2].strip().upper()
-            bbox2 = draw.textbbox((0, 0), sec_text, font=font_small)
-            text_width2 = bbox2[2] - bbox2[0]
-            x2 = (self.config.VIDEO_WIDTH - text_width2) // 2
-            y2 = int(self.config.VIDEO_HEIGHT * 0.67)
-            for adj in range(-2, 3):
-                if adj != 0:
-                    draw.text((x2 + adj, y2), sec_text, font=font_small, fill='black')
-                    draw.text((x2, y2 + adj), sec_text, font=font_small, fill='black')
-            draw.text((x2, y2), sec_text, font=font_small, fill='white')
-        img.save(str(output_path), "PNG")
+                draw.text((x + adj, y), main_text, font=font_large, fill=(0, 0, 0, 180))
+                draw.text((x, y + adj), main_text, font=font_large, fill=(0, 0, 0, 180))
+        
+        # Paste gradient text
+        text_layer = Image.new('RGBA', mask_size, (0, 0, 0, 0))
+        text_layer.paste(grad_img, (0, 0), mask_img)
+        final_frame.paste(text_layer, (x - padding, y - padding), text_layer)
+        
+        final_frame.save(str(output_path), "PNG")
         return output_path
 
     @staticmethod
@@ -427,6 +478,8 @@ class FFmpegVideoGenerator:
                 logo_label = "final_with_circle"
                 input_count += 1
 
+            print(f"🎬 [FFmpeg] Slide {slide_num}: Composition started. Layers: bg={video_path.name if video_path else 'Branded Gradient'}, text={text_overlay_path.name}")
+
             audio_idx = input_count
             inputs.extend(['-i', str(audio_path)])
 
@@ -449,6 +502,7 @@ class FFmpegVideoGenerator:
                 str(output_path)
             ]
             subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"✅ [FFmpeg] Slide {slide_num}: Successfully composed.")
             if not output_path.exists():
                 print(f"[FFmpeg] ERROR: Output not created for slide {slide_num}")
                 return None
@@ -606,7 +660,7 @@ class TextToVideoGenerator:
                       preferred_media_source: Optional[str] = None,
                       enable_background_music: bool = True,
                       music_selection: str = "Random",
-                      music_volume_db: int = -15,
+                      music_volume_db: int = -22,
                       add_intro_slide: bool = True,
                       add_call_to_action: bool = True,
                       use_random_voices: bool = False,

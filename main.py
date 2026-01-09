@@ -1,239 +1,59 @@
 import os
 import re
-import glob
 import random
 import shutil
-import uuid
-import platform
-import requests
-import sqlite3
-import hashlib
-import numpy as np
 import traceback
-import threading
-import textwrap
+import platform
+import subprocess
+import uuid
+import abc
+import yt_dlp
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
-
 import torch
 import torchaudio
-import gradio as gr
-from moviepy.editor import (
-    AudioFileClip, ImageSequenceClip, ImageClip, VideoFileClip, CompositeVideoClip,
-    concatenate_videoclips, ColorClip, vfx
-)
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
-from pydub import AudioSegment
-from pydub.effects import normalize, low_pass_filter
-from num2words import num2words
-from dotenv import load_dotenv
 
-# Import core modules
-from core.utils.pytorch_compat import setup_pytorch_allowlist
+# Core imports
 from core.config import Config
-from core.database import DB
-from core.media.manager import MediaManager
+from core.database import GenerationDB, DB
 from core.nlp.keyword_extractor import KeywordExtractor
 from core.ai.stable_diffusion import StableDiffusionManager, SD_AVAILABLE
+from core.media.manager import MediaManager
 from core.tts.manager import TTSManager
 from core.utils.audio import improve_audio_quality, remove_metallic_artifacts
+from core.utils.video import get_video_duration, has_audio_stream, is_video_file
 
 # Availability flags
 MODELS_AVAILABLE = True # Assumed true since imports above succeeded
 SPACY_AVAILABLE = True  # Used in main block
 
-# Global setups
-setup_pytorch_allowlist()
-load_dotenv()
+import gradio as gr
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
+from pydub import AudioSegment
+from pydub.effects import normalize, low_pass_filter
+from num2words import num2words
+import textwrap
+from dotenv import load_dotenv
 
 # Enforce CPU globally
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 torch.backends.cudnn.enabled = False
 torch.set_num_threads(4)
+load_dotenv()
 
-# Fix PIL.ANTIALIAS deprecation
+# Get shared config
+config_instance = Config()
+SUPPORTED_LANGUAGES = config_instance.SUPPORTED_LANGUAGES
+
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
 
-# Initialize global DB derived from core.database
-# (DB already initialized in core.database)
-
-# DATABASE Setup handled by core.database
-
 # =============== MEDIA SOURCE CACHE ===============
 _media_source_cache = {}
-
-# Stable Diffusion handled by core.ai
-
-# Keyword Extraction handled by core.nlp
-
-# Config and APIs handled by core.config and core.media
-
-# TTS Management handled by core.tts
-
-# =============== VIDEO EFFECTS, CIRCLE OVERLAY ===============
-class VideoEffectsManager:
-    @staticmethod
-    def apply_ken_burns(clip: ImageClip, duration: float, direction: str = "zoom_in") -> ImageClip:
-        def zoom_effect(t):
-            if direction == "zoom_in":
-                return 1 + 0.1 * (t / duration)
-            elif direction == "zoom_out":
-                return 1.1 - 0.1 * (t / duration)
-            else:
-                if t < duration / 2:
-                    return 1 + 0.1 * (t / (duration / 2))
-                else:
-                    return 1.1 - 0.1 * ((t - duration / 2) / (duration / 2))
-        return clip.resize(zoom_effect)
-
-    @staticmethod
-    def apply_pan(clip: ImageClip, duration: float, direction: str = "left") -> ImageClip:
-        w, h = clip.size
-        pan_distance = 100
-        def pan_position(t):
-            progress = t / duration
-            if direction == "left":
-                return (-pan_distance * progress, 0)
-            elif direction == "right":
-                return (pan_distance * progress, 0)
-            elif direction == "up":
-                return (0, -pan_distance * progress)
-            elif direction == "down":
-                return (0, pan_distance * progress)
-            else:
-                angle = progress * 2 * np.pi
-                return (np.cos(angle) * pan_distance / 2, np.sin(angle) * pan_distance / 2)
-        return clip.set_position(pan_position)
-
-    @staticmethod
-    def apply_parallax(clip: ImageClip, duration: float, intensity: float = 0.5) -> ImageClip:
-        def parallax_pos(t):
-            progress = np.sin(t / duration * np.pi)
-            return (intensity * 50 * progress, intensity * 30 * progress)
-        return clip.set_position(parallax_pos)
-
-    @staticmethod
-    def apply_rotation(clip: ImageClip, duration: float, degrees: float = 5) -> ImageClip:
-        def rotate_angle(t):
-            progress = t / duration
-            return degrees * np.sin(progress * 2 * np.pi)
-        return clip.rotate(rotate_angle, unit='deg')
-
-    @staticmethod
-    def get_random_effect_sequence(clip: ImageClip, duration: float) -> ImageClip:
-        effects = [
-            ("ken_burns_in", lambda c, d: VideoEffectsManager.apply_ken_burns(c, d, "zoom_in")),
-            ("ken_burns_out", lambda c, d: VideoEffectsManager.apply_ken_burns(c, d, "zoom_out")),
-            ("pan_left", lambda c, d: VideoEffectsManager.apply_pan(c, d, "left")),
-            ("pan_right", lambda c, d: VideoEffectsManager.apply_pan(c, d, "right")),
-            ("parallax", lambda c, d: VideoEffectsManager.apply_parallax(c, d, 0.5)),
-            ("rotation", lambda c, d: VideoEffectsManager.apply_rotation(c, d, 3)),
-        ]
-        num_effects = random.randint(1, 2)
-        selected_effects = random.sample(effects, num_effects)
-        result_clip = clip.set_duration(duration)
-        for effect_name, effect_func in selected_effects:
-            result_clip = effect_func(result_clip, duration)
-            print(f"[Effects] Applied: {effect_name}")
-        return result_clip
-
-class CircleOverlayManager:
-    def __init__(self, config: Config):
-        self.config = config
-        self.overlays_dir = config.VIDEO_OVERLAYS_DIR
-
-    def get_available_overlay_videos(self) -> List[Path]:
-        video_extensions = ['*.mp4', '*.MP4', '*.mov', '*.MOV', '*.avi', '*.AVI']
-        video_files = []
-        if self.overlays_dir.exists():
-            for ext in video_extensions:
-                video_files.extend(self.overlays_dir.glob(ext))
-        return sorted(video_files)
-
-    def get_random_overlay_video(self) -> Optional[Path]:
-        videos = self.get_available_overlay_videos()
-        if videos:
-            return random.choice(videos)
-        return None
-
-    def create_circular_mask(self, size: int) -> Image.Image:
-        mask = Image.new('L', (size, size), 0)
-        draw = ImageDraw.Draw(mask)
-        draw.ellipse((0, 0, size, size), fill=255)
-        return mask
-
-    def create_circle_overlay_clip(
-        self,
-        video_path: Path,
-        duration: float,
-        diameter: Optional[int] = None,
-        position: Optional[str] = None,
-        border_width: Optional[int] = None,
-        border_color: Optional[Tuple[int, int, int]] = None
-    ) -> Optional[VideoFileClip]:
-        try:
-            cfg = self.config.CIRCLE_OVERLAY_CONFIG
-            diameter = diameter or cfg['diameter']
-            position = position or cfg['position']
-            border_width = border_width or cfg['border_width']
-            border_color = border_color or cfg['border_color']
-            print(f"[Circle Overlay] Loading video: {video_path.name}")
-            overlay_video = VideoFileClip(str(video_path), audio=False)
-            if overlay_video.duration < duration:
-                n_loops = int(duration / overlay_video.duration) + 1
-                overlay_video = concatenate_videoclips([overlay_video] * n_loops)
-            overlay_video = overlay_video.subclip(0, min(duration, overlay_video.duration))
-            overlay_video = overlay_video.resize((diameter, diameter))
-            circular_mask = self.create_circular_mask(diameter)
-            mask_array = np.array(circular_mask) / 255.0
-            mask_clip = ImageClip(mask_array, ismask=True, duration=duration)
-            overlay_video = overlay_video.set_mask(mask_clip)
-            if border_width > 0:
-                border_img = Image.new('RGB', (diameter, diameter), (0, 0, 0))
-                border_draw = ImageDraw.Draw(border_img)
-                border_draw.ellipse(
-                    [(0, 0), (diameter-1, diameter-1)],
-                    outline=border_color,
-                    width=border_width
-                )
-                border_array = np.array(border_img)
-                border_clip = ImageClip(border_array, duration=duration)
-                border_mask_img = Image.new('L', (diameter, diameter), 0)
-                border_mask_draw = ImageDraw.Draw(border_mask_img)
-                border_mask_draw.ellipse([(0, 0), (diameter-1, diameter-1)], fill=255)
-                if border_width > 0:
-                    inner_size = diameter - 2 * border_width
-                    border_mask_draw.ellipse(
-                        [(border_width, border_width), (border_width + inner_size, border_width + inner_size)],
-                        fill=0
-                    )
-                border_mask_array = np.array(border_mask_img) / 255.0
-                border_mask_clip = ImageClip(border_mask_array, ismask=True, duration=duration)
-                border_clip = border_clip.set_mask(border_mask_clip)
-                overlay_video = CompositeVideoClip([overlay_video, border_clip], size=(diameter, diameter))
-            margin = cfg['margin']
-            w, h = self.config.VIDEO_WIDTH, self.config.VIDEO_HEIGHT
-            pos_map = {
-                'top-left': (margin, margin),
-                'top-right': (w - diameter - margin, margin),
-                'bottom-left': (margin, h - diameter - margin),
-                'bottom-right': (w - diameter - margin, h - diameter - margin),
-                'center': ((w - diameter) // 2, (h - diameter) // 2)
-            }
-            overlay_position = pos_map.get(position, pos_map['top-right'])
-            overlay_video = overlay_video.set_position(overlay_position)
-            print(f"[Circle Overlay] Created at {position} position ({diameter}px diameter)")
-            return overlay_video
-        except Exception as e:
-            print(f"[Circle Overlay] Error creating overlay: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
 # =============== LARAVEL COMPANY THEME ===============
 LARAVEL_BG_GRADIENT = ("#0f172a", "#2a1030") # Dark Blue to Dark Purple
@@ -250,7 +70,6 @@ def create_gradient_image(size: Tuple[int, int], colors: Tuple[str, str], direct
     if direction == "135deg":
         for y in range(h):
             for x in range(w):
-                # Simple diagonal gradient mask
                 mask_data.append(int(255 * (x / w + y / h) / 2))
     elif direction == "to_right":
         for y in range(h):
@@ -264,60 +83,30 @@ def create_gradient_image(size: Tuple[int, int], colors: Tuple[str, str], direct
     mask.putdata(mask_data)
     return Image.composite(top, base, mask)
 
-# =============== VIDEO GENERATOR — with DB video caching ===============
-class VideoGenerator:
+
+# =============== VIDEO GENERATOR WITH FFMPEG ===============
+class FFmpegVideoGenerator:
     def __init__(self, config: Config, keyword_extractor: Optional[KeywordExtractor] = None):
         self.config = config
         self.font_path = self._discover_fonts()
         self.media_manager = MediaManager()
         self.keyword_extractor = keyword_extractor or KeywordExtractor()
-        self.logo_clip = self._load_logo()
-        self.effects_manager = VideoEffectsManager()
-        self.circle_overlay_manager = CircleOverlayManager(config)
+        self.logo_path = self._find_logo()
         self.sd_manager = None
         if SD_AVAILABLE:
             try:
-                sd_model_path = str(config.SD_MODEL_DIR) if config.SD_MODEL_DIR.exists() else "/models/stable-diffusion-v1-5"
-                self.sd_manager = StableDiffusionManager(model_path=sd_model_path)
-                print("[SD] Stable Diffusion enabled for background generation")
+                self.sd_manager = StableDiffusionManager()
+                print("[SD] Enabled")
             except Exception as e:
-                print(f"[SD] Could not initialize Stable Diffusion: {e}")
-                self.sd_manager = None
+                print(f"[SD] Init error: {e}")
 
-    def _load_logo(self) -> Optional[ImageClip]:
-        logo_extensions = ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']
-        logo_files = []
-        if self.config.IMAGES_DIR.exists():
-            for ext in logo_extensions:
-                logo_files.extend(glob.glob(os.path.join(self.config.IMAGES_DIR, ext)))
-        if not logo_files:
-            return None
-        logo_path = logo_files[0]
-        try:
-            logo_img = Image.open(logo_path).convert('RGBA')
-            cfg = self.config.LOGO_CONFIG
-            logo_img.thumbnail((cfg['max_width'], cfg['max_height']), Image.LANCZOS)
-            if cfg['opacity'] < 1.0:
-                alpha = logo_img.split()[3]
-                alpha = ImageEnhance.Brightness(alpha).enhance(cfg['opacity'])
-                logo_img.putalpha(alpha)
-            logo_array = np.array(logo_img)
-            logo_clip = ImageClip(logo_array, transparent=True)
-            margin = cfg['margin']
-            position = cfg['position']
-            w, h = logo_img.size
-            pos_map = {
-                'top-left': (margin, margin),
-                'top-right': (self.config.VIDEO_WIDTH - w - margin, margin),
-                'bottom-left': (margin, self.config.VIDEO_HEIGHT - h - margin),
-                'bottom-right': (self.config.VIDEO_WIDTH - w - margin, self.config.VIDEO_HEIGHT - h - margin),
-                'center': 'center'
-            }
-            logo_clip = logo_clip.set_position(pos_map[position])
-            return logo_clip
-        except Exception as e:
-            print(f"[Logo] Error loading logo: {e}")
-            return None
+    def _find_logo(self) -> Optional[Path]:
+        for ext in ['*.png', '*.jpg', '*.jpeg']:
+            if self.config.IMAGES_DIR.exists():
+                files = list(self.config.IMAGES_DIR.glob(ext))
+                if files:
+                    return files[0]
+        return None
 
     def _discover_fonts(self) -> str:
         font_paths = []
@@ -326,222 +115,85 @@ class VideoGenerator:
             font_paths.append(Path("C:/Windows/Fonts"))
         elif system == "Darwin":
             font_paths.extend([Path("/System/Library/Fonts"), Path("/Library/Fonts")])
-        elif system == "Linux":
+        else:
             font_paths.extend([
                 Path("/usr/share/fonts/truetype"),
                 Path("/usr/share/fonts/truetype/dejavu"),
-                Path("/usr/share/fonts/truetype/liberation"),
                 Path("/usr/share/fonts/TTF"),
-                Path.home() / ".fonts"
             ])
-        common_fonts = [
-            "DejaVuSans-Bold.ttf", "DejaVuSans.ttf",
-            "LiberationSans-Bold.ttf", "LiberationSans-Regular.ttf",
-            "arialbd.ttf", "Arial-Bold.ttf",
-            "calibrib.ttf", "Calibri-Bold.ttf",
-            "arial.ttf", "Arial.ttf",
-            "FreeSans.ttf", "FreeSansBold.ttf",
-        ]
+        common_fonts = ["DejaVuSans-Bold.ttf", "arial.ttf", "FreeSansBold.ttf", "NotoSans-Bold.ttf"]
         for path in font_paths:
             if path.is_dir():
                 for font_name in common_fonts:
-                    font_file = None
                     if (path / font_name).exists():
-                        font_file = path / font_name
-                    else:
-                        for found in path.rglob(font_name):
-                            font_file = found
-                            break
-                    if font_file and isinstance(font_file, Path) and font_file.exists():
-                        return str(font_file.resolve())
+                        return str((path / font_name).resolve())
         return "DejaVuSans"
 
-    def _create_audio_visualizer_clip(self, audio_path: Path, duration: float, height: int = 80) -> ImageClip:
-        from pydub import AudioSegment
-        import numpy as np
-        audio_seg = AudioSegment.from_file(str(audio_path))
-        if audio_seg.frame_rate != 22050:
-            audio_seg = audio_seg.set_frame_rate(22050)
-        samples = np.array(audio_seg.get_array_of_samples())
-        if audio_seg.channels == 2:
-            samples = samples.reshape((-1, 2))
-            samples = samples.mean(axis=1).astype(np.int32)
-        fps = 30
-        frame_samples = int(audio_seg.frame_rate / fps)
-        amplitudes = []
-        for i in range(0, len(samples), frame_samples):
-            chunk = samples[i:i + frame_samples]
-            if len(chunk) == 0:
-                amp = 0
-            else:
-                amp = np.abs(chunk).mean()
-            amplitudes.append(amp)
-        max_amp = max(amplitudes) if amplitudes else 1
-        if max_amp == 0:
-            max_amp = 1
-        normalized = [min(a / max_amp, 1.0) for a in amplitudes]
-        frames = []
-        bar_width = self.config.VIDEO_WIDTH // 30
-        for amp in normalized:
-            img = Image.new('RGBA', (self.config.VIDEO_WIDTH, self.config.VIDEO_HEIGHT), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
-            for i in range(30):
-                bar_height = int(amp * height * (0.5 + 0.5 * np.sin(i * 0.2)))
-                x = i * bar_width
-                y_top = self.config.VIDEO_HEIGHT - height - bar_height
-                y_bottom = self.config.VIDEO_HEIGHT - height
-                color = (0, int(200 + 55 * amp), int(255 * amp), int(200 * amp))
-                draw.rectangle([x, y_top, x + bar_width - 2, y_bottom], fill=color)
-            frames.append(np.array(img))
-        target_frames = int(duration * fps)
-        if len(frames) < target_frames:
-            last_frame = frames[-1] if frames else np.zeros((self.config.VIDEO_HEIGHT, self.config.VIDEO_WIDTH, 4), dtype=np.uint8)
-            frames.extend([last_frame] * (target_frames - len(frames)))
-        elif len(frames) > target_frames:
-            frames = frames[:target_frames]
-        vis_clip = ImageSequenceClip(frames, fps=fps)
-        vis_clip = vis_clip.set_duration(duration)
-        return vis_clip
-
     def get_available_music_files(self) -> List[Dict[str, str]]:
-        music_extensions = ['*.mp3', '*.MP3', '*.wav', '*.WAV']
         music_files = []
         if self.config.MUSIC_DIR.exists():
-            for ext in music_extensions:
-                found_files = glob.glob(os.path.join(self.config.MUSIC_DIR, ext))
-                for file_path in found_files:
+            for ext in ['*.mp3', '*.wav', '*.m4a']:
+                for file_path in self.config.MUSIC_DIR.glob(ext):
                     music_files.append({
-                        'name': os.path.basename(file_path),
-                        'path': file_path
+                        'name': file_path.name,
+                        'path': str(file_path)
                     })
         return sorted(music_files, key=lambda x: x['name'])
 
     def get_music_by_name(self, music_name: str) -> Optional[Path]:
         if not music_name or music_name == "Random":
-            return self.get_random_background_music()
+            music_files = self.get_available_music_files()
+            if music_files:
+                return Path(random.choice(music_files)['path'])
+            return None
         music_files = self.get_available_music_files()
-        for music_file in music_files:
-            if music_file['name'] == music_name:
-                return Path(music_file['path'])
-        return self.get_random_background_music()
-
-    def get_random_background_music(self) -> Optional[Path]:
-        music_extensions = ['*.mp3', '*.MP3', '*.wav', '*.WAV']
-        music_files = []
-        if self.config.MUSIC_DIR.exists():
-            for ext in music_extensions:
-                music_files.extend(glob.glob(os.path.join(self.config.MUSIC_DIR, ext)))
-        if music_files:
-            return Path(random.choice(music_files))
+        for mf in music_files:
+            if mf['name'] == music_name:
+                return Path(mf['path'])
         return None
 
-    def get_single_ai_background_image(self, text: str, pexels_keyword: Optional[str] = None) -> Optional[Path]:
-        if not self.sd_manager:
-            print("[SD] Stable Diffusion not available for single image mode")
-            return None
-        keyword = pexels_keyword or self.keyword_extractor.get_best_unique_keyword(text)
-        print(f"[Single Image Mode] Generating AI image for: {keyword or 'full text'}")
-        image_path = self.sd_manager.generate_image(text, keyword=keyword)
-        if image_path:
-            _media_source_cache["single_image_mode"] = 'sd'
-            print(f"[Single Image Mode] Image generated: {image_path}")
-        return image_path
+    def get_background_video(self, keyword: Optional[str], sentence: Optional[str], language: str = 'en', preferred_source: Optional[str] = None) -> Optional[Path]:
+        # Collect all candidate keywords
+        search_keywords = []
+        if keyword:
+            search_keywords.append(self.keyword_extractor.sanitize_keyword(keyword))
+        elif sentence:
+            extracted = self.keyword_extractor.extract_keywords(sentence, 10, language)
+            # Sort: unused first
+            extracted.sort(key=lambda kw: kw in self.keyword_extractor.used_keywords)
+            search_keywords.extend(extracted)
 
-    def create_single_image_slide_with_effects(
-        self,
-        sentence: str,
-        audio_path: Path,
-        single_image_path: Path,
-        slide_num: int
-    ) -> Optional[VideoFileClip]:
-        try:
-            audio_clip = AudioFileClip(str(audio_path))
-            duration_sec = audio_clip.duration
-            img = Image.open(single_image_path)
-            img_array = np.array(img)
-            image_clip = ImageClip(img_array).set_duration(duration_sec)
-            image_clip = self.effects_manager.get_random_effect_sequence(image_clip, duration_sec)
-            dimming_clip = ColorClip(size=self.config.VIDEO_SIZE, color=(0,0,0), duration=duration_sec).set_opacity(0.4)
-            video_clip = CompositeVideoClip([image_clip, dimming_clip])
-            text_clip = self._create_subtitle_overlay_pil(sentence, duration_sec)
-            layers = [video_clip, text_clip]
-            if self.logo_clip:
-                logo = self.logo_clip.set_duration(duration_sec)
-                layers.append(logo)
-            final_clip = CompositeVideoClip(layers)
-            final_clip = final_clip.set_duration(duration_sec).set_audio(audio_clip)
-            print(f"[Effects] Slide {slide_num} created with random effects")
-            return final_clip
-        except Exception as e:
-            print(f"[Video] Slide {slide_num} (single image with effects) error: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def get_background_media(self, pexels_keyword: Optional[str] = None,
-                            sentence: Optional[str] = None,
-                            use_sd: bool = False,
-                            media_type: str = "mixed",
-                            force_video: bool = False) -> Optional[Path]:
-        """
-        Prefer real videos. Only use Stable Diffusion as fallback.
-        """
-        # If explicitly in "sd_only" mode, skip videos
-        if media_type == "sd_only":
-            if self.sd_manager:
-                keyword = pexels_keyword or (self.keyword_extractor.get_best_unique_keyword(sentence) if sentence else None)
-                image_path = self.sd_manager.generate_image(sentence or "abstract art", keyword=keyword)
-                if image_path:
-                    _media_source_cache[keyword or "default"] = 'sd'
-                    return image_path
-            return None
-
-        # Step 1: Try searching for videos via MediaManager
-        if pexels_keyword or sentence:
-            # Collect all candidate keywords
-            search_keywords = []
-            if pexels_keyword:
-                search_keywords.append(self.keyword_extractor.sanitize_keyword(pexels_keyword))
-            if sentence:
-                # Get multiple keywords but try the unused ones first
-                extracted = self.keyword_extractor.extract_keywords(sentence, top_n=10)
-                # Sort: unused first
-                extracted.sort(key=lambda kw: kw in self.keyword_extractor.used_keywords)
-                search_keywords.extend(extracted)
+        for kw in search_keywords:
+            if not kw: continue
             
-            for kw in search_keywords:
-                if not kw: continue
-                # Skip if already used in this session (unless it's the only choice)
-                if kw in self.keyword_extractor.used_keywords and len(search_keywords) > 1:
-                    continue
-                    
-                # MediaManager handles Pexels, Giphy, YouTube
-                video_path = self.media_manager.get_random_media(kw, self.config.VIDEO_SIZE)
-                if video_path:
-                    self.keyword_extractor.used_keywords.add(kw)
-                    _media_source_cache[kw] = 'media_manager'
-                    return video_path
+            # Skip if already used (unless it's the only option)
+            if kw in self.keyword_extractor.used_keywords and len(search_keywords) > 1:
+                continue
+                
+            video = self.media_manager.get_random_media(kw, preferred_source)
+            if video:
+                self.keyword_extractor.used_keywords.add(kw)
+                return video
+                
+        for ext in ['*.mp4', '*.mov', '*.avi']:
+            if self.config.VIDEOS_DIR.exists():
+                files = list(self.config.VIDEOS_DIR.glob(ext))
+                if files:
+                    selected = random.choice(files)
+                    print(f"📁 [Local] Using local background video: {selected.name}")
+                    return selected
+        
+        print("💡 [Fallback] No video found from APIs or local folder. Slide will use generated image if SD available.")
+        return None
 
-        # Step 2: Try local background videos
-        video_extensions = ['*.mp4', '*.MP4', '*.mov', '*.MOV']
-        video_files = []
-        if self.config.VIDEOS_DIR.exists():
-            for ext in video_extensions:
-                video_files.extend(glob.glob(os.path.join(self.config.VIDEOS_DIR, ext)))
-        if video_files:
-            return Path(random.choice(video_files))
+    def get_circle_overlay_video(self) -> Optional[Path]:
+        videos = []
+        for ext in ['*.mp4', '*.mov', '*.avi', '*.webm']:
+            if self.config.CIRCLE_OVERLAYS_DIR.exists():
+                videos.extend(self.config.CIRCLE_OVERLAYS_DIR.glob(ext))
+        return random.choice(videos) if videos else None
 
-        # Step 3: ONLY FALL BACK TO STABLE DIFFUSION IF ALL VIDEO SOURCES FAIL
-        if self.sd_manager and (use_sd or media_type == "mixed"):
-            keyword = pexels_keyword or (self.keyword_extractor.get_best_unique_keyword(sentence) if sentence else None)
-            image_path = self.sd_manager.generate_image(sentence or "abstract background", keyword=keyword)
-            if image_path:
-                _media_source_cache[keyword or "default"] = 'sd'
-                return image_path
-
-        return None  # No media found
-
-    def _create_subtitle_overlay_pil(self, text: str, duration: float) -> ImageClip:
+    def _create_text_overlay_png(self, text: str, output_path: Path) -> Path:
         # 1. Setup dimensions and fonts
         img_size = self.config.VIDEO_SIZE
         base_font_size = self.config.TEXT_SIZE_CONFIG['font_size']
@@ -564,16 +216,11 @@ class VideoGenerator:
         text_height = bbox[3] - bbox[1]
         
         # 3. Create the text mask (white text on black background)
-        # Add padding for stroke
         padding = 10
         mask_size = (text_width + padding * 2, text_height + padding * 2)
         mask_img = Image.new('L', mask_size, 0)
         mask_draw = ImageDraw.Draw(mask_img)
-        
-        # Position in mask
         text_pos = (padding, padding)
-        
-        # Draw stroke in mask if needed (actually for mask we just want the text area)
         mask_draw.text(text_pos, wrapped_text, font=font, fill=255)
         
         # 4. Create gradient image for the text
@@ -581,8 +228,6 @@ class VideoGenerator:
         
         # 5. Composite text onto final frame
         final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
-        
-        # First draw the shadow/outline on final_frame for better legibility
         shadow_draw = ImageDraw.Draw(final_frame)
         x = (self.config.VIDEO_WIDTH - text_width) // 2
         y = self.config.VIDEO_HEIGHT - text_height - self.config.TEXT_SIZE_CONFIG['bottom_margin']
@@ -596,173 +241,120 @@ class VideoGenerator:
         # Composite the gradient text
         text_layer = Image.new('RGBA', mask_size, (0, 0, 0, 0))
         text_layer.paste(grad_img, (0, 0), mask_img)
-        
         final_frame.paste(text_layer, (x - padding, y - padding), text_layer)
         
-        img_clip = ImageClip(np.array(final_frame)).set_duration(duration)
-        return img_clip
+        final_frame.save(str(output_path), "PNG")
+        return output_path
 
-    def create_intro_slide(self, audio_path: Path, bg_color: Tuple[int, int, int] = (74, 144, 226),
-                          pexels_keyword: Optional[str] = None, single_image_path: Optional[Path] = None) -> VideoFileClip:
-        audio_clip = AudioFileClip(str(audio_path))
-        duration_sec = audio_clip.duration
-        if single_image_path and single_image_path.exists():
-            img = Image.open(single_image_path)
-            img_array = np.array(img)
-            video_clip = ImageClip(img_array).set_duration(duration_sec)
-            video_clip = self.effects_manager.apply_ken_burns(video_clip, duration_sec, "zoom_in")
-        else:
-            background_video = self.get_background_media(pexels_keyword=pexels_keyword, media_type="video_only")
-            if background_video and background_video.exists():
-                try:
-                    video_clip = VideoFileClip(str(background_video), audio=False)
-                    target_ratio = self.config.VIDEO_WIDTH / self.config.VIDEO_HEIGHT
-                    current_ratio = video_clip.size[0] / video_clip.size[1]
-                    if current_ratio > target_ratio:
-                        new_width = int(video_clip.size[1] * target_ratio)
-                        x_center = video_clip.size[0] / 2
-                        x1 = int(x_center - new_width / 2)
-                        video_clip = video_clip.crop(x1=x1, width=new_width)
-                    else:
-                        new_height = int(video_clip.size[0] / target_ratio)
-                        y_center = video_clip.size[1] / 2
-                        y1 = int(y_center - new_height / 2)
-                        video_clip = video_clip.crop(y1=y1, height=new_height)
-                    video_clip = video_clip.resize(self.config.VIDEO_SIZE)
-                    if video_clip.duration < duration_sec:
-                        n_loops = int(duration_sec / video_clip.duration) + 1
-                        video_clip = video_clip.loop(n=n_loops)
-                    video_clip = video_clip.subclip(0, min(duration_sec, video_clip.duration))
-                    dimming_clip = ColorClip(size=self.config.VIDEO_SIZE, color=(0,0,0), duration=duration_sec).set_opacity(0.4)
-                    video_clip = CompositeVideoClip([video_clip, dimming_clip])
-                except Exception as e:
-                    print(f"[Video] Intro error: {e}")
-                    video_clip = None
-            else:
-                video_clip = None
-        if video_clip is None:
-            video_clip = ColorClip(size=self.config.VIDEO_SIZE, color=list(bg_color), duration=duration_sec)
-        layers = [video_clip]
-        img = Image.new('RGBA', self.config.VIDEO_SIZE, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+    def _create_intro_text_png(self, output_path: Path, language: str = 'en') -> Path:
+        img_size = self.config.VIDEO_SIZE
+        final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(final_frame)
+        
         try:
-            if self.font_path and os.path.exists(self.font_path):
-                font_large = ImageFont.truetype(self.font_path, 120)
-                font_small = ImageFont.truetype(self.font_path, 70)
-            else:
-                font_large = ImageFont.load_default()
-                font_small = ImageFont.load_default()
+            font_large = ImageFont.truetype(self.font_path, 120) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
+            font_small = ImageFont.truetype(self.font_path, 60) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
         except:
             font_large = ImageFont.load_default()
             font_small = ImageFont.load_default()
-        main_text_str = "WELCOME"
-        bbox = draw.textbbox((0, 0), main_text_str, font=font_large)
+            
+        intro_msg = self.config.INTRO_MESSAGES.get(language, self.config.INTRO_MESSAGES['en'])
+        lines = intro_msg.upper().split()
+        main_text = "\n".join(lines[:2]) if len(lines) > 1 else lines[0]
+        
+        # Calculate bbox
+        temp_draw = ImageDraw.Draw(Image.new('L', (1, 1)))
+        bbox = temp_draw.textbbox((0, 0), main_text, font=font_large)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
+        
+        # Create mask and gradient for main text
+        padding = 20
+        mask_size = (text_width + padding * 2, text_height + padding * 2)
+        mask_img = Image.new('L', mask_size, 0)
+        mask_draw = ImageDraw.Draw(mask_img)
+        mask_draw.text((padding, padding), main_text, font=font_large, fill=255)
+        grad_img = create_gradient_image(mask_size, LARAVEL_ACCENT_GRADIENT, "to_right")
+        
+        # Position
         x = (self.config.VIDEO_WIDTH - text_width) // 2
-        y = (self.config.VIDEO_HEIGHT - text_height) // 2 - 80
-        for adj in range(-3, 4):
-            draw.text((x + adj, y), main_text_str, font=font_large, fill='black')
-            draw.text((x, y + adj), main_text_str, font=font_large, fill='black')
-        draw.text((x, y), main_text_str, font=font_large, fill='cyan')
-        sec_text_str = "TO OUR CHANNEL"
-        bbox2 = draw.textbbox((0, 0), sec_text_str, font=font_small)
-        text_width2 = bbox2[2] - bbox2[0]
-        x2 = (self.config.VIDEO_WIDTH - text_width2) // 2
-        y2 = int(self.config.VIDEO_HEIGHT * 0.58)
-        for adj in range(-2, 3):
-            draw.text((x2 + adj, y2), sec_text_str, font=font_small, fill='black')
-            draw.text((x2, y2 + adj), sec_text_str, font=font_small, fill='black')
-        draw.text((x2, y2), sec_text_str, font=font_small, fill='white')
-        text_clip = ImageClip(np.array(img)).set_duration(duration_sec)
-        layers.append(text_clip)
-        if self.logo_clip:
-            logo = self.logo_clip.set_duration(duration_sec)
-            layers.append(logo)
-        final_clip = CompositeVideoClip(layers)
-        final_clip = final_clip.set_duration(duration_sec).set_audio(audio_clip)
-        return final_clip
+        y = (self.config.VIDEO_HEIGHT - text_height) // 2 - 150
+        
+        # Draw shadow
+        for adj in range(-4, 5):
+            if adj != 0:
+                draw.text((x + adj, y), main_text, font=font_large, fill=(0, 0, 0, 180))
+                draw.text((x, y + adj), main_text, font=font_large, fill=(0, 0, 0, 180))
+        
+        # Paste gradient text
+        text_layer = Image.new('RGBA', mask_size, (0, 0, 0, 0))
+        text_layer.paste(grad_img, (0, 0), mask_img)
+        final_frame.paste(text_layer, (x - padding, y - padding), text_layer)
+        
+        # Secondary text
+        if len(lines) > 2:
+            sec_text = " ".join(lines[2:]).upper()
+            bbox2 = temp_draw.textbbox((0, 0), sec_text, font=font_small)
+            text_width2 = bbox2[2] - bbox2[0]
+            x2 = (self.config.VIDEO_WIDTH - text_width2) // 2
+            y2 = y + text_height + 100
+            for adj in range(-2, 3):
+                if adj != 0:
+                    draw.text((x2 + adj, y2), sec_text, font=font_small, fill=(0,0,0,150))
+            draw.text((x2, y2), sec_text, font=font_small, fill='white')
+            
+        final_frame.save(str(output_path), "PNG")
+        return output_path
 
-    def create_cta_slide(self, audio_path: Path, bg_color: Tuple[int, int, int] = (74, 144, 226),
-                         pexels_keyword: Optional[str] = None, single_image_path: Optional[Path] = None) -> VideoFileClip:
-        audio_clip = AudioFileClip(str(audio_path))
-        duration_sec = audio_clip.duration
-        if single_image_path and single_image_path.exists():
-            img = Image.open(single_image_path)
-            img_array = np.array(img)
-            video_clip = ImageClip(img_array).set_duration(duration_sec)
-            video_clip = self.effects_manager.apply_ken_burns(video_clip, duration_sec, "zoom_out")
-        else:
-            background_video = self.get_background_media(pexels_keyword=pexels_keyword, media_type="video_only")
-            if background_video and background_video.exists():
-                try:
-                    video_clip = VideoFileClip(str(background_video), audio=False)
-                    target_ratio = self.config.VIDEO_WIDTH / self.config.VIDEO_HEIGHT
-                    current_ratio = video_clip.size[0] / video_clip.size[1]
-                    if current_ratio > target_ratio:
-                        new_width = int(video_clip.size[1] * target_ratio)
-                        x_center = video_clip.size[0] / 2
-                        x1 = int(x_center - new_width / 2)
-                        video_clip = video_clip.crop(x1=x1, width=new_width)
-                    else:
-                        new_height = int(video_clip.size[0] / target_ratio)
-                        y_center = video_clip.size[1] / 2
-                        y1 = int(y_center - new_height / 2)
-                        video_clip = video_clip.crop(y1=y1, height=new_height)
-                    video_clip = video_clip.resize(self.config.VIDEO_SIZE)
-                    if video_clip.duration < duration_sec:
-                        n_loops = int(duration_sec / video_clip.duration) + 1
-                        video_clip = video_clip.loop(n=n_loops)
-                    video_clip = video_clip.subclip(0, min(duration_sec, video_clip.duration))
-                    dimming_clip = ColorClip(size=self.config.VIDEO_SIZE, color=(0,0,0), duration=duration_sec).set_opacity(0.4)
-                    video_clip = CompositeVideoClip([video_clip, dimming_clip])
-                except Exception as e:
-                    print(f"[Video] CTA error: {e}")
-                    video_clip = None
-            else:
-                video_clip = None
-        if video_clip is None:
-            video_clip = ColorClip(size=self.config.VIDEO_SIZE, color=list(bg_color), duration=duration_sec)
-        layers = [video_clip]
-        img = Image.new('RGBA', self.config.VIDEO_SIZE, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+    def _create_cta_text_png(self, output_path: Path, language: str = 'en') -> Path:
+        img_size = self.config.VIDEO_SIZE
+        final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(final_frame)
+        
         try:
-            if self.font_path and os.path.exists(self.font_path):
-                font_large = ImageFont.truetype(self.font_path, 140)
-                font_small = ImageFont.truetype(self.font_path, 80)
-            else:
-                font_large = ImageFont.load_default()
-                font_small = ImageFont.load_default()
+            font_large = ImageFont.truetype(self.font_path, 130) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
+            font_small = ImageFont.truetype(self.font_path, 70) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
         except:
             font_large = ImageFont.load_default()
             font_small = ImageFont.load_default()
-        main_text_str = "LIKE\nSHARE\nSUBSCRIBE"
-        bbox = draw.textbbox((0, 0), main_text_str, font=font_large)
+            
+        cta_msg = self.config.CTA_MESSAGES.get(language, self.config.CTA_MESSAGES['en'])
+        parts = cta_msg.split(',')
+        main_text = parts[0].strip().upper()
+        if len(parts) > 1:
+            main_text += "\n" + parts[1].strip().upper()
+            
+        # Calculate bbox
+        temp_draw = ImageDraw.Draw(Image.new('L', (1, 1)))
+        bbox = temp_draw.textbbox((0, 0), main_text, font=font_large)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
+        
+        # Create mask and gradient for main text
+        padding = 20
+        mask_size = (text_width + padding * 2, text_height + padding * 2)
+        mask_img = Image.new('L', mask_size, 0)
+        mask_draw = ImageDraw.Draw(mask_img)
+        mask_draw.text((padding, padding), main_text, font=font_large, fill=255)
+        grad_img = create_gradient_image(mask_size, LARAVEL_ACCENT_GRADIENT, "to_right")
+        
+        # Position
         x = (self.config.VIDEO_WIDTH - text_width) // 2
-        y = (self.config.VIDEO_HEIGHT - text_height) // 2 - 100
-        for adj in range(-3, 4):
-            draw.text((x + adj, y), main_text_str, font=font_large, fill='black')
-            draw.text((x, y + adj), main_text_str, font=font_large, fill='black')
-        draw.text((x, y), main_text_str, font=font_large, fill='yellow')
-        sec_text_str = "TO OUR CHANNEL"
-        bbox2 = draw.textbbox((0, 0), sec_text_str, font=font_small)
-        text_width2 = bbox2[2] - bbox2[0]
-        x2 = (self.config.VIDEO_WIDTH - text_width2) // 2
-        y2 = int(self.config.VIDEO_HEIGHT * 0.65)
-        for adj in range(-2, 3):
-            draw.text((x2 + adj, y2), sec_text_str, font=font_small, fill='black')
-            draw.text((x2, y2 + adj), sec_text_str, font=font_small, fill='black')
-        draw.text((x2, y2), sec_text_str, font=font_small, fill='white')
-        text_clip = ImageClip(np.array(img)).set_duration(duration_sec)
-        layers.append(text_clip)
-        if self.logo_clip:
-            logo = self.logo_clip.set_duration(duration_sec)
-            layers.append(logo)
-        final_clip = CompositeVideoClip(layers)
-        final_clip = final_clip.set_duration(duration_sec).set_audio(audio_clip)
-        return final_clip
+        y = (self.config.VIDEO_HEIGHT - text_height) // 2
+        
+        # Draw shadow
+        for adj in range(-4, 5):
+            if adj != 0:
+                draw.text((x + adj, y), main_text, font=font_large, fill=(0, 0, 0, 180))
+                draw.text((x, y + adj), main_text, font=font_large, fill=(0, 0, 0, 180))
+        
+        # Paste gradient text
+        text_layer = Image.new('RGBA', mask_size, (0, 0, 0, 0))
+        text_layer.paste(grad_img, (0, 0), mask_img)
+        final_frame.paste(text_layer, (x - padding, y - padding), text_layer)
+        
+        final_frame.save(str(output_path), "PNG")
+        return output_path
 
     @staticmethod
     def split_into_sentences(text: str) -> List[str]:
@@ -771,10 +363,10 @@ class VideoGenerator:
         text = re.sub(r'\bMrs\.', 'Mrs<dot>', text)
         text = re.sub(r'\bMs\.', 'Ms<dot>', text)
         text = re.sub(r'\b([A-Z])\.', r'\1<dot>', text)
-        raw_sentences = re.split(r'(?<=[.!?])\s+', text)
+        raw_sentences = re.split(r'(?<=[.!?。！？])\s+', text)
         sentences = [s.replace('<dot>', '.').strip() for s in raw_sentences if s.strip()]
         for i, sentence in enumerate(sentences):
-            if not sentence.endswith(('.', '!', '?')):
+            if not sentence.endswith(('.', '!', '?', '。', '！', '？')):
                 sentences[i] = sentence + '.'
         filtered = []
         i = 0
@@ -789,341 +381,276 @@ class VideoGenerator:
                 i += 1
         return filtered
 
-    def _create_single_slide_with_fixed_image(self, sentence: str, audio_path: Path, bg_color: Tuple[int, int, int],
-                                              single_image_path: Path, slide_num: int) -> Optional[VideoFileClip]:
-        try:
-            audio_clip = AudioFileClip(str(audio_path))
-            duration_sec = audio_clip.duration
-            img = Image.open(single_image_path)
-            img_array = np.array(img)
-            image_clip = ImageClip(img_array).set_duration(duration_sec)
-            image_clip = self.effects_manager.get_random_effect_sequence(image_clip, duration_sec)
-            dimming_clip = ColorClip(size=self.config.VIDEO_SIZE, color=(0,0,0), duration=duration_sec).set_opacity(0.4)
-            video_clip = CompositeVideoClip([image_clip, dimming_clip])
-            layers = [video_clip]
-            text_clip = self._create_subtitle_overlay_pil(sentence, duration_sec)
-            layers.append(text_clip)
-            if self.logo_clip:
-                logo = self.logo_clip.set_duration(duration_sec)
-                layers.append(logo)
-            final_clip = CompositeVideoClip(layers)
-            final_clip = final_clip.set_duration(duration_sec).set_audio(audio_clip)
-            return final_clip
-        except Exception as e:
-            print(f"[Video] Slide {slide_num} (fixed image) error: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def _create_single_slide(self, sentence: str, audio_path: Path, bg_color: Tuple[int, int, int],
-                             pexels_keyword: Optional[str], slide_num: int,
-                             use_sd: bool = False, media_type: str = "mixed",
-                             force_video: bool = False) -> Optional[VideoFileClip]:
+    def _create_slide_with_ffmpeg(self, sentence: str, audio_path: Path, video_path: Optional[Path],
+                                  output_path: Path, slide_num: int, is_intro: bool = False,
+                                  is_cta: bool = False, circle_video: Optional[Path] = None,
+                                  circle_config: Optional[Dict] = None, language: str = 'en') -> Optional[Path]:
         try:
             if audio_path is None or not Path(audio_path).exists():
-                print(f"[Video] Slide {slide_num} error: audio_path is None or missing")
+                print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None or does not exist")
                 return None
-                
-            audio_clip = AudioFileClip(str(audio_path))
-            duration_sec = audio_clip.duration
-            media_path = self.get_background_media(
-                pexels_keyword=pexels_keyword,
-                sentence=sentence,
-                use_sd=use_sd,
-                media_type=media_type,
-                force_video=force_video
-            )
-            video_clip = None
-            if media_path and media_path.exists():
-                try:
-                    if media_path.suffix.lower() in ['.png', '.jpg', '.jpeg']:
-                        img = Image.open(media_path)
-                        img_array = np.array(img)
-                        video_clip = ImageClip(img_array).set_duration(duration_sec)
-                        print(f"[Video] Slide {slide_num}: Using SD-generated image")
-                    else:
-                        video_clip = VideoFileClip(str(media_path), audio=False)
-                        target_ratio = self.config.VIDEO_WIDTH / self.config.VIDEO_HEIGHT
-                        current_ratio = video_clip.size[0] / video_clip.size[1]
-                        if current_ratio > target_ratio:
-                            new_width = int(video_clip.size[1] * target_ratio)
-                            x_center = video_clip.size[0] / 2
-                            x1 = int(x_center - new_width / 2)
-                            video_clip = video_clip.crop(x1=x1, width=new_width)
-                        else:
-                            new_height = int(video_clip.size[0] / target_ratio)
-                            y_center = video_clip.size[1] / 2
-                            y1 = int(y_center - new_height / 2)
-                            video_clip = video_clip.crop(y1=y1, height=new_height)
-                        video_clip = video_clip.resize(self.config.VIDEO_SIZE)
-                        if video_clip.duration < duration_sec:
-                            n_loops = int(duration_sec / video_clip.duration) + 1
-                            video_clip = video_clip.loop(n=n_loops)
-                        video_clip = video_clip.subclip(0, min(duration_sec, video_clip.duration))
-                except Exception as e:
-                    print(f"[Video] Slide {slide_num} media error: {e}")
-                    video_clip = None
-            if video_clip is not None:
-                print(f"[Video] Slide {slide_num}: Composition started. Layers: background={media_path.name if media_path else 'None'}, duration={duration_sec:.2f}s")
-                dimming_clip = ColorClip(size=self.config.VIDEO_SIZE, color=(0,0,0), duration=duration_sec).set_opacity(0.4)
-                video_clip = CompositeVideoClip([video_clip, dimming_clip])
-            else:
-                print(f"[Video] Slide {slide_num}: Using Laravel Company Branded Gradient Background.")
-                grad_img = create_gradient_image(self.config.VIDEO_SIZE, LARAVEL_BG_GRADIENT, "135deg")
-                video_clip = ImageClip(np.array(grad_img)).set_duration(duration_sec)
             
-            text_clip = self._create_subtitle_overlay_pil(sentence, duration_sec)
-            layers = [video_clip, text_clip]
-            if self.logo_clip:
-                logo = self.logo_clip.set_duration(duration_sec)
-                layers.append(logo)
-            final_clip = CompositeVideoClip(layers)
-            final_clip = final_clip.set_duration(duration_sec).set_audio(audio_clip)
-            print(f"[Video] Slide {slide_num}: Successfully composed.")
-            return final_clip
+            source_info = f"Video: {video_path.name}" if video_path else "Background: Image/Color"
+            # Get audio duration
+            duration = get_video_duration(audio_path)
+            print(f"🎬 [FFmpeg] Creating slide {slide_num} ({language}) - {source_info} - duration: {duration:.2f}s")
+
+            text_overlay_path = self.config.TEMP_DIR / f"text_{slide_num}_{uuid.uuid4().hex[:8]}.png"
+            if is_intro:
+                self._create_intro_text_png(text_overlay_path, language)
+            elif is_cta:
+                self._create_cta_text_png(text_overlay_path, language)
+            else:
+                self._create_text_overlay_png(sentence, text_overlay_path)
+
+            inputs = []
+            filter_parts = []
+            input_count = 0
+
+            if video_path and video_path.exists():
+                inputs.extend(['-stream_loop', '-1', '-i', str(video_path)])
+                filter_parts.append(
+                    f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+                    f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+                    f"setsar=1,"
+                    f"fps=30,"
+                    f"trim=duration={duration},"
+                    f"setpts=PTS-STARTPTS[bg_scaled]"
+                )
+                input_count = 1
+            else:
+                print(f"🎨 [FFmpeg] Slide {slide_num}: Using branded gradient background")
+                grad_path = self.config.TEMP_DIR / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
+                create_gradient_image(self.config.VIDEO_SIZE, LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
+                inputs.extend(['-loop', '1', '-i', str(grad_path)])
+                filter_parts.append(f"[0:v]fps=30,trim=duration={duration}[bg_scaled]")
+                input_count = 1
+
+            filter_parts.append("[bg_scaled]format=rgba,colorchannelmixer=aa=0.6[dimmed]")
+
+            inputs.extend(['-loop', '1', '-i', str(text_overlay_path)])
+            filter_parts.append(f"[dimmed][{input_count}:v]overlay=0:0:format=auto[with_text]")
+            input_count += 1
+
+            logo_label = "with_text"
+            if self.logo_path and self.logo_path.exists():
+                inputs.extend(['-loop', '1', '-i', str(self.logo_path)])
+                cfg = self.config.LOGO_CONFIG
+                pos_map = {
+                    'top-left': f'{cfg["margin"]}:{cfg["margin"]}',
+                    'top-right': f'W-w-{cfg["margin"]}:{cfg["margin"]}',
+                    'bottom-left': f'{cfg["margin"]}:H-h-{cfg["margin"]}',
+                    'bottom-right': f'W-w-{cfg["margin"]}:H-h-{cfg["margin"]}',
+                }
+                pos = pos_map.get(cfg['position'], pos_map['top-left'])
+                filter_parts.append(f"[{input_count}:v]scale=50:50[logo_scaled]")
+                filter_parts.append(f"[with_text][logo_scaled]overlay={pos}:format=auto[final]")
+                logo_label = "final"
+                input_count += 1
+
+            if circle_video and circle_video.exists() and circle_config:
+                inputs.extend(['-stream_loop', '-1', '-i', str(circle_video)])
+                diameter = circle_config.get('diameter', 300)
+                position = circle_config.get('position', 'top-right')
+                pos_map = {
+                    'top-left': '50:50',
+                    'top-right': f'W-w-50:50',
+                    'bottom-left': '50:H-h-50',
+                    'bottom-right': 'W-w-50:H-h-50',
+                    'center': '(W-w)/2:(H-h)/2',
+                }
+                overlay_pos = pos_map.get(position, pos_map['top-right'])
+                filter_parts.append(
+                    f"[{input_count}:v]scale={diameter}:{diameter}:force_original_aspect_ratio=decrease,"
+                    f"pad={diameter}:{diameter}:(ow-iw)/2:(oh-ih)/2,"
+                    f"fps=30,"
+                    f"trim=duration={duration},"
+                    f"setpts=PTS-STARTPTS,"
+                    f"format=rgba[circle_sized]"
+                )
+                filter_parts.append(
+                    f"color=black:s={diameter}x{diameter}:d={duration}[black];"
+                    f"[black]geq=lum='if(gt(sqrt((X-{diameter/2})^2+(Y-{diameter/2})^2),{diameter/2}),0,255)',"
+                    f"format=gray[mask]"
+                )
+                filter_parts.append(f"[circle_sized][mask]alphamerge[circle_masked]")
+                filter_parts.append(f"[{logo_label}][circle_masked]overlay={overlay_pos}:format=auto[final_with_circle]")
+                logo_label = "final_with_circle"
+                input_count += 1
+
+            print(f"🎬 [FFmpeg] Slide {slide_num}: Composition started. Layers: bg={video_path.name if video_path else 'Branded Gradient'}, text={text_overlay_path.name}")
+
+            audio_idx = input_count
+            inputs.extend(['-i', str(audio_path)])
+
+            filter_complex = ";".join(filter_parts)
+            cmd = [
+                'ffmpeg', '-y',
+                *inputs,
+                '-filter_complex', filter_complex,
+                '-map', f'[{logo_label}]',
+                '-map', f'{audio_idx}:a',
+                '-c:v', 'libx264',
+                '-preset', self.config.VIDEO_PRESET,
+                '-crf', str(self.config.VIDEO_CRF),
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-r', '30',
+                '-shortest',
+                '-movflags', '+faststart',
+                str(output_path)
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"✅ [FFmpeg] Slide {slide_num}: Successfully composed.")
+            if not output_path.exists():
+                print(f"[FFmpeg] ERROR: Output not created for slide {slide_num}")
+                return None
+            file_size = output_path.stat().st_size
+            print(f"[FFmpeg] Slide {slide_num} created: {file_size / 1024 / 1024:.2f} MB")
+            return output_path
         except Exception as e:
-            print(f"[Video] Slide {slide_num} error: {e}")
+            print(f"[FFmpeg] Slide {slide_num} error: {e}")
             import traceback
             traceback.print_exc()
             return None
+        finally:
+            if 'text_overlay_path' in locals() and text_overlay_path.exists():
+                text_overlay_path.unlink(missing_ok=True)
 
-    def _extend_clip_with_silence(self, clip: VideoFileClip, additional_duration: float) -> VideoFileClip:
-        from pydub import AudioSegment
-        temp_audio_path = self.config.TEMP_DIR / f"temp_extend_audio_{uuid.uuid4()}.wav"
-        clip.audio.write_audiofile(str(temp_audio_path), logger=None)
-        audio_seg = AudioSegment.from_file(str(temp_audio_path))
-        silence = AudioSegment.silent(duration=int(additional_duration * 1000))
-        extended_audio = audio_seg + silence
-        extended_audio_path = self.config.TEMP_DIR / f"extended_audio_{uuid.uuid4()}.wav"
-        extended_audio.export(str(extended_audio_path), format="wav")
-        extended_audio_clip = AudioFileClip(str(extended_audio_path))
-        video_without_audio = clip.without_audio()
-        extended_video = video_without_audio.set_duration(clip.duration + additional_duration)
-        extended_clip = extended_video.set_audio(extended_audio_clip)
-        try:
-            temp_audio_path.unlink(missing_ok=True)
-        except:
-            pass
-        return extended_clip
-
-    def _apply_transition_between(self, clip1: VideoFileClip, clip2: VideoFileClip, duration: float = 1.0) -> VideoFileClip:
-        if duration <= 0 or duration >= min(clip1.duration, clip2.duration):
-            return concatenate_videoclips([clip1, clip2], method="compose")
+    def create_final_video(self, sentences: List[str], audio_paths: List[Path],
+                          keywords: List[Optional[str]], intro_audio: Optional[Path] = None,
+                          cta_audio: Optional[Path] = None,
+                          music_path: Optional[Path] = None,
+                          music_volume_db: int = -20,
+                          circle_video: Optional[Path] = None,
+                          circle_config: Optional[Dict] = None,
+                          circle_selection: str = "Random",
+                          language: str = 'en',
+                          preferred_media_source: Optional[str] = None,
+                          progress_callback=None) -> Path:
+        temp_dir = self.config.TEMP_DIR / f"final_{uuid.uuid4().hex[:8]}"
+        temp_dir.mkdir(exist_ok=True)
         
-        transition_type = random.choice(['crossfade', 'slide_left', 'slide_right', 'fade_black'])
-        w, h = self.config.VIDEO_WIDTH, self.config.VIDEO_HEIGHT
+        slide_paths = []
+        source_videos = []
         
-        # Audio is usually concatenated simply to keep timing exact
-        full_audio = concatenate_videoclips([clip1, clip2], method="compose").audio
-        
-        if transition_type == 'crossfade':
-            # Create a transition where clip2 fades in over clip1
-            clip2_with_fade = clip2.set_start(clip1.duration - duration).crossfadein(duration)
-            result = CompositeVideoClip([clip1, clip2_with_fade], size=(w, h))
-        elif transition_type == 'slide_left':
-            # Slide left transition: clip2 slides in from the right
-            clip2_with_slide = clip2.set_start(clip1.duration - duration).set_position(lambda t: (w * (1 - t/duration) if t < duration else 0, 0))
-            result = CompositeVideoClip([clip1, clip2_with_slide], size=(w, h))
-        elif transition_type == 'slide_right':
-            # Slide right transition: clip2 slides in from the left
-            clip2_with_slide = clip2.set_start(clip1.duration - duration).set_position(lambda t: (-w * (1 - t/duration) if t < duration else 0, 0))
-            result = CompositeVideoClip([clip1, clip2_with_slide], size=(w, h))
-        elif transition_type == 'fade_black':
-            black = ColorClip((w, h), color=(0, 0, 0), duration=duration).set_start(clip1.duration - duration/2).crossfadein(duration/2).crossfadeout(duration/2)
-            clip2_delayed = clip2.set_start(clip1.duration) # No overlap for fade_black to keep it simple
-            # Actually for a nice fade black we want both to fade to black
-            # But let's keep it simple: clip2 starts after clip1 + gap
-            # Or just use concatenate with black clip
-            black = ColorClip((w, h), color=(0, 0, 0), duration=duration)
-            result = concatenate_videoclips([clip1, black, clip2], method="compose")
-            return result.set_audio(full_audio)
-        else:
-            return concatenate_videoclips([clip1, clip2], method="compose")
-
-        return result.set_duration(clip1.duration + clip2.duration - duration).set_audio(full_audio)
-
-    def create_video_per_sentence(self, sentences: List[str], audio_paths: List[Path],
-                                  sentence_keywords: List[Optional[str]],
-                                  intro_audio_path: Optional[Path] = None,
-                                  cta_audio_path: Optional[Path] = None,
-                                  bg_color: Tuple[int, int, int] = (74, 144, 226),
-                                  add_intro_slide: bool = True,
-                                  add_cta_slide: bool = True,
-                                  use_stable_diffusion: bool = False,
-                                  media_type: str = "mixed",
-                                  single_image_path: Optional[Path] = None,
-                                  enable_circle_overlay: bool = False,
-                                  circle_overlay_config: Optional[Dict] = None,
-                                  overlay_selection: str = "Random",
-                                  progress_callback=None) -> Path:
-        clips = []
-        use_single_image = single_image_path is not None
-        transition_duration = self.config.TRANSITION_CONFIG['duration']
-        sd_slide_indices = set()
-        if media_type == "mixed" and self.sd_manager and not use_single_image:
-            num_sd_slides = max(1, int(len(sentences) * self.config.MIXED_MODE_SD_RATIO))
-            sd_slide_indices = set(random.sample(range(len(sentences)), min(num_sd_slides, len(sentences))))
-            print(f"[OPTIMIZATION] Mixed mode: {num_sd_slides} AI images, {len(sentences) - num_sd_slides} videos")
-        full_audio_path = None
-        if use_single_image:
-            from pydub import AudioSegment
-            combined = AudioSegment.silent(duration=0)
-            if add_intro_slide and intro_audio_path:
-                combined += AudioSegment.from_file(str(intro_audio_path))
-            for ap in audio_paths:
-                combined += AudioSegment.from_file(str(ap))
-            if add_cta_slide and cta_audio_path:
-                combined += AudioSegment.from_file(str(cta_audio_path))
-            full_audio_path = self.config.TEMP_DIR / f"full_audio_{uuid.uuid4()}.wav"
-            combined.export(str(full_audio_path), format="wav")
-        if add_intro_slide and intro_audio_path:
-            try:
-                intro_kw = sentence_keywords[0] if sentence_keywords else None
-                intro_clip = self.create_intro_slide(
-                    intro_audio_path, bg_color=bg_color,
-                    pexels_keyword=intro_kw, single_image_path=single_image_path
-                )
-                if not use_single_image:
-                    intro_clip = self._extend_clip_with_silence(intro_clip, transition_duration)
-                clips.append(intro_clip)
-                print("[Video] Intro slide created")
-            except Exception as e:
-                print(f"[Video] Intro warning: {e}")
+        # Parallel slide generation
         with ThreadPoolExecutor(max_workers=self.config.MAX_PARALLEL_SLIDES) as executor:
-            futures = {}
-            for i, (sentence, audio_path, keyword) in enumerate(zip(sentences, audio_paths, sentence_keywords)):
-                if single_image_path:
-                    future = executor.submit(
-                        self._create_single_slide_with_fixed_image,
-                        sentence, audio_path, bg_color, single_image_path, i + 1
-                    )
-                else:
-                    force_video = (media_type == "mixed" and i not in sd_slide_indices)
-                    future = executor.submit(
-                        self._create_single_slide,
-                        sentence, audio_path, bg_color, keyword, i + 1,
-                        use_stable_diffusion, media_type, force_video
-                    )
-                futures[future] = i
-            slide_results = [None] * len(sentences)
-            for future in as_completed(futures):
-                i = futures[future]
-                try:
-                    video_clip = future.result()
-                    if video_clip:
-                        if not use_single_image and i < len(slide_results) - 1:
-                            video_clip = self._extend_clip_with_silence(video_clip, transition_duration)
-                        slide_results[i] = video_clip
-                        if progress_callback:
-                            progress_callback(i + 1, len(sentences), f"Created slide {i + 1}")
-                except Exception as e:
-                    print(f"[Video] Slide {i + 1} processing error: {e}")
-        for result in slide_results:
-            if result:
-                clips.append(result)
-        if not clips:
-            raise ValueError("No clips were created successfully")
-        if add_cta_slide and cta_audio_path:
-            try:
-                cta_kw = sentence_keywords[-1] if sentence_keywords else None
-                cta_clip = self.create_cta_slide(
-                    cta_audio_path, bg_color=bg_color,
-                    pexels_keyword=cta_kw, single_image_path=single_image_path
-                )
-                clips.append(cta_clip)
-            except Exception as e:
-                print(f"[Video] CTA warning: {e}")
-        if use_single_image:
-            if progress_callback:
-                progress_callback(len(sentences), len(sentences), "Assembling final video with audio visualizer...")
-            final_clip = concatenate_videoclips(clips, method="compose")
-            vis_clip = self._create_audio_visualizer_clip(full_audio_path, final_clip.duration)
-            final_clip = CompositeVideoClip([final_clip, vis_clip])
-        else:
-            if progress_callback:
-                progress_callback(len(sentences), len(sentences), "Applying random transitions...")
-            if len(clips) > 1:
-                current = clips[0]
-                for i in range(1, len(clips)):
-                    current = self._apply_transition_between(current, clips[i], duration=transition_duration)
-                clips = [current]
-            final_clip = clips[0]
-        if enable_circle_overlay:
-            if progress_callback:
-                progress_callback(len(sentences), len(sentences), "Adding circle overlay...")
+            futures = []
             
-            if overlay_selection and overlay_selection != "Random":
-                overlay_video_path = self.config.VIDEO_OVERLAYS_DIR / overlay_selection
-                if not overlay_video_path.exists():
-                    print(f"[Circle Overlay] Selected overlay {overlay_selection} not found, falling back to random")
-                    overlay_video_path = self.circle_overlay_manager.get_random_overlay_video()
-            else:
-                overlay_video_path = self.circle_overlay_manager.get_random_overlay_video()
-            if overlay_video_path:
-                circle_overlay = self.circle_overlay_manager.create_circle_overlay_clip(
-                    overlay_video_path,
-                    final_clip.duration,
-                    diameter=circle_overlay_config.get('diameter') if circle_overlay_config else None,
-                    position=circle_overlay_config.get('position') if circle_overlay_config else None,
-                    border_width=circle_overlay_config.get('border_width') if circle_overlay_config else None,
-                    border_color=circle_overlay_config.get('border_color') if circle_overlay_config else None
-                )
-                if circle_overlay:
-                    final_clip = CompositeVideoClip([final_clip, circle_overlay])
-                    print("[Circle Overlay] Successfully added to video")
-                else:
-                    print("[Circle Overlay] Failed to create overlay, continuing without it")
-            else:
-                print("[Circle Overlay] No overlay videos found in video-overlays folder")
+            # Submit intro slide if needed
+            if intro_audio:
+                intro_video_bg = self.get_background_video("intro", "Welcome", language, preferred_media_source)
+                if intro_video_bg:
+                    source_videos.append(intro_video_bg)
+                intro_output = temp_dir / "slide_intro.mp4"
+                futures.append(executor.submit(
+                    self._create_slide_with_ffmpeg,
+                    "", intro_audio, intro_video_bg, intro_output, -1, # -1 for intro slide_num
+                    True, False, None, None, language # No circle for intro/cta
+                ))
+
+            # Submit main content slides
+            for i, (sentence, audio_path, keyword) in enumerate(zip(sentences, audio_paths, keywords)):
+                # Get background video for this slide
+                video_bg = self.get_background_video(keyword, sentence, language, preferred_media_source)
+                if video_bg:
+                    source_videos.append(video_bg)
+                
+                output_path = temp_dir / f"slide_{i:03d}.mp4"
+                futures.append(executor.submit(
+                    self._create_slide_with_ffmpeg,
+                    sentence, audio_path, video_bg, output_path, i,
+                    False, False, circle_video, circle_config, language
+                ))
+                
+            # Submit CTA slide if needed
+            if cta_audio:
+                cta_video_bg = self.get_background_video("outro", "Goodbye", language, preferred_media_source)
+                if cta_video_bg:
+                    source_videos.append(cta_video_bg)
+                cta_output = temp_dir / "slide_cta.mp4"
+                futures.append(executor.submit(
+                    self._create_slide_with_ffmpeg,
+                    "", cta_audio, cta_video_bg, cta_output, 999, # 999 for cta slide_num
+                    False, True, None, None, language # No circle for intro/cta
+                ))
+
+            # Collect results in order of slide_num
+            results_map = {}
+            for i, future in enumerate(as_completed(futures)):
+                try:
+                    path_created = future.result()
+                    if path_created:
+                        slide_paths.append(path_created)
+                    if progress_callback:
+                        progress_callback(i + 1, len(futures), "Generating slides...")
+                except Exception as e:
+                    print(f"[FFmpeg] Slide error: {e}")
+        
+        # Sort slide_paths based on their slide_num
+        slide_paths.sort(key=lambda p: int(re.search(r'slide_(\w+)\.mp4', p.name).group(1)) if re.search(r'slide_(\d+)\.mp4', p.name) else (0 if 'intro' in p.name else (9999 if 'cta' in p.name else 0)))
+
+
+        if not slide_paths:
+            raise ValueError("No slides created")
+
         if progress_callback:
-            progress_callback(len(sentences), len(sentences), "Exporting final video...")
-        output_path = self.config.TEMP_DIR / f"video_{uuid.uuid4()}.mp4"
-        print(f"[MoviePy] Final export phase started. Output: {output_path}")
-        try:
-            import time
-            start_time = time.time()
-            final_clip.write_videofile(
-                str(output_path),
-                fps=self.config.FPS,
-                codec=self.config.VIDEO_CODEC,
-                audio_codec=self.config.AUDIO_CODEC,
-                audio_bitrate='192k',
-                logger='bar',
-                preset=self.config.VIDEO_PRESET,
-                threads=4,
-                ffmpeg_params=["-crf", str(self.config.VIDEO_CRF)]
-            )
-            elapsed = time.time() - start_time
-            print(f"[MoviePy] Export finished in {elapsed:.2f}s")
-        except Exception as e:
-            print(f"[MoviePy] EXPORT ERROR: {e}")
-            raise
-        for clip in clips:
+            progress_callback(len(sentences), len(sentences), "Concatenating slides...")
+
+        concat_file = self.config.TEMP_DIR / f"concat_{uuid.uuid4().hex[:8]}.txt"
+        with open(concat_file, 'w') as f:
+            for slide_path in slide_paths:
+                f.write(f"file '{slide_path.absolute()}'\n")
+
+        output_path = self.config.TEMP_DIR / f"final_{uuid.uuid4().hex[:8]}.mp4"
+        concat_cmd = [
+            'ffmpeg', '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', str(concat_file),
+            '-c', 'copy',
+            str(output_path)
+        ]
+        print("[FFmpeg] Concatenating slides...")
+        subprocess.run(concat_cmd, check=True, capture_output=True)
+        concat_file.unlink(missing_ok=True)
+        
+        # Cleanup rendered slides
+        for slide_path in slide_paths:
             try:
-                clip.close()
+                slide_path.unlink(missing_ok=True)
             except:
                 pass
-        try:
-            final_clip.close()
-        except:
-            pass
-        if full_audio_path and full_audio_path.exists():
+        
+        # Cleanup source background videos (only those downloaded/sourced for this session)
+        print(f"🧹 [Cleanup] Removing {len(source_videos)} source background videos...")
+        for sv_path in source_videos:
             try:
-                full_audio_path.unlink()
-            except:
-                pass
+                # Check if it's in the background_videos directory (don't delete user/permanent assets elsewhere)
+                if sv_path.exists() and str(self.config.VIDEOS_DIR.absolute()) in str(sv_path.absolute()):
+                    sv_path.unlink(missing_ok=True)
+                    # Also try to remove the parent directory if it's empty (keyword folders)
+                    parent = sv_path.parent
+                    if parent != self.config.VIDEOS_DIR and parent.exists() and not any(parent.iterdir()):
+                        parent.rmdir()
+            except Exception as e:
+                print(f"[Cleanup] Error removing source video {sv_path}: {e}")
+
         return output_path
 
-# =============== TEXT TO VIDEO GENERATOR — WITH DB CACHING ===============
+# =============== TEXT TO VIDEO GENERATOR ===============
 class TextToVideoGenerator:
     def __init__(self):
         self.config = Config()
         self.keyword_extractor = KeywordExtractor()
         self.tts_manager = TTSManager(self.config)
-        self.video_generator = VideoGenerator(self.config, keyword_extractor=self.keyword_extractor)
+        self.video_generator = FFmpegVideoGenerator(self.config, keyword_extractor=self.keyword_extractor)
         self.available_voices = self._get_available_voices()
         self.available_music = self._get_available_music()
-        self.available_overlays = self._get_available_overlays()
+        self.available_circles = self._get_available_circles()
+        self.available_languages = list(SUPPORTED_LANGUAGES.keys())
 
     def _get_available_voices(self) -> List[str]:
         voices = [self.config.STANDARD_VOICE_NAME]
@@ -1133,36 +660,38 @@ class TextToVideoGenerator:
 
     def _get_available_music(self) -> List[str]:
         music_files = self.video_generator.get_available_music_files()
-        music_names = ["Random"] + [m['name'] for m in music_files]
-        return music_names
+        return ["Random"] + [m['name'] for m in music_files]
 
-    def _get_available_overlays(self) -> List[str]:
-        overlay_videos = self.video_generator.circle_overlay_manager.get_available_overlay_videos()
-        return [v.name for v in overlay_videos]
+    def _get_available_circles(self) -> List[str]:
+        circles = []
+        for ext in ['*.mp4', '*.mov', '*.avi', '*.webm']:
+            if self.config.CIRCLE_OVERLAYS_DIR.exists():
+                circles.extend(list(self.config.CIRCLE_OVERLAYS_DIR.glob(ext)))
+        return ["Random"] + [v.name for v in sorted(circles)]
 
     def generate_video(self, text: str, speaker_id: str = "Standard Voice (Non-Cloned)",
-                       bg_color: Tuple[int, int, int] = (74, 144, 226),
-                       pexels_keyword: Optional[str] = None,
-                       enable_background_music: bool = True,
-                       music_selection: str = "Random",
-                       music_volume_db: int = -27,
-                       add_intro_slide: bool = True,
-                       add_call_to_action: bool = True,
-                       use_random_voices: bool = False,
-                       use_stable_diffusion: bool = True,
-                       media_type: str = "mixed",
-                       use_single_image_mode: bool = False,
-                       enable_circle_overlay: bool = False,
-                       circle_diameter: int = 300,
-                       circle_position: str = "top-right",
+                      language: str = 'en',
+                      pexels_keyword: Optional[str] = None,
+                      preferred_media_source: Optional[str] = None,
+                      enable_background_music: bool = True,
+                      music_selection: str = "Random",
+                      music_volume_db: int = -15,
+                      add_intro_slide: bool = True,
+                      add_call_to_action: bool = True,
+                      use_random_voices: bool = False,
+                      enable_circle_overlay: bool = False,
+                      circle_diameter: int = 300,
+                      circle_position: str = "top-right",
                        circle_border_width: int = 5,
-                       overlay_selection: str = "Random",
+                       circle_selection: str = "Random",
+                       circle_upload_path: Optional[str] = None,
                        progress_callback=None) -> Dict:
-        # Prepare input parameters for DB caching
+        # Reset keywords for this session
+        self.keyword_extractor.clear_used()
         input_params = {
             'text': text,
             'speaker_id': speaker_id,
-            'bg_color': bg_color,
+            'language': language,
             'pexels_keyword': pexels_keyword,
             'enable_background_music': enable_background_music,
             'music_selection': music_selection,
@@ -1170,184 +699,164 @@ class TextToVideoGenerator:
             'add_intro_slide': add_intro_slide,
             'add_call_to_action': add_call_to_action,
             'use_random_voices': use_random_voices,
-            'use_stable_diffusion': use_stable_diffusion,
-            'media_type': media_type,
-            'use_single_image_mode': use_single_image_mode,
             'enable_circle_overlay': enable_circle_overlay,
             'circle_diameter': circle_diameter,
             'circle_position': circle_position,
             'circle_border_width': circle_border_width,
-            'overlay_selection': overlay_selection,
+            'circle_selection': circle_selection,
+            'circle_upload_path': str(circle_upload_path) if circle_upload_path else None
         }
-        # Check if this exact video was generated before
-        cached_result = DB.get_cached_video(input_params)
-        if cached_result:
-            print("[DB] Reusing previously generated video from cache")
-            return cached_result
+
         if not text or not text.strip():
             return {"error": "Text cannot be empty", "success": False}
         if len(text) > 10000:
-            return {"error": "Text is too long (max 10,000 characters)", "success": False}
-        if music_volume_db != self.config.MUSIC_CONFIG['music_volume_db']:
-            self.config.MUSIC_CONFIG['music_volume_db'] = music_volume_db
+            return {"error": "Text too long (max 10,000 chars)", "success": False}
+
         sentences = self.video_generator.split_into_sentences(text)
         if len(sentences) > 100:
             return {"error": "Too many sentences (max 100)", "success": False}
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        session_dir = self.config.OUTPUT_DIR / f"video_{timestamp}"
+        session_dir = self.config.OUTPUT_DIR / f"video_{timestamp}_{language}"
         session_dir.mkdir(exist_ok=True)
-        single_image_path = None
-        if use_single_image_mode:
-            single_image_path = self.video_generator.get_single_ai_background_image(text, pexels_keyword)
-            
-        # Reset and prepare keywords for this session
-        self.keyword_extractor.clear_used()
-        if pexels_keyword and pexels_keyword.strip():
-            sentence_keywords = [pexels_keyword.strip()] * len(sentences)
-        else:
-            sentence_keywords = []
-            for sent in sentences:
-                kw = self.keyword_extractor.get_best_unique_keyword(sent)
-                sentence_keywords.append(kw)
+
+        sentence_keywords = []
+        for sent in sentences:
+            kw = self.keyword_extractor.get_best_unique_keyword(sent, language)
+            sentence_keywords.append(kw)
+
         audio_paths = []
         intro_audio_path = None
         cta_audio_path = None
         music_path = None
+
         try:
             if enable_background_music:
                 music_path = self.video_generator.get_music_by_name(music_selection)
-            if use_random_voices:
-                voices_for_sentences = [random.choice(self.available_voices) for _ in sentences]
-            else:
-                voices_for_sentences = [speaker_id] * len(sentences)
+
+            voices_for_sentences = [random.choice(self.available_voices) for _ in sentences] if use_random_voices else [speaker_id] * len(sentences)
+
             if add_intro_slide:
                 intro_voice = speaker_id if not use_random_voices else random.choice(self.available_voices)
-                intro_audio_path = self.tts_manager.generate_speech(self.config.INTRO_MESSAGE, intro_voice)
+                intro_msg = self.config.INTRO_MESSAGES.get(language, self.config.INTRO_MESSAGES['en'])
+                intro_audio_path = self.tts_manager.generate_speech(intro_msg, intro_voice, language)
+
             for i, (sentence, voice) in enumerate(zip(sentences, voices_for_sentences)):
                 if progress_callback:
-                    voice_name = voice if len(voice) < 30 else voice[:27] + "..."
-                    progress_callback(i + 1, len(sentences) * 2, f"Audio {i + 1}/{len(sentences)} ({voice_name})")
-                audio_path = self.tts_manager.generate_speech(sentence, voice)
+                    progress_callback(i + 1, len(sentences) * 2, f"Generating audio {i + 1}/{len(sentences)}")
+                audio_path = self.tts_manager.generate_speech(sentence, voice, language)
                 audio_paths.append(audio_path)
+
             if add_call_to_action:
                 cta_voice = speaker_id if not use_random_voices else voices_for_sentences[-1]
-                cta_audio_path = self.tts_manager.generate_speech(self.config.CTA_MESSAGE, cta_voice)
+                cta_msg = self.config.CTA_MESSAGES.get(language, self.config.CTA_MESSAGES['en'])
+                cta_audio_path = self.tts_manager.generate_speech(cta_msg, cta_voice, language)
+
             def video_progress(current, total, message):
                 if progress_callback:
                     progress_callback(len(sentences) + current, len(sentences) * 2, message)
-            circle_overlay_config = None
+
+            circle_config = {
+                'diameter': circle_diameter,
+                'position': circle_position,
+                'border_width': circle_border_width,
+            }
+            circle_video_path = None
             if enable_circle_overlay:
-                circle_overlay_config = {
-                    'diameter': circle_diameter,
-                    'position': circle_position,
-                    'border_width': circle_border_width,
-                    'border_color': (255, 255, 255)
-                }
-            video_temp_path = self.video_generator.create_video_per_sentence(
+                if circle_upload_path and Path(circle_upload_path).exists():
+                    # Move uploaded file to session dir just in case
+                    uploaded_path = Path(circle_upload_path)
+                    circle_video_path = session_dir / f"uploaded_circle_{uploaded_path.name}"
+                    shutil.copy(circle_upload_path, circle_video_path)
+                elif circle_selection and circle_selection != "Random":
+                    circle_video_path = self.config.CIRCLE_OVERLAYS_DIR / circle_selection
+                    if not circle_video_path.exists():
+                        print(f"[Circle] Selected overlay {circle_selection} not found, falling back to random")
+                        circle_video_path = self.video_generator.get_circle_overlay_video()
+                else:
+                    circle_video_path = self.video_generator.get_circle_overlay_video()
+
+            # Final Video Generation
+            video_temp_path = self.video_generator.create_final_video(
                 sentences=sentences,
                 audio_paths=audio_paths,
-                sentence_keywords=sentence_keywords,
-                intro_audio_path=intro_audio_path,
-                cta_audio_path=cta_audio_path,
-                bg_color=bg_color,
-                add_intro_slide=add_intro_slide,
-                add_cta_slide=add_call_to_action,
-                use_stable_diffusion=use_stable_diffusion,
-                media_type=media_type,
-                single_image_path=single_image_path,
-                enable_circle_overlay=enable_circle_overlay,
-                circle_overlay_config=circle_overlay_config,
-                overlay_selection=overlay_selection,
+                keywords=sentence_keywords,
+                intro_audio=intro_audio_path,
+                cta_audio=cta_audio_path,
+                music_volume_db=music_volume_db,
+                circle_video=circle_video_path,
+                circle_config=circle_config,
+                circle_selection=circle_selection,
+                language=language,
+                preferred_media_source=preferred_media_source,
                 progress_callback=video_progress
             )
-            final_video_clip = VideoFileClip(str(video_temp_path))
+
             if enable_background_music and music_path and music_path.exists():
-                voice_segment = AudioSegment.from_file(str(video_temp_path), format="mp4")
-                music = AudioSegment.from_file(str(music_path))
-                cfg = self.config.MUSIC_CONFIG
-                music = music + cfg['music_volume_db']
-                if len(music) < len(voice_segment):
-                    loops_needed = (len(voice_segment) // len(music)) + 2
-                    looped_music = music
-                    for _ in range(loops_needed - 1):
-                        looped_music = looped_music.append(music, crossfade=cfg['crossfade_duration'])
-                    music = looped_music
-                music = music[:len(voice_segment)]
-                music = music.fade_in(cfg['fade_in_duration']).fade_out(cfg['fade_out_duration'])
-                mixed = voice_segment.overlay(music)
-                mixed_audio_path = self.config.TEMP_DIR / f"final_mixed_audio_{uuid.uuid4()}.wav"
-                mixed.export(str(mixed_audio_path), format="wav")
-                mixed_audio_clip = AudioFileClip(str(mixed_audio_path))
-                final_video_clip = final_video_clip.set_audio(mixed_audio_clip)
-            else:
-                mixed_audio_path = None
-            video_final_path = session_dir / f"video_portrait_{timestamp}.mp4"
-            final_video_clip.write_videofile(
-                str(video_final_path),
-                fps=30,
-                codec='libx264',
-                audio_codec='aac',
-                logger=None,
-                preset=self.config.VIDEO_PRESET,
-                threads=4,
-                ffmpeg_params=["-crf", str(self.config.VIDEO_CRF)]
-            )
-            audio_only_path = session_dir / f"audio_{timestamp}.mp3"
-            if mixed_audio_path:
-                mixed_audio_segment = AudioSegment.from_file(str(mixed_audio_path))
-            else:
-                original_audio = AudioSegment.from_file(str(video_temp_path), format="mp4")
-                mixed_audio_segment = original_audio
-            mixed_audio_segment.export(str(audio_only_path), format="mp3", bitrate="192k")
-            try:
+                if progress_callback:
+                    progress_callback(len(sentences) * 2 - 1, len(sentences) * 2, "Adding background music...")
+                audio_extract = self.config.TEMP_DIR / f"extracted_{uuid.uuid4().hex[:8]}.wav"
+                subprocess.run(['ffmpeg', '-y', '-i', str(video_temp_path), '-vn', '-acodec', 'pcm_s16le', str(audio_extract)],
+                             check=True, capture_output=True)
+                voice_seg = AudioSegment.from_file(str(audio_extract))
+                music = AudioSegment.from_file(str(music_path)) + music_volume_db
+                if len(music) < len(voice_seg):
+                    loops = (len(voice_seg) // len(music)) + 2
+                    music = music * loops
+                music = music[:len(voice_seg)]
+                music = music.fade_in(1000).fade_out(1000)
+                mixed = voice_seg.overlay(music)
+                mixed_audio = self.config.TEMP_DIR / f"mixed_{uuid.uuid4().hex[:8]}.wav"
+                mixed.export(str(mixed_audio), format="wav")
+                video_with_music = self.config.TEMP_DIR / f"with_music_{uuid.uuid4().hex[:8]}.mp4"
+                subprocess.run(['ffmpeg', '-y', '-i', str(video_temp_path), '-i', str(mixed_audio),
+                              '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-map', '0:v:0', '-map', '1:a:0', '-shortest',
+                              str(video_with_music)], check=True, capture_output=True)
+                audio_extract.unlink(missing_ok=True)
+                mixed_audio.unlink(missing_ok=True)
                 video_temp_path.unlink(missing_ok=True)
-                if mixed_audio_path:
-                    mixed_audio_path.unlink(missing_ok=True)
-            except:
-                pass
-            sd_images_count = 0
-            if use_single_image_mode and single_image_path:
-                sd_images_count = 1
-            else:
-                for kw in sentence_keywords:
-                    if kw and kw in _media_source_cache and _media_source_cache[kw] == 'sd':
-                        sd_images_count += 1
+                video_temp_path = video_with_music
+
+            lang_name = SUPPORTED_LANGUAGES.get(language, {}).get('name', language)
+            video_final = session_dir / f"video_{timestamp}_{language}.mp4"
+            shutil.move(str(video_temp_path), str(video_final))
+
+            audio_final = session_dir / f"audio_{timestamp}_{language}.mp3"
+            subprocess.run(['ffmpeg', '-y', '-i', str(video_final), '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', str(audio_final)],
+                         check=True, capture_output=True)
+
             result = {
                 "success": True,
-                "audio_path": str(audio_only_path),
-                "video_path": str(video_final_path),
+                "audio_path": str(audio_final),
+                "video_path": str(video_final),
                 "output_directory": str(session_dir),
                 "sentence_count": len(sentences),
+                "language": lang_name,
+                "language_code": language,
                 "background_music": enable_background_music and music_path is not None,
-                "music_used": os.path.basename(music_path) if music_path else None,
+                "music_used": music_path.name if music_path else None,
                 "intro_included": add_intro_slide,
                 "cta_included": add_call_to_action,
                 "video_format": "9:16 Portrait (1080x1920)",
-                "text_style": "White subtitle-style at bottom, no background, dynamic font size",
-                "logo_included": self.video_generator.logo_clip is not None,
-                "transitions": "Random: crossfade, slide, zoom, fade-to-black (SYNCED)" if not use_single_image_mode else "None (Visualizer + Effects)",
-                "video_backgrounds": f"Pexels/Giphy/SD ({media_type})",
+                "video_backgrounds": "Pexels/Giphy API + Local",
                 "random_voices": use_random_voices,
-                "voices_used": voices_for_sentences if use_random_voices else None,
-                "media_type": media_type,
-                "sd_images_used": sd_images_count,
-                "single_image_mode": use_single_image_mode,
                 "circle_overlay_enabled": enable_circle_overlay,
-                "circle_overlay_position": circle_position if enable_circle_overlay else None,
-                "circle_overlay_selection": overlay_selection if enable_circle_overlay else None,
+                "circle_position": circle_position if enable_circle_overlay else None,
+                "circle_selection": circle_selection if enable_circle_overlay else None,
             }
-            # Save to DB
+
             DB.save_video(input_params, result)
             return result
+
         except Exception as e:
-            print(f"[Error] Video generation failed: {e}")
+            print(f"[Error] {e}")
             import traceback
             traceback.print_exc()
             return {"error": str(e), "success": False}
         finally:
-            for audio_path in audio_paths:
+            for ap in audio_paths:
                 try:
-                    audio_path.unlink(missing_ok=True)
+                    ap.unlink(missing_ok=True)
                 except:
                     pass
             if intro_audio_path:
@@ -1361,245 +870,216 @@ class TextToVideoGenerator:
                 except:
                     pass
 
-# =============== UI ===============
+# =============== GRADIO UI ===============
 def setup_ui(generator: TextToVideoGenerator):
-    with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"),
-                   title="Optimized Portrait Video Generator") as demo:
-        gr.Markdown("# 🎥 Optimized Portrait Video Generator")
-        gr.Markdown("**CPU-ONLY** + **TTS & Video Caching via SQLite**!")
+    with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), title="AI Video Generator Pro") as demo:
+        gr.Markdown("# 🎬 AI Video Generator Pro")
+        gr.Markdown("Create stunning videos with multi-language TTS, auto-backgrounds, and dynamic overlays.")
+
         with gr.Row():
-            with gr.Column():
-                text_input = gr.Textbox(
-                    label="Enter Your Text",
-                    placeholder="Each sentence will get backgrounds!",
-                    lines=8
-                )
-                with gr.Row():
-                    speaker_dropdown = gr.Dropdown(
-                        label="Voice",
-                        choices=generator.available_voices,
-                        value=generator.config.STANDARD_VOICE_NAME
-                    )
-                    bg_color_picker = gr.ColorPicker(
-                        label="Background Color (Fallback)",
-                        value="#4A90E2"
-                    )
-                media_type_radio = gr.Radio(
-                    label="🖼️ Background Media Type",
-                    choices=[
-                        ("✅ Mixed (20% AI + 80% Videos) - FAST", "mixed"),
-                        ("🎬 Videos Only (Pexels/Giphy) - FASTEST", "video_only"),
-                        ("🎨 AI Images Only (Stable Diffusion) - SLOW", "sd_only")
-                    ],
-                    value="mixed",
-                    info="Mixed mode is now OPTIMIZED for speed!"
-                )
-                use_sd = gr.Checkbox(
-                    label="🖼️ Prefer Stable Diffusion (Mixed Mode Only)",
-                    value=False,
-                    info="Increase AI image ratio in mixed mode (slower but more creative)"
-                )
-                use_single_image_mode = gr.Checkbox(
-                    label="📷 Single AI Image Mode (Podcast Style)",
-                    value=False,
-                    info="One AI image for entire video with audio visualizer and Ken Burns effects"
-                )
-                gr.Markdown("---")
-                gr.Markdown("### ⭕ Circle Video Overlay (NEW!)")
-                enable_circle_overlay = gr.Checkbox(
-                    label="Enable Circle Video Overlay",
-                    value=False,
-                    info="Add a circular video overlay from video-overlays folder."
-                )
-                overlay_selection = gr.Dropdown(
-                    label="Circle Overlay Video",
-                    choices=["Random"] + generator.available_overlays,
-                    value="Random",
-                    info="Choose a specific video for the circle overlay"
-                )
-                with gr.Row():
-                    circle_diameter = gr.Slider(
-                        minimum=150,
-                        maximum=500,
-                        value=300,
-                        step=50,
-                        label="Circle Diameter (px)",
-                        info="Size of the circular overlay"
-                    )
-                    circle_position = gr.Dropdown(
-                        label="Circle Position",
-                        choices=[
-                            "top-left",
-                            "top-right",
-                            "bottom-left",
-                            "bottom-right",
-                            "center"
-                        ],
-                        value="top-right",
-                        info="Where to place the circle overlay"
-                    )
-                circle_border_width = gr.Slider(
-                    minimum=0,
-                    maximum=15,
-                    value=5,
-                    step=1,
-                    label="Border Width (px)",
-                    info="Thickness of the white border around circle"
-                )
-                gr.Markdown("---")
-                enable_intro = gr.Checkbox(label="Add Welcome Intro Slide", value=True)
-                enable_cta = gr.Checkbox(label="Add Call-to-Action Outro Slide", value=True)
-                enable_music = gr.Checkbox(label="Enable Background Music", value=True)
-                music_dropdown = gr.Dropdown(
-                    label="🎵 Select Background Music",
-                    choices=generator.available_music,
-                    value="Random"
-                )
-                use_random_voices = gr.Checkbox(
-                    label="🗣️ Use Random Voice Per Sentence",
-                    value=False
-                )
-                music_volume = gr.Slider(-40, -5, value=-15, step=1, label="Music Volume (dB)")
-                pexels_keyword = gr.Textbox(
-                    label="Manual Keyword Override (Optional)",
-                    placeholder="Leave empty for per-sentence AI extraction"
-                )
-                progress_bar = gr.Textbox(label="Progress", value="Ready...", interactive=False)
-                generate_button = gr.Button("🎥 Generate Video", variant="primary", size="lg")
-            with gr.Column():
-                audio_output = gr.Audio(label="Generated Audio")
-                video_output = gr.Video(label="Generated Video")
-                status_output = gr.Markdown()
-        gr.Markdown("""
-        ### ✅ Performance Optimization
-        - **SQLite Caching**: TTS and full videos are reused if inputs unchanged
-        - **CPU-Only**: Safe for systems without GPU
-        - **Mixed Mode (DEFAULT)**: 20% AI images, 80% videos — best speed/creativity balance
-        - **Single Image Mode**: Ideal for long podcasts or narration
-        - **Circle Overlay**: Add branding or presenter PIP
-        """)
-        def generate_wrapper(text, speaker, bg_hex, keyword, enable_music, music_selection, music_vol,
-                             enable_intro, enable_cta, random_voices, use_sd_pref, media_type_val,
-                             use_single_image, enable_overlay, overlay_diameter, overlay_position, 
-                             overlay_border, overlay_selection_val, progress=gr.Progress()):
+            with gr.Column(scale=1):
+                with gr.Tabs():
+                    with gr.TabItem("📝 Content"):
+                        text_input = gr.Textbox(
+                            label="Text Content",
+                            placeholder="Enter your script here...",
+                            lines=10
+                        )
+                        with gr.Row():
+                            language_dropdown = gr.Dropdown(
+                                label="🌐 Language",
+                                choices=[(SUPPORTED_LANGUAGES[k]['name'], k) for k in generator.available_languages],
+                                value='en'
+                            )
+                            speaker_dropdown = gr.Dropdown(
+                                label="🎙️ Voice",
+                                choices=generator.available_voices,
+                                value=generator.config.STANDARD_VOICE_NAME
+                            )
+                        use_random_voices = gr.Checkbox(label="🎲 Random voice per sentence", value=False)
+
+                    with gr.TabItem("🎥 Media"):
+                        media_source_dropdown = gr.Dropdown(
+                            label="🎞️ Preferred Media Source",
+                            choices=["Random", "Pexels", "YouTube", "Giphy", "Dailymotion", "Vimeo", "Twitch", "PeerTube", "api.video", "Cloudflare Stream", "Mux", "Kaltura", "JSON2Video"],
+                            value="Random",
+                            info="Select your primary source for background videos (Random shuffles available APIs)"
+                        )
+                        pexels_keyword = gr.Textbox(
+                            label="🔍 Custom Search Keyword",
+                            placeholder="e.g., 'cyberpunk city', 'peaceful forest'",
+                            info="Leave empty for auto-extraction"
+                        )
+                        with gr.Row():
+                            enable_music = gr.Checkbox(label="🎵 Add background music", value=True)
+                            music_dropdown = gr.Dropdown(
+                                label="Music Track",
+                                choices=generator.available_music,
+                                value="Random"
+                            )
+                        music_volume = gr.Slider(-40, -5, -15, 1, label="Music Volume (dB)")
+
+                    with gr.TabItem("⭕ Overlays"):
+                        enable_circle = gr.Checkbox(label="Enable Picture-in-Picture Circle", value=False)
+                        circle_selection = gr.Dropdown(
+                            label="Circle Content (Local Folder)",
+                            choices=generator.available_circles,
+                            value="Random",
+                            info="Select a video from the local 'circle_overlays' folder"
+                        )
+                        circle_upload = gr.File(
+                            label="📤 Upload Custom Circle Video",
+                            file_types=["video"],
+                            type="filepath"
+                        )
+                        with gr.Row():
+                            circle_diameter = gr.Slider(150, 600, 300, 25, label="Diameter (px)")
+                            circle_border_width = gr.Slider(0, 20, 5, 1, label="Border Width (px)")
+                            circle_position = gr.Dropdown(
+                                ["top-left", "top-right", "bottom-left", "bottom-right", "center"],
+                                value="top-right",
+                                label="Position"
+                            )
+
+                    with gr.TabItem("⚙️ Advanced"):
+                        with gr.Row():
+                            enable_intro = gr.Checkbox(label="📢 Add Intro Slide", value=True)
+                            enable_cta = gr.Checkbox(label="📣 Add CTA Outro", value=True)
+                        gr.Markdown("More advanced settings coming soon (resolution, frame rate, etc.)")
+
+                generate_button = gr.Button("🚀 Generate Video", variant="primary", size="lg")
+                progress_bar = gr.Textbox(label="⚡ Status", value="Ready", interactive=False)
+
+            with gr.Column(scale=1):
+                video_output = gr.Video(label="Generated Video", height=600)
+                audio_output = gr.Audio(label="Extracted Voiceover")
+                status_output = gr.Markdown(value="*Your video will appear here after generation.*")
+
+        def generate_wrapper(text, language, speaker, use_random, media_source, keyword,
+                            enable_music, music_select, music_vol,
+                            enable_circle, circle_sel, circle_upload_path, circle_diam, circle_pos, circle_border,
+                            enable_intro, enable_cta, progress=gr.Progress()):
+            
             if not text or not text.strip():
-                return None, None, "❌ Error: Please enter some text", "Ready..."
-            bg_hex = bg_hex.lstrip('#')
-            try:
-                bg_color = tuple(int(bg_hex[i:i + 2], 16) for i in (0, 2, 4))
-            except:
-                bg_color = (74, 144, 226)
-            keyword = keyword.strip() if keyword else None
+                return None, None, "❌ **Error:** Please enter some text.", "Ready"
+
             def update_progress(current, total, message):
                 progress((current, total), desc=message)
-                return f"Progress: {current}/{total} - {message}"
+                return f"{current}/{total}: {message}"
+
             result = generator.generate_video(
                 text=text,
+                language=language,
                 speaker_id=speaker,
-                bg_color=bg_color,
-                pexels_keyword=keyword,
+                pexels_keyword=keyword.strip() if keyword else None,
+                preferred_media_source=media_source,
                 enable_background_music=enable_music,
-                music_selection=music_selection,
+                music_selection=music_select,
                 music_volume_db=music_vol,
                 add_intro_slide=enable_intro,
                 add_call_to_action=enable_cta,
-                use_random_voices=random_voices,
-                use_stable_diffusion=use_sd_pref,
-                media_type=media_type_val,
-                use_single_image_mode=use_single_image,
-                enable_circle_overlay=enable_overlay,
-                circle_diameter=overlay_diameter,
-                circle_position=overlay_position,
-                circle_border_width=overlay_border,
-                overlay_selection=overlay_selection_val,
+                use_random_voices=use_random,
+                enable_circle_overlay=enable_circle,
+                circle_diameter=circle_diam,
+                circle_position=circle_pos,
+                circle_selection=circle_sel,
+                circle_upload_path=circle_upload_path,
+                circle_border_width=circle_border,
                 progress_callback=update_progress
             )
+
             if result.get("success"):
-                voices_info = ""
-                if result.get('random_voices') and result.get('voices_used'):
-                    voices_list = result['voices_used']
-                    voices_summary = ', '.join([v[:20] + '...' if len(v) > 20 else v for v in voices_list[:5]])
-                    if len(voices_list) > 5:
-                        voices_summary += f" ... ({len(voices_list)} total)"
-                    voices_info = f"\n- Voices Used: {voices_summary}"
-                music_info = ""
-                if result.get('music_used'):
-                    music_info = f"\n- Music Track: {result['music_used']}"
-                logo_info = ""
-                if result.get('logo_included'):
-                    logo_info = "\n- 🖼️ Logo Overlay: Active"
-                sd_info = ""
-                if result.get('sd_images_used'):
-                    mode_desc = " (Single)" if result.get('single_image_mode') else ""
-                    sd_info = f"\n- 🖼️ AI Images Generated: {result['sd_images_used']}{mode_desc}"
-                media_info = f"\n- Media Type: {result.get('media_type', 'mixed').replace('_', ' ').title()}"
-                overlay_info = ""
-                if result.get('circle_overlay_enabled'):
-                    overlay_pos = result.get('circle_overlay_position', 'top-right')
-                    overlay_sel = result.get('circle_overlay_selection', 'Random')
-                    overlay_info = f"\n- ⭕ Circle Overlay: Enabled ({overlay_pos}, {overlay_sel})"
-                status = f"""✅ **Video Created Successfully!**
-**Details:**
-- Sentences: {result['sentence_count']}
-- Format: {result['video_format']}
-- Text Style: {result.get('text_style', 'Subtitle-style')}
-- Intro Slide: {'Yes' if result.get('intro_included') else 'No'}
-- CTA Outro: {'Yes' if result['cta_included'] else 'No'}
-- Transitions: {result.get('transitions', 'Random effects')}{logo_info}{media_info}{sd_info}{overlay_info}
-- Background Music: {'Yes' if result['background_music'] else 'No'}{music_info}
-- Random Voices: {'Yes' if result.get('random_voices') else 'No'}{voices_info}
-- Output: `{result['output_directory']}`
+                status_md = f"""### ✅ Generation Complete!
+- **Video:** {result['video_path']}
+- **Duration:** {result.get('duration', 'N/A')}s
+- **Source:** {media_source}
 """
-                return result["audio_path"], result["video_path"], status, "✅ Complete!"
-            error_msg = f"❌ **Error:** {result.get('error', 'Unknown error occurred')}"
-            return None, None, error_msg, "❌ Failed"
+                return result["video_path"], result["audio_path"], status_md, "Complete!"
+            
+            return None, None, f"❌ **Error:** {result.get('error', 'Unknown error')}", "Failed"
+
         generate_button.click(
             fn=generate_wrapper,
-            inputs=[text_input, speaker_dropdown, bg_color_picker, pexels_keyword,
-                    enable_music, music_dropdown, music_volume, enable_intro, enable_cta,
-                    use_random_voices, use_sd, media_type_radio, use_single_image_mode,
-                    enable_circle_overlay, circle_diameter, circle_position, circle_border_width,
-                    overlay_selection],
-            outputs=[audio_output, video_output, status_output, progress_bar]
+            inputs=[
+                text_input, language_dropdown, speaker_dropdown, use_random_voices,
+                media_source_dropdown, pexels_keyword,
+                enable_music, music_dropdown, music_volume,
+                enable_circle, circle_selection, circle_upload, circle_diameter, circle_position, circle_border_width,
+                enable_intro, enable_cta
+            ],
+            outputs=[video_output, audio_output, status_output, progress_bar]
         )
-    demo.launch(server_name="0.0.0.0", server_port=1602, share=False)
+    return demo
 
 # =============== MAIN ===============
 if __name__ == "__main__":
     try:
         from dotenv import load_dotenv
     except ImportError:
-        print("🚨 python-dotenv not installed. Run: pip install python-dotenv")
+        print("❌ python-dotenv not found. Install: pip install python-dotenv")
         exit(1)
     if not MODELS_AVAILABLE:
-        print("\n🚨 Missing required libraries. Please install:")
-        print("pip install TTS speechbrain pydub moviepy Pillow num2words torch torchaudio gradio requests spacy python-dotenv diffusers transformers accelerate")
-        print("python -m spacy download en_core_web_md")
+        print("❌ Missing TTS libraries. Install with:")
+        print("pip install TTS speechbrain pydub Pillow num2words torch torchaudio gradio requests spacy python-dotenv")
+        exit(1)
+
+    print("\n" + "="*80)
+    print("🌍 MULTI-LANGUAGE VIDEO GENERATOR")
+    print("="*80)
+    print("\n✅ FEATURES:")
+    print("  ✓ Multi-language TTS (English, Chinese, Spanish, Hindi, Arabic, Romanian)")
+    print("  ✓ Video backgrounds (Pexels API + Giphy API + Local)")
+    print("  ✓ Circle overlay videos (PIP style)")
+    print("  ✓ FFmpeg native processing (5-10x faster)")
+    print("  ✓ SQLite caching (TTS + videos)")
+    print("  ✓ Parallel slide generation")
+    print("  ✓ Background music mixing")
+    print("  ✓ Intro/CTA slides with localized text")
+    print("  ✓ Random voice assignment")
+    print("  ✓ CPU-safe operation")
+
+    print("\n📦 INSTALLED COMPONENTS:")
+    if SPACY_AVAILABLE:
+        print("  ✅ spaCy NLP - Available (via External API)")
     else:
-        print("\n" + "=" * 80)
-        print("🎥 OPTIMIZED PORTRAIT VIDEO GENERATOR (CPU-ONLY + SQLITE CACHING)")
-        print("=" * 80)
-        print("🧠 CPU-Only Mode: Enabled")
-        if SPACY_AVAILABLE:
-            print("✅ spaCy NLP: Enabled (via External API)")
-        else:
-            print("⚠️ spaCy NLP: Disabled")
-        if SD_AVAILABLE:
-            print("✅ Stable Diffusion: Enabled")
-        else:
-            print("⚠️ Stable Diffusion: Disabled (install with: pip install diffusers transformers accelerate)")
-        print("\n✅ SQLITE CACHING ACTIVE:")
-        print("   - TTS: Reuses audio if (text + speaker) matches")
-        print("   - Videos: Reuses full output if all parameters match")
-        print("\n⭕ NEW FEATURE: Circle Video Overlay")
+        print("  ⚠️  spaCy NLP - Not available")
+    if SD_AVAILABLE:
+        print("  ✅ Stable Diffusion - Available")
+    else:
+        print("  ⚠️  Stable Diffusion - Not available")
+
+    print("\n🌐 SUPPORTED LANGUAGES:")
+    for code, info in SUPPORTED_LANGUAGES.items():
+        print(f"  • {info['name']} ({code})")
+
+    try:
         generator = TextToVideoGenerator()
-        print(f"\n🗣️  Available voices: {len(generator.available_voices)}")
-        for voice in generator.available_voices:
-            print(f"   - {voice}")
-        print(f"\n🎵 Available music tracks: {len(generator.available_music)}")
-        for music in generator.available_music:
-            print(f"   - {music}")
-        print(f"\n⭕ Circle overlay status: {generator.available_overlays[0]}")
-        print(f"\n🖼️ Logo status: {'✅ Loaded' if generator.video_generator.logo_clip else '❌ Not found (place image in background_images/)'}")
-        print("\n💡 Ensure Ollama is running (`ollama serve`) and API keys are in `.env`!")
-        setup_ui(generator)
+        print("\n📊 RESOURCES:")
+        print(f"  🗣️  Voices: {len(generator.available_voices)}")
+        print(f"  🎵 Music tracks: {len(generator.available_music) - 1}")
+        print(f"  ⭕ Circle overlays: {generator.available_circles[0]}")
+
+        print("\n💡 SETUP CHECKLIST:")
+        print("  1. Set PEXELS_API_KEY in .env file")
+        print("  2. Set GIPHY_API_KEY in .env file")
+        print("  3. Run: ollama serve (for keyword extraction)")
+        print("  4. Add circle overlay videos to circle_overlays/ folder")
+        print("  5. Add background music to background_music/ folder")
+        print("  6. Add logo image to background_images/ folder")
+
+        print("\n🚀 STARTING SERVER...")
+        print("   Access at: http://localhost:1603")
+        print("="*80 + "\n")
+
+        demo = setup_ui(generator)
+        demo.launch(
+            server_name="0.0.0.0",
+            server_port=1603,
+            share=False,
+            show_error=True
+        )
+    except Exception as e:
+        print(f"\n❌ FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
