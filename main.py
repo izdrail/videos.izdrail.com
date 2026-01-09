@@ -752,6 +752,10 @@ class VideoGenerator:
                              use_sd: bool = False, media_type: str = "mixed",
                              force_video: bool = False) -> Optional[VideoFileClip]:
         try:
+            if audio_path is None or not Path(audio_path).exists():
+                print(f"[Video] Slide {slide_num} error: audio_path is None or missing")
+                return None
+                
             audio_clip = AudioFileClip(str(audio_path))
             duration_sec = audio_clip.duration
             media_path = self.get_background_media(

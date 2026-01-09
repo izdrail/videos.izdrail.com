@@ -102,7 +102,7 @@ class KeywordExtractor:
             print(f"[NLP] Spacy fallback error: {e}")
             return []
 
-    def get_best_unique_keyword(self, text: str) -> Optional[str]:
+    def get_best_unique_keyword(self, text: str, language: Optional[str] = None) -> Optional[str]:
         """Get a keyword that hasn't been used yet in this generation session"""
         keywords = self.extract_keywords(text, top_n=10)
         for kw in keywords:

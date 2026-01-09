@@ -37,8 +37,9 @@ class GenerationDB:
                 columns = [info[1] for info in cursor.fetchall()]
                 
                 # Handle migration from old schema
-                if 'speaker_id' not in columns and 'voice_id' not in columns:
-                    print("[DB] Recreating tts_cache table with updated schema...")
+                # If any required column is missing, drop and recreate
+                if 'speaker_id' not in columns or 'voice_id' not in columns:
+                    print("[DB] Missing required columns. Recreating tts_cache table...")
                     cursor.execute("DROP TABLE tts_cache")
                     conn.commit()
             

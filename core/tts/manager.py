@@ -38,8 +38,14 @@ class TTSManager:
     def _load_kokoro(self):
         global KOKORO_AVAILABLE
         try:
+            # Defensively set offline environment variables
+            import os
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+            
             from kokoro import KPipeline
-            self.model = KPipeline(lang_code="a") # Default to English
+            # Explicitly set repo_id to ensure it uses the pre-downloaded model in offline mode
+            self.model = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
             self.loaded_engine = "kokoro"
             KOKORO_AVAILABLE = True
             print("[TTS] Kokoro-82M engine loaded")
@@ -116,9 +122,30 @@ class TTSManager:
     def _generate_kokoro(self, text: str, voice_id: str, output_path: Path):
         import scipy.io.wavfile as wavfile
         import numpy as np
+        
+        # Voice mapping: translates descriptive names to Kokoro IDs
+        VOICE_MAPPING = {
+            self.config.STANDARD_VOICE_NAME: "af_heart",
+            "american-woman": "af_heart",
+            "asrm": "af_bella",
+            "austrian": "af_bella",
+            "bianca": "af_nicole",
+            "britishwomen": "af_bella",
+            "churchil": "am_michael",
+            "gabriel": "am_liam",
+            "iliescu": "am_michael",
+            "man": "am_michael",
+            "megan": "af_nicole",
+            "sexy": "af_heart",
+            "spanish-women": "af_bella"
+        }
+        
+        # Fallback to af_heart if voice_id not found or is None
+        kk_voice = VOICE_MAPPING.get(voice_id, "af_heart")
+        
         # Process chunks
         all_audio = []
-        for gs, ps, audio in self.model(text, voice=voice_id, speed=1.0):
+        for gs, ps, audio in self.model(text, voice=kk_voice, speed=1.0):
             all_audio.append(audio)
         full_audio = np.concatenate(all_audio)
         full_audio = (full_audio * 32767).astype(np.int16)

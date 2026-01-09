@@ -1,4 +1,8 @@
 import os
+import re
+import random
+import shutil
+import traceback
 import platform
 import uuid
 import abc
@@ -291,6 +295,10 @@ class FFmpegVideoGenerator:
                                   is_cta: bool = False, circle_video: Optional[Path] = None,
                                   circle_config: Optional[Dict] = None, language: str = 'en') -> Optional[Path]:
         try:
+            if audio_path is None or not Path(audio_path).exists():
+                print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None or does not exist")
+                return None
+            
             source_info = f"Video: {video_path.name}" if video_path else "Background: Image/Color"
             print(f"🎬 [FFmpeg] Creating slide {slide_num} ({language}) - {source_info} - duration: {audio_path.stat().st_size} bytes")
             # Get audio duration

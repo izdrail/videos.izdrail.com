@@ -28,10 +28,10 @@ else
 endif
 
 dev:
-	docker-compose -f $(DOCKER_COMPOSE_FILE_PROD) up --remove-orphans
+	docker-compose -f $(DOCKER_COMPOSE_FILE_PROD) up --build --remove-orphans
 
 prod:
-	docker-compose -f $(DOCKER_COMPOSE_FILE_PROD) up --remove-orphans
+	docker-compose -f $(DOCKER_COMPOSE_FILE_PROD) up --build --remove-orphans
 
 down:
 	docker-compose -f $(DOCKER_COMPOSE_FILE) down

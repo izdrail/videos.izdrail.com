@@ -12,6 +12,7 @@ ENV API_URL=http://localhost:1602 \
     SPEECHBRAIN_CACHE=/opt/speechbrain_models \
     XDG_DATA_HOME=/opt \
     HUGGINGFACE_HUB_CACHE=/opt/huggingface_models \
+    HF_HOME=/opt/huggingface_models \
     PATH="/opt/venv/bin:$PATH"
 
 # ========================================
@@ -42,10 +43,9 @@ RUN apt-get update && apt-get upgrade -y && \
 COPY requirements.txt .
 
 RUN python3 -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt kokoro soundfile && \
-    /opt/venv/bin/pip install --no-cache-dir torch torchvision torchaudio && \
-    /opt/venv/bin/pip install --no-cache-dir safetensors && \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    python -m spacy download en_core_web_sm && \
     rm -rf /root/.cache/pip
 
 # ========================================
