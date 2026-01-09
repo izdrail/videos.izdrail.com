@@ -4,6 +4,7 @@ import random
 import shutil
 import traceback
 import platform
+import subprocess
 import uuid
 import abc
 import yt_dlp
@@ -53,16 +54,43 @@ if not hasattr(Image, 'ANTIALIAS'):
 
 # =============== MEDIA SOURCE CACHE ===============
 _media_source_cache = {}
-_used_keywords = set()
+
+# =============== LARAVEL COMPANY THEME ===============
+LARAVEL_BG_GRADIENT = ("#0f172a", "#2a1030") # Dark Blue to Dark Purple
+LARAVEL_ACCENT_GRADIENT = ("#7c3aed", "#ec4899") # Purple to Pink
+
+def create_gradient_image(size: Tuple[int, int], colors: Tuple[str, str], direction: str = "135deg") -> Image.Image:
+    """Creates a linear gradient image using Pillow."""
+    base = Image.new('RGB', size, colors[0])
+    top = Image.new('RGB', size, colors[1])
+    mask = Image.new('L', size)
+    mask_data = []
+    
+    w, h = size
+    if direction == "135deg":
+        for y in range(h):
+            for x in range(w):
+                mask_data.append(int(255 * (x / w + y / h) / 2))
+    elif direction == "to_right":
+        for y in range(h):
+            for x in range(w):
+                mask_data.append(int(255 * (x / w)))
+    else: # to_bottom
+        for y in range(h):
+            for x in range(w):
+                mask_data.append(int(255 * (y / h)))
+                
+    mask.putdata(mask_data)
+    return Image.composite(top, base, mask)
 
 
 # =============== VIDEO GENERATOR WITH FFMPEG ===============
 class FFmpegVideoGenerator:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, keyword_extractor: Optional[KeywordExtractor] = None):
         self.config = config
         self.font_path = self._discover_fonts()
         self.media_manager = MediaManager()
-        self.keyword_extractor = KeywordExtractor()
+        self.keyword_extractor = keyword_extractor or KeywordExtractor()
         self.logo_path = self._find_logo()
         self.sd_manager = None
         if SD_AVAILABLE:
@@ -125,15 +153,27 @@ class FFmpegVideoGenerator:
         return None
 
     def get_background_video(self, keyword: Optional[str], sentence: Optional[str], language: str = 'en', preferred_source: Optional[str] = None) -> Optional[Path]:
+        # Collect all candidate keywords
+        search_keywords = []
         if keyword:
-            video = self.media_manager.get_random_media(keyword, preferred_source)
-            if video: return video
+            search_keywords.append(self.keyword_extractor.sanitize_keyword(keyword))
+        elif sentence:
+            extracted = self.keyword_extractor.extract_keywords(sentence, 10, language)
+            # Sort: unused first
+            extracted.sort(key=lambda kw: kw in self.keyword_extractor.used_keywords)
+            search_keywords.extend(extracted)
+
+        for kw in search_keywords:
+            if not kw: continue
             
-        if sentence:
-            keywords = self.keyword_extractor.extract_keywords(sentence, 5, language)
-            for kw in keywords:
-                video = self.media_manager.get_random_media(kw, preferred_source)
-                if video: return video
+            # Skip if already used (unless it's the only option)
+            if kw in self.keyword_extractor.used_keywords and len(search_keywords) > 1:
+                continue
+                
+            video = self.media_manager.get_random_media(kw, preferred_source)
+            if video:
+                self.keyword_extractor.used_keywords.add(kw)
+                return video
                 
         for ext in ['*.mp4', '*.mov', '*.avi']:
             if self.config.VIDEOS_DIR.exists():
@@ -300,9 +340,9 @@ class FFmpegVideoGenerator:
                 return None
             
             source_info = f"Video: {video_path.name}" if video_path else "Background: Image/Color"
-            print(f"🎬 [FFmpeg] Creating slide {slide_num} ({language}) - {source_info} - duration: {audio_path.stat().st_size} bytes")
             # Get audio duration
             duration = get_video_duration(audio_path)
+            print(f"🎬 [FFmpeg] Creating slide {slide_num} ({language}) - {source_info} - duration: {duration:.2f}s")
 
             text_overlay_path = self.config.TEMP_DIR / f"text_{slide_num}_{uuid.uuid4().hex[:8]}.png"
             if is_intro:
@@ -328,8 +368,11 @@ class FFmpegVideoGenerator:
                 )
                 input_count = 1
             else:
-                inputs.extend(['-f', 'lavfi', '-i', f'color=c=0x4A90E2:s=1080x1920:d={duration}:r=30'])
-                filter_parts.append("[0:v]null[bg_scaled]")
+                print(f"🎨 [FFmpeg] Slide {slide_num}: Using branded gradient background")
+                grad_path = self.config.TEMP_DIR / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
+                create_gradient_image(self.config.VIDEO_SIZE, LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
+                inputs.extend(['-loop', '1', '-i', str(grad_path)])
+                filter_parts.append(f"[0:v]fps=30,trim=duration={duration}[bg_scaled]")
                 input_count = 1
 
             filter_parts.append("[bg_scaled]format=rgba,colorchannelmixer=aa=0.6[dimmed]")
@@ -405,8 +448,6 @@ class FFmpegVideoGenerator:
                 '-movflags', '+faststart',
                 str(output_path)
             ]
-
-            print(f"[FFmpeg] Creating slide {slide_num} ({language}) - duration: {duration:.2f}s")
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             if not output_path.exists():
                 print(f"[FFmpeg] ERROR: Output not created for slide {slide_num}")
@@ -434,9 +475,6 @@ class FFmpegVideoGenerator:
                           language: str = 'en',
                           preferred_media_source: Optional[str] = None,
                           progress_callback=None) -> Path:
-        global _used_keywords
-        _used_keywords.clear()
-        
         temp_dir = self.config.TEMP_DIR / f"final_{uuid.uuid4().hex[:8]}"
         temp_dir.mkdir(exist_ok=True)
         
@@ -537,9 +575,9 @@ class FFmpegVideoGenerator:
 class TextToVideoGenerator:
     def __init__(self):
         self.config = Config()
-        self.tts_manager = TTSManager(self.config)
-        self.video_generator = FFmpegVideoGenerator(self.config)
         self.keyword_extractor = KeywordExtractor()
+        self.tts_manager = TTSManager(self.config)
+        self.video_generator = FFmpegVideoGenerator(self.config, keyword_extractor=self.keyword_extractor)
         self.available_voices = self._get_available_voices()
         self.available_music = self._get_available_music()
         self.available_circles = self._get_available_circles()
@@ -575,10 +613,12 @@ class TextToVideoGenerator:
                       enable_circle_overlay: bool = False,
                       circle_diameter: int = 300,
                       circle_position: str = "top-right",
-                      circle_border_width: int = 5,
+                       circle_border_width: int = 5,
                        circle_selection: str = "Random",
                        circle_upload_path: Optional[str] = None,
                        progress_callback=None) -> Dict:
+        # Reset keywords for this session
+        self.keyword_extractor.clear_used()
         input_params = {
             'text': text,
             'speaker_id': speaker_id,

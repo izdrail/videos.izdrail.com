@@ -84,7 +84,7 @@ class YouTubeAPI(BaseMediaAPI):
         try:
             cmd = [
                 'yt-dlp',
-                '-f', 'best[height<=1080]',  # Max 1080p
+                '-f', 'worst[ext=mp4]/worst',  # Pick the smallest available (prefer MP4)
                 '-o', str(output_path),
                 '--no-warnings',
                 '--quiet',

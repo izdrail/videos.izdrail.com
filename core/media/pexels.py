@@ -56,12 +56,8 @@ class PexelsAPI(BaseMediaAPI):
                 # Get the best quality video file
                 video_files = video.get('video_files', [])
                 if video_files:
-                    # Sort by quality (width) and get HD version
-                    hd_files = [f for f in video_files if f.get('quality') == 'hd']
-                    if hd_files:
-                        best_file = max(hd_files, key=lambda x: x.get('width', 0))
-                    else:
-                        best_file = max(video_files, key=lambda x: x.get('width', 0))
+                    # Sort by resolution (width) ascending to get the smallest version
+                    best_file = min(video_files, key=lambda x: x.get('width', 99999))
                     
                     results.append({
                         'url': best_file.get('link'),

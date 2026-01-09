@@ -53,14 +53,14 @@ class GiphyAPI(BaseMediaAPI):
             results = []
             for gif in data.get('data', []):
                 images = gif.get('images', {})
-                # Get original or downsized version
-                original = images.get('original', {})
-                if original:
+                # Prefer downsized or fixed_height_small for smaller downloads
+                best_version = images.get('downsized_small') or images.get('fixed_height_small') or images.get('original', {})
+                if best_version:
                     results.append({
-                        'url': original.get('mp4') or original.get('url'),
+                        'url': best_version.get('mp4') or best_version.get('url'),
                         'id': gif.get('id'),
-                        'width': int(original.get('width', 0)),
-                        'height': int(original.get('height', 0))
+                        'width': int(best_version.get('width', 0)),
+                        'height': int(best_version.get('height', 0))
                     })
             
             # Cache results

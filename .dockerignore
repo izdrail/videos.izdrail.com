@@ -1,0 +1,28 @@
+# Exclude media and output directories
+output/
+temp/
+backup_output/
+background_videos/
+background_images/
+background_music/
+voice_samples/
+sd_generated_images/
+generated_images_cache/
+tmpdir_tts/
+tmpdir_vocoder/
+
+# Exclude large video files in root
+*.mp4
+*.part
+*.ytdl
+
+# Exclude caches and logs
+__pycache__/
+*.log
+.gradio/
+
+# Exclude IDE and git
+.git/
+.idea/
+.vscode/
+.env

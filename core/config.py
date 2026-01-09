@@ -47,6 +47,9 @@ class Config:
         self.VIDEO_SIZE = (self.VIDEO_WIDTH, self.VIDEO_HEIGHT)
         self.VIDEO_PRESET = 'ultrafast'
         self.VIDEO_CRF = 28
+        self.FPS = 30
+        self.VIDEO_CODEC = 'libx264'
+        self.AUDIO_CODEC = 'aac'
         self.MIXED_MODE_SD_RATIO = 0.2
         
         # Detailed component configurations
@@ -67,11 +70,16 @@ class Config:
         }
         
         self.MUSIC_CONFIG = {
-            'music_volume_db': -15
+            'music_volume_db': -15,
+            'crossfade_duration': 2000, # ms
+            'fade_in_duration': 3000,   # ms
+            'fade_out_duration': 3000   # ms
         }
         
         self.TRANSITION_CONFIG = {
-            'duration': 1.0
+            'duration': 1.0,
+            'fade_in_duration': 0.5,
+            'fade_out_duration': 0.5
         }
         
         # Text configuration

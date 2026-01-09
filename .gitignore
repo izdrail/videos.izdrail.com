@@ -25,3 +25,5 @@ venv/
 /*.mp4
 /*.png
 /*.wav
+/*.part
+/*.ytdl

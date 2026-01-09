@@ -66,7 +66,6 @@ if not hasattr(Image, 'ANTIALIAS'):
 
 # =============== MEDIA SOURCE CACHE ===============
 _media_source_cache = {}
-_used_keywords = set()
 
 # Stable Diffusion handled by core.ai
 
@@ -236,13 +235,42 @@ class CircleOverlayManager:
             traceback.print_exc()
             return None
 
+# =============== LARAVEL COMPANY THEME ===============
+LARAVEL_BG_GRADIENT = ("#0f172a", "#2a1030") # Dark Blue to Dark Purple
+LARAVEL_ACCENT_GRADIENT = ("#7c3aed", "#ec4899") # Purple to Pink
+
+def create_gradient_image(size: Tuple[int, int], colors: Tuple[str, str], direction: str = "135deg") -> Image.Image:
+    """Creates a linear gradient image using Pillow."""
+    base = Image.new('RGB', size, colors[0])
+    top = Image.new('RGB', size, colors[1])
+    mask = Image.new('L', size)
+    mask_data = []
+    
+    w, h = size
+    if direction == "135deg":
+        for y in range(h):
+            for x in range(w):
+                # Simple diagonal gradient mask
+                mask_data.append(int(255 * (x / w + y / h) / 2))
+    elif direction == "to_right":
+        for y in range(h):
+            for x in range(w):
+                mask_data.append(int(255 * (x / w)))
+    else: # to_bottom
+        for y in range(h):
+            for x in range(w):
+                mask_data.append(int(255 * (y / h)))
+                
+    mask.putdata(mask_data)
+    return Image.composite(top, base, mask)
+
 # =============== VIDEO GENERATOR — with DB video caching ===============
 class VideoGenerator:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, keyword_extractor: Optional[KeywordExtractor] = None):
         self.config = config
         self.font_path = self._discover_fonts()
         self.media_manager = MediaManager()
-        self.keyword_extractor = KeywordExtractor()
+        self.keyword_extractor = keyword_extractor or KeywordExtractor()
         self.logo_clip = self._load_logo()
         self.effects_manager = VideoEffectsManager()
         self.circle_overlay_manager = CircleOverlayManager(config)
@@ -475,13 +503,22 @@ class VideoGenerator:
             if pexels_keyword:
                 search_keywords.append(self.keyword_extractor.sanitize_keyword(pexels_keyword))
             if sentence:
-                search_keywords.extend(self.keyword_extractor.extract_keywords(sentence, top_n=5))
+                # Get multiple keywords but try the unused ones first
+                extracted = self.keyword_extractor.extract_keywords(sentence, top_n=10)
+                # Sort: unused first
+                extracted.sort(key=lambda kw: kw in self.keyword_extractor.used_keywords)
+                search_keywords.extend(extracted)
             
             for kw in search_keywords:
                 if not kw: continue
+                # Skip if already used in this session (unless it's the only choice)
+                if kw in self.keyword_extractor.used_keywords and len(search_keywords) > 1:
+                    continue
+                    
                 # MediaManager handles Pexels, Giphy, YouTube
                 video_path = self.media_manager.get_random_media(kw, self.config.VIDEO_SIZE)
                 if video_path:
+                    self.keyword_extractor.used_keywords.add(kw)
                     _media_source_cache[kw] = 'media_manager'
                     return video_path
 
@@ -505,33 +542,64 @@ class VideoGenerator:
         return None  # No media found
 
     def _create_subtitle_overlay_pil(self, text: str, duration: float) -> ImageClip:
-        img = Image.new('RGBA', self.config.VIDEO_SIZE, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+        # 1. Setup dimensions and fonts
+        img_size = self.config.VIDEO_SIZE
         base_font_size = self.config.TEXT_SIZE_CONFIG['font_size']
         if len(text) > 60:
             font_size = max(30, int(base_font_size * (1.0 - (len(text) - 60) / 200)))
         else:
             font_size = base_font_size
+            
         try:
-            if self.font_path and os.path.exists(self.font_path):
-                font = ImageFont.truetype(self.font_path, font_size)
-            else:
-                font = ImageFont.load_default()
-        except Exception as e:
-            print(f"[Video] Font loading error, using default: {e}")
+            font = ImageFont.truetype(self.font_path, font_size) if self.font_path and os.path.exists(self.font_path) else ImageFont.load_default()
+        except:
             font = ImageFont.load_default()
+
+        # 2. Wrap text and calculate bounding box
         wrapped_text = textwrap.fill(text, width=35)
-        bbox = draw.textbbox((0, 0), wrapped_text, font=font)
+        # Create a temp image to calculate bbox
+        temp_draw = ImageDraw.Draw(Image.new('L', (1, 1)))
+        bbox = temp_draw.textbbox((0, 0), wrapped_text, font=font)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
+        
+        # 3. Create the text mask (white text on black background)
+        # Add padding for stroke
+        padding = 10
+        mask_size = (text_width + padding * 2, text_height + padding * 2)
+        mask_img = Image.new('L', mask_size, 0)
+        mask_draw = ImageDraw.Draw(mask_img)
+        
+        # Position in mask
+        text_pos = (padding, padding)
+        
+        # Draw stroke in mask if needed (actually for mask we just want the text area)
+        mask_draw.text(text_pos, wrapped_text, font=font, fill=255)
+        
+        # 4. Create gradient image for the text
+        grad_img = create_gradient_image(mask_size, LARAVEL_ACCENT_GRADIENT, "to_right")
+        
+        # 5. Composite text onto final frame
+        final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
+        
+        # First draw the shadow/outline on final_frame for better legibility
+        shadow_draw = ImageDraw.Draw(final_frame)
         x = (self.config.VIDEO_WIDTH - text_width) // 2
         y = self.config.VIDEO_HEIGHT - text_height - self.config.TEXT_SIZE_CONFIG['bottom_margin']
-        stroke_width = 2
+        
+        stroke_width = 3
         for adj_x in range(-stroke_width, stroke_width + 1):
             for adj_y in range(-stroke_width, stroke_width + 1):
-                draw.text((x + adj_x, y + adj_y), wrapped_text, font=font, fill='black')
-        draw.text((x, y), wrapped_text, font=font, fill='white')
-        img_clip = ImageClip(np.array(img)).set_duration(duration)
+                if adj_x != 0 or adj_y != 0:
+                    shadow_draw.text((x + adj_x, y + adj_y), wrapped_text, font=font, fill=(0, 0, 0, 200))
+
+        # Composite the gradient text
+        text_layer = Image.new('RGBA', mask_size, (0, 0, 0, 0))
+        text_layer.paste(grad_img, (0, 0), mask_img)
+        
+        final_frame.paste(text_layer, (x - padding, y - padding), text_layer)
+        
+        img_clip = ImageClip(np.array(final_frame)).set_duration(duration)
         return img_clip
 
     def create_intro_slide(self, audio_path: Path, bg_color: Tuple[int, int, int] = (74, 144, 226),
@@ -796,10 +864,14 @@ class VideoGenerator:
                     print(f"[Video] Slide {slide_num} media error: {e}")
                     video_clip = None
             if video_clip is not None:
+                print(f"[Video] Slide {slide_num}: Composition started. Layers: background={media_path.name if media_path else 'None'}, duration={duration_sec:.2f}s")
                 dimming_clip = ColorClip(size=self.config.VIDEO_SIZE, color=(0,0,0), duration=duration_sec).set_opacity(0.4)
                 video_clip = CompositeVideoClip([video_clip, dimming_clip])
             else:
-                video_clip = ColorClip(size=self.config.VIDEO_SIZE, color=list(bg_color), duration=duration_sec)
+                print(f"[Video] Slide {slide_num}: Using Laravel Company Branded Gradient Background.")
+                grad_img = create_gradient_image(self.config.VIDEO_SIZE, LARAVEL_BG_GRADIENT, "135deg")
+                video_clip = ImageClip(np.array(grad_img)).set_duration(duration_sec)
+            
             text_clip = self._create_subtitle_overlay_pil(sentence, duration_sec)
             layers = [video_clip, text_clip]
             if self.logo_clip:
@@ -807,6 +879,7 @@ class VideoGenerator:
                 layers.append(logo)
             final_clip = CompositeVideoClip(layers)
             final_clip = final_clip.set_duration(duration_sec).set_audio(audio_clip)
+            print(f"[Video] Slide {slide_num}: Successfully composed.")
             return final_clip
         except Exception as e:
             print(f"[Video] Slide {slide_num} error: {e}")
@@ -836,61 +909,38 @@ class VideoGenerator:
     def _apply_transition_between(self, clip1: VideoFileClip, clip2: VideoFileClip, duration: float = 1.0) -> VideoFileClip:
         if duration <= 0 or duration >= min(clip1.duration, clip2.duration):
             return concatenate_videoclips([clip1, clip2], method="compose")
-        transition_type = random.choice(['crossfade', 'slide_left', 'slide_right', 'zoom', 'fade_black'])
+        
+        transition_type = random.choice(['crossfade', 'slide_left', 'slide_right', 'fade_black'])
         w, h = self.config.VIDEO_WIDTH, self.config.VIDEO_HEIGHT
-        audio1 = clip1.audio
-        audio2 = clip2.audio
-        clip1_main = clip1.subclip(0, clip1.duration - duration)
-        clip1_tail = clip1.subclip(clip1.duration - duration)
-        clip2_head = clip2.subclip(0, duration)
-        clip2_main = clip2.subclip(duration)
-        if transition_type == 'crossfade':
-            clip1_tail = clip1_tail.crossfadeout(duration)
-            clip2_head = clip2_head.crossfadein(duration)
-            middle = CompositeVideoClip([clip1_tail, clip2_head.set_start(0)], size=(w, h))
-        elif transition_type == 'slide_left':
-            clip1_tail = clip1_tail.set_position((0, 0))
-            def slide_pos(t): return (w * (1 - t / duration), 0)
-            clip2_head = clip2_head.set_position(slide_pos).set_start(0)
-            middle = CompositeVideoClip([clip1_tail, clip2_head], size=(w, h))
-        elif transition_type == 'slide_right':
-            clip1_tail = clip1_tail.set_position((0, 0))
-            def slide_pos(t): return (-w * (1 - t / duration), 0)
-            clip2_head = clip2_head.set_position(slide_pos).set_start(0)
-            middle = CompositeVideoClip([clip1_tail, clip2_head], size=(w, h))
-        elif transition_type == 'zoom':
-            def zoom_out(t): return 1 + 0.3 * (t / duration)
-            def zoom_in(t): return 1.3 - 0.3 * (t / duration)
-            clip1_tail = clip1_tail.fx(vfx.resize, zoom_out)
-            clip2_head = clip2_head.fx(vfx.resize, zoom_in).set_start(0)
-            middle = CompositeVideoClip([clip1_tail, clip2_head], size=(w, h))
-        elif transition_type == 'fade_black':
-            black = ColorClip((w, h), color=(0, 0, 0), duration=duration)
-            clip1_tail = clip1_tail.fadeout(duration / 2)
-            black_clip = black.set_start(duration / 2).fadein(duration / 2).fadeout(duration / 2)
-            clip2_head = clip2_head.set_start(duration).fadein(duration / 2)
-            middle = CompositeVideoClip([clip1_tail, black_clip, clip2_head], size=(w, h))
-        else:
-            middle = concatenate_videoclips([clip1_tail, clip2_head], method="compose")
-        result = concatenate_videoclips([clip1_main, middle, clip2_main], method="compose")
+        
+        # Audio is usually concatenated simply to keep timing exact
         full_audio = concatenate_videoclips([clip1, clip2], method="compose").audio
-        if abs(full_audio.duration - result.duration) > 0.1:
-            if full_audio.duration > result.duration:
-                full_audio = full_audio.subclip(0, result.duration)
-            else:
-                from pydub import AudioSegment
-                temp_path = self.config.TEMP_DIR / f"temp_audio_fix_{uuid.uuid4()}.wav"
-                full_audio.write_audiofile(str(temp_path), logger=None)
-                audio_seg = AudioSegment.from_file(str(temp_path))
-                silence_needed = int((result.duration - full_audio.duration) * 1000)
-                if silence_needed > 0:
-                    audio_seg = audio_seg + AudioSegment.silent(duration=silence_needed)
-                    extended_path = self.config.TEMP_DIR / f"extended_fix_{uuid.uuid4()}.wav"
-                    audio_seg.export(str(extended_path), format="wav")
-                    full_audio = AudioFileClip(str(extended_path))
-                    temp_path.unlink(missing_ok=True)
-        result = result.set_audio(full_audio)
-        return result
+        
+        if transition_type == 'crossfade':
+            # Create a transition where clip2 fades in over clip1
+            clip2_with_fade = clip2.set_start(clip1.duration - duration).crossfadein(duration)
+            result = CompositeVideoClip([clip1, clip2_with_fade], size=(w, h))
+        elif transition_type == 'slide_left':
+            # Slide left transition: clip2 slides in from the right
+            clip2_with_slide = clip2.set_start(clip1.duration - duration).set_position(lambda t: (w * (1 - t/duration) if t < duration else 0, 0))
+            result = CompositeVideoClip([clip1, clip2_with_slide], size=(w, h))
+        elif transition_type == 'slide_right':
+            # Slide right transition: clip2 slides in from the left
+            clip2_with_slide = clip2.set_start(clip1.duration - duration).set_position(lambda t: (-w * (1 - t/duration) if t < duration else 0, 0))
+            result = CompositeVideoClip([clip1, clip2_with_slide], size=(w, h))
+        elif transition_type == 'fade_black':
+            black = ColorClip((w, h), color=(0, 0, 0), duration=duration).set_start(clip1.duration - duration/2).crossfadein(duration/2).crossfadeout(duration/2)
+            clip2_delayed = clip2.set_start(clip1.duration) # No overlap for fade_black to keep it simple
+            # Actually for a nice fade black we want both to fade to black
+            # But let's keep it simple: clip2 starts after clip1 + gap
+            # Or just use concatenate with black clip
+            black = ColorClip((w, h), color=(0, 0, 0), duration=duration)
+            result = concatenate_videoclips([clip1, black, clip2], method="compose")
+            return result.set_audio(full_audio)
+        else:
+            return concatenate_videoclips([clip1, clip2], method="compose")
+
+        return result.set_duration(clip1.duration + clip2.duration - duration).set_audio(full_audio)
 
     def create_video_per_sentence(self, sentences: List[str], audio_paths: List[Path],
                                   sentence_keywords: List[Optional[str]],
@@ -906,8 +956,6 @@ class VideoGenerator:
                                   circle_overlay_config: Optional[Dict] = None,
                                   overlay_selection: str = "Random",
                                   progress_callback=None) -> Path:
-        global _used_keywords
-        _used_keywords.clear()
         clips = []
         use_single_image = single_image_path is not None
         transition_duration = self.config.TRANSITION_CONFIG['duration']
@@ -1030,16 +1078,26 @@ class VideoGenerator:
         if progress_callback:
             progress_callback(len(sentences), len(sentences), "Exporting final video...")
         output_path = self.config.TEMP_DIR / f"video_{uuid.uuid4()}.mp4"
-        final_clip.write_videofile(
-            str(output_path),
-            fps=30,
-            codec='libx264',
-            audio_codec='aac',
-            logger=None,
-            preset=self.config.VIDEO_PRESET,
-            threads=4,
-            ffmpeg_params=["-crf", str(self.config.VIDEO_CRF)]
-        )
+        print(f"[MoviePy] Final export phase started. Output: {output_path}")
+        try:
+            import time
+            start_time = time.time()
+            final_clip.write_videofile(
+                str(output_path),
+                fps=self.config.FPS,
+                codec=self.config.VIDEO_CODEC,
+                audio_codec=self.config.AUDIO_CODEC,
+                audio_bitrate='192k',
+                logger='bar',
+                preset=self.config.VIDEO_PRESET,
+                threads=4,
+                ffmpeg_params=["-crf", str(self.config.VIDEO_CRF)]
+            )
+            elapsed = time.time() - start_time
+            print(f"[MoviePy] Export finished in {elapsed:.2f}s")
+        except Exception as e:
+            print(f"[MoviePy] EXPORT ERROR: {e}")
+            raise
         for clip in clips:
             try:
                 clip.close()
@@ -1060,9 +1118,9 @@ class VideoGenerator:
 class TextToVideoGenerator:
     def __init__(self):
         self.config = Config()
-        self.tts_manager = TTSManager(self.config)
-        self.video_generator = VideoGenerator(self.config)
         self.keyword_extractor = KeywordExtractor()
+        self.tts_manager = TTSManager(self.config)
+        self.video_generator = VideoGenerator(self.config, keyword_extractor=self.keyword_extractor)
         self.available_voices = self._get_available_voices()
         self.available_music = self._get_available_music()
         self.available_overlays = self._get_available_overlays()
@@ -1141,6 +1199,9 @@ class TextToVideoGenerator:
         single_image_path = None
         if use_single_image_mode:
             single_image_path = self.video_generator.get_single_ai_background_image(text, pexels_keyword)
+            
+        # Reset and prepare keywords for this session
+        self.keyword_extractor.clear_used()
         if pexels_keyword and pexels_keyword.strip():
             sentence_keywords = [pexels_keyword.strip()] * len(sentences)
         else:
