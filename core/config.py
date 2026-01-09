@@ -20,6 +20,7 @@ class Config:
         self.TEMP_DIR = self.ROOT_DIR / "temp"
         self.OUTPUT_DIR = self.ROOT_DIR / "output"
         self.BACKUP_OUTPUT_DIR = self.ROOT_DIR / "backup_output"
+        self.BACKGROUND_VIDEOS_DIR = self.VIDEOS_DIR # Alias for clearer usage
         
         # Create all directories
         for d in [self.VOICE_SAMPLES_DIR, self.VIDEOS_DIR, self.MUSIC_DIR,
@@ -124,9 +125,13 @@ class Config:
             'en': {'name': 'English', 'code': 'en', 'tts_code': 'en', 'kokoro_code': 'a'},
             'zh': {'name': 'Chinese (Mandarin)', 'code': 'zh-cn', 'tts_code': 'zh-cn', 'kokoro_code': 'z'},
             'es': {'name': 'Spanish', 'code': 'es', 'tts_code': 'es', 'kokoro_code': 'e'},
+            'fr': {'name': 'French', 'code': 'fr', 'tts_code': 'fr', 'kokoro_code': 'f'},
+            'it': {'name': 'Italian', 'code': 'it', 'tts_code': 'it', 'kokoro_code': 'i'},
+            'pt': {'name': 'Brazilian Portuguese', 'code': 'pt', 'tts_code': 'pt', 'kokoro_code': 'p'},
             'hi': {'name': 'Hindi', 'code': 'hi', 'tts_code': 'hi', 'kokoro_code': 'h'},
-            'ar': {'name': 'Arabic', 'code': 'ar', 'tts_code': 'ar', 'kokoro_code': 'a'},
-            'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': 'a'}
+            # Arabic and Romanian are NOT supported by Kokoro v0.19/v1.0.
+            'ar': {'name': 'Arabic', 'code': 'ar', 'tts_code': 'ar', 'kokoro_code': None}, # Use gTTS/XTTS
+            'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': None} # Use gTTS
         }
     
     def get_temp_audio_file(self, prefix: str = "audio") -> Path:

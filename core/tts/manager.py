@@ -14,6 +14,7 @@ from ..utils.audio import improve_audio_quality
 KOKORO_AVAILABLE = False
 XTTS_AVAILABLE = False
 SPEECHBRAIN_AVAILABLE = False
+GTTS_AVAILABLE = False
 
 class TTSManager:
     """Unified manager for various TTS engines"""
@@ -24,18 +25,26 @@ class TTSManager:
         self.model = None
         self.db = DB
         self.loaded_engine = None
+        self.current_kokoro_lang = None
+        self.last_status_message = "Idle. No engine loaded."
         
-    def _load_engine(self, target_engine: str):
+    def _load_engine(self, target_engine: str, lang_code: str = 'a'):
         """Lazy load the requested engine"""
         if self.loaded_engine == target_engine:
-            return
+            if target_engine == "kokoro" and self.current_kokoro_lang != lang_code:
+                # Reload Kokoro for new language
+                pass
+            else:
+                return
             
         if target_engine == "kokoro":
-            self._load_kokoro()
+            self._load_kokoro(lang_code)
         elif target_engine == "xtts":
             self._load_xtts()
+        elif target_engine == "gtts":
+            self._load_gtts()
             
-    def _load_kokoro(self):
+    def _load_kokoro(self, lang_code: str = 'a'):
         global KOKORO_AVAILABLE
         try:
             # Defensively set offline environment variables
@@ -45,12 +54,16 @@ class TTSManager:
             
             from kokoro import KPipeline
             # Explicitly set repo_id to ensure it uses the pre-downloaded model in offline mode
-            self.model = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+            # lang_code ensures we load the correct phonemizer/vocabulary
+            self.model = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M")
             self.loaded_engine = "kokoro"
+            self.current_kokoro_lang = lang_code
             KOKORO_AVAILABLE = True
-            print("[TTS] Kokoro-82M engine loaded")
+            self.last_status_message = f"✅ Kokoro-82M loaded (Lang: {lang_code})"
+            print(f"[TTS] {self.last_status_message}")
         except ImportError:
-            print("[TTS] Kokoro library not found")
+            self.last_status_message = "❌ Kokoro library not found"
+            print(f"[TTS] {self.last_status_message}")
             
     def _load_xtts(self):
         global XTTS_AVAILABLE
@@ -59,12 +72,34 @@ class TTSManager:
             self.model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.config.DEVICE)
             self.loaded_engine = "xtts"
             XTTS_AVAILABLE = True
-            print("[TTS] Coqui XTTSv2 engine loaded")
+            self.last_status_message = "✅ Coqui XTTSv2 loaded"
+            print(f"[TTS] {self.last_status_message}")
         except Exception as e:
-            print(f"[TTS] Coqui XTTS error: {e}")
+            self.last_status_message = f"❌ XTTS Error: {e}"
+            print(f"[TTS] {self.last_status_message}")
+
+    def _load_gtts(self):
+        global GTTS_AVAILABLE
+        try:
+            from gtts import gTTS
+            self.loaded_engine = "gtts"
+            GTTS_AVAILABLE = True
+            self.last_status_message = "✅ gTTS (Google) loaded"
+            print(f"[TTS] {self.last_status_message}")
+        except ImportError:
+            self.last_status_message = "❌ gTTS library not found"
+            print(f"[TTS] {self.last_status_message}")
+
+    def _clean_text(self, text: str) -> str:
+        """Clean text of custom metadata tags that shouldn't be spoken."""
+        import re
+        # Remove [N level] or [N levels] optionally followed by (...)
+        # Example: [1 level], [2 levels](-2)
+        text = re.sub(r'\[\d+\s+levels?\](?:\([^)]+\))?', '', text)
+        return text.strip()
 
     def generate_speech(self, text: str, voice_id: str, language: str = "en", 
-                       engine: Optional[str] = None) -> Path:
+                       engine: Optional[str] = None, speed: float = 1.0) -> Path:
         """
         Generate speech from text
         
@@ -77,29 +112,58 @@ class TTSManager:
         Returns:
             Path to generated audio
         """
+        # Clean text first
+        text = self._clean_text(text)
+
         # Check cache
         cached = self.db.get_cached_tts(text, voice_id, language)
-        if cached:
+        # Note: We are ignoring speed in cache key for now to avoid cache misses on slight speed changes, 
+        # or we should include it. For valid stress/speed, we SHOULD include it.
+        # But `db` schema might need update. Let's assume standard speed 1.0 for cache or skip cache if non-standard.
+        if cached and speed == 1.0:
             return cached
             
+        # Determine capabilities
+        lang_config = self.config.SUPPORTED_LANGUAGES.get(language, {})
+        kokoro_code = lang_config.get('kokoro_code')
+        
         # Select engine
         engine = engine or self.engine
+        
+        # Check if voice_id is a clone (folder exists)
+        is_clone = False
+        try:
+             if (self.config.VOICE_SAMPLES_DIR / voice_id).exists() and (self.config.VOICE_SAMPLES_DIR / voice_id).is_dir():
+                 is_clone = True
+        except Exception:
+             pass
+
         if engine == "auto":
-            # Heuristic: Kokoro for fast English, XTTS for others or cloning
-            if language.startswith("en") and not voice_id.endswith(".wav"):
-                engine = "kokoro"
-            else:
+            # Heuristic: 
+            # 1. If it's a clone voice -> XTTS
+            # 2. If valid Kokoro lang -> Kokoro
+            # 3. Else -> Fallback
+            if is_clone:
                 engine = "xtts"
+            elif kokoro_code:
+                engine = "kokoro"
+            elif language in ['es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']:
+                # Keep XTTS for languages it explicitly supports but Kokoro doesn't
+                engine = "xtts"
+            else:
+                engine = "gtts"
                 
-        self._load_engine(engine)
+        self._load_engine(engine, lang_code=kokoro_code or 'a')
         
         output_path = self.config.TEMP_DIR / f"tts_{uuid.uuid4().hex}.wav"
         
         try:
             if self.loaded_engine == "kokoro":
-                self._generate_kokoro(text, voice_id, output_path)
+                self._generate_kokoro(text, voice_id, output_path, speed)
             elif self.loaded_engine == "xtts":
                 self._generate_xtts(text, voice_id, language, output_path)
+            elif self.loaded_engine == "gtts":
+                self._generate_gtts(text, language, output_path)
             else:
                 raise ValueError(f"No functional engine for {engine}")
                 
@@ -119,25 +183,52 @@ class TTSManager:
                 output_path.unlink()
             return None
 
-    def _generate_kokoro(self, text: str, voice_id: str, output_path: Path):
+    def _generate_kokoro(self, text: str, voice_id: str, output_path: Path, speed: float = 1.0):
         import scipy.io.wavfile as wavfile
         import numpy as np
         
         # Voice mapping: translates descriptive names to Kokoro IDs
+        # Voice mapping: translates descriptive names to Kokoro IDs
+        # Standard Kokoro v1.0 voices
         VOICE_MAPPING = {
+            # American English
             self.config.STANDARD_VOICE_NAME: "af_heart",
             "american-woman": "af_heart",
+            "american-woman-2": "af_bella",
+            "american-woman-3": "af_nicole", 
+            "american-woman-4": "af_sarah",
+            "american-woman-5": "af_sky",
+            "american-man": "am_michael",
+            "american-man-2": "am_adam",
+            "american-man-3": "am_liam",
+            "american-man-4": "am_puck",
+
+            # British English
+            "british-woman": "bf_emma",
+            "british-woman-2": "bf_isabella",
+            "british-man": "bm_george",
+            "british-man-2": "bm_lewis",
+
+            # Other languages
+            "spanish-woman": "es_karen",
+            "french-woman": "ff_siwis",
+            "italian-woman": "if_sara",
+            "italian-man": "im_nicola",
+            "portuguese-woman": "pf_dora",
+            "portuguese-man": "pm_alex",
+            "japanese-voice": "jm_kumo", # Example heuristic
+            "chinese-voice": "zf_xiaobei", # Example heuristic
+            
+            # Legacy mappings
             "asrm": "af_bella",
             "austrian": "af_bella",
             "bianca": "af_nicole",
-            "britishwomen": "af_bella",
             "churchil": "am_michael",
             "gabriel": "am_liam",
             "iliescu": "am_michael",
             "man": "am_michael",
             "megan": "af_nicole",
             "sexy": "af_heart",
-            "spanish-women": "af_bella"
         }
         
         # Fallback to af_heart if voice_id not found or is None
@@ -145,7 +236,7 @@ class TTSManager:
         
         # Process chunks
         all_audio = []
-        for gs, ps, audio in self.model(text, voice=kk_voice, speed=1.0):
+        for gs, ps, audio in self.model(text, voice=kk_voice, speed=speed):
             all_audio.append(audio)
         full_audio = np.concatenate(all_audio)
         full_audio = (full_audio * 32767).astype(np.int16)
@@ -178,8 +269,19 @@ class TTSManager:
                 language=language[:2]
             )
 
+    def _generate_gtts(self, text: str, language: str, output_path: Path):
+        from gtts import gTTS
+        tts = gTTS(text=text, lang=language)
+        tts.save(str(output_path))
+
     def get_available_voices(self, engine: str = "kokoro") -> List[str]:
         """Get voices supported by the engine"""
         if engine == "kokoro":
-            return ["af_heart", "af_bella", "af_nicole", "am_michael", "am_liam", "am_puck"]
+            return [
+                "american-woman", "american-woman-2", "american-woman-3", "american-woman-4", "american-woman-5",
+                "american-man", "american-man-2", "american-man-3", "american-man-4",
+                "british-woman", "british-woman-2",
+                "british-man", "british-man-2",
+                "spanish-woman", "french-woman", "italian-woman", "italian-man", "portuguese-woman", "portuguese-man"
+            ]
         return ["Standard"]

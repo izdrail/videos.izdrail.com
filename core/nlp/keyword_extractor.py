@@ -16,16 +16,17 @@ class OllamaKeywordExtractor:
         self.url = os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate")
         self.cache = {}
     
-    def extract_keywords(self, text: str, top_n: int = 5) -> List[str]:
-        cache_key = f"{text[:100]}_{top_n}"
+    def extract_keywords(self, text: str, top_n: int = 5, language: str = 'en') -> List[str]:
+        cache_key = f"{text[:100]}_{top_n}_{language}"
         if cache_key in self.cache:
             return self.cache[cache_key]
             
         prompt = (
-            f"Extract up to {top_n} relevant, concrete, visual keywords from this sentence. "
-            "Return only a comma-separated list of lowercase words or short phrases (max 3 words each). "
-            "Avoid abstract concepts, stop words, or brand names.\n"
-            f"Sentence: \"{text}\"\nKeywords:"
+            f"Analyze the following text and extract up to {top_n} visual subjects, scenes, or concrete objects that would make good background videos. "
+            f"Think like a video editor searching for stock footage. "
+            f"Return ONLY a comma-separated list of {language} keywords (max 2 words each). "
+            "Prioritize physical objects, locations, and actions over abstract concepts.\n"
+            f"Text: \"{text}\"\nKeywords:"
         )
         payload = {
             "model": self.model,
@@ -34,9 +35,10 @@ class OllamaKeywordExtractor:
             "options": {"temperature": 0.3, "num_predict": 64}
         }
         try:
-            response = requests.post(self.url, json=payload, timeout=20)
+            response = requests.post(self.url, json=payload, timeout=180)
             if response.status_code == 200:
                 raw = response.json().get("response", "").strip()
+                print(f"[Ollama] Raw output: {raw}")
                 # Clean and parse
                 keywords = [kw.strip().lower() for kw in raw.split(",") if kw.strip()]
                 # Further cleaning: remove non-alphanumeric (except spaces)
@@ -47,6 +49,22 @@ class OllamaKeywordExtractor:
         except Exception as e:
             print(f"[Ollama] Error extracting keywords: {e}")
         return []
+
+    @classmethod
+    def get_available_models(cls) -> List[str]:
+        """Fetches available models from the API."""
+        url = os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate").replace("/generate", "/tags")
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if "models" in data:
+                     return [m["name"] for m in data["models"]]
+                return []
+        except Exception as e:
+            print(f"[Ollama] Error fetching models: {e}")
+            return []
+        return ["mistral:7b"] # Fallback
 
 class KeywordExtractor:
     """Orchestrates keyword extraction using Ollama and Spacy fallback"""
@@ -61,13 +79,13 @@ class KeywordExtractor:
         }
         self.used_keywords = set()
     
-    def extract_keywords(self, text: str, top_n: int = 5) -> List[str]:
+    def extract_keywords(self, text: str, top_n: int = 5, language: str = 'en') -> List[str]:
         """Main entry point for keyword extraction"""
         if not text.strip():
             return []
             
         # Try Ollama first
-        ollama_keywords = self.ollama_extractor.extract_keywords(text, top_n)
+        ollama_keywords = self.ollama_extractor.extract_keywords(text, top_n, language)
         if ollama_keywords:
             return ollama_keywords
         
@@ -120,3 +138,16 @@ class KeywordExtractor:
         if not keyword: return ""
         kw = re.sub(r'[\*\-•\n]+', '', keyword)
         return re.sub(r'\s+', ' ', kw).strip().lower()
+
+    def get_available_models(self) -> List[str]:
+        """Proxy to Ollama extractor"""
+        return self.ollama_extractor.get_available_models()
+
+    @property
+    def model(self) -> str:
+        return self.ollama_extractor.model
+
+    @model.setter
+    def model(self, value: str):
+        self.ollama_extractor.model = value
+

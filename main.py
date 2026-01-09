@@ -25,7 +25,7 @@ from core.ai.stable_diffusion import StableDiffusionManager, SD_AVAILABLE
 from core.media.manager import MediaManager
 from core.tts.manager import TTSManager
 from core.utils.audio import improve_audio_quality, remove_metallic_artifacts
-from core.utils.video import get_video_duration, has_audio_stream, is_video_file
+from core.utils.video import get_video_duration, has_audio_stream, is_video_file, get_random_middle_frame, get_smart_thumbnail_frame
 
 # Availability flags
 MODELS_AVAILABLE = True # Assumed true since imports above succeeded
@@ -107,6 +107,12 @@ class FFmpegVideoGenerator:
                 if files:
                     return files[0]
         return None
+
+    def _clean_text(self, text: str) -> str:
+        """Clean text of custom metadata tags for visual display."""
+        # This mirrors the logic in TTSManager to ensure consistency
+        text = re.sub(r'\[\d+\s+levels?\](?:\([^)]+\))?', '', text)
+        return text.strip()
 
     def _discover_fonts(self) -> str:
         font_paths = []
@@ -194,6 +200,9 @@ class FFmpegVideoGenerator:
         return random.choice(videos) if videos else None
 
     def _create_text_overlay_png(self, text: str, output_path: Path) -> Path:
+        # Clean text for display
+        text = self._clean_text(text)
+        
         # 1. Setup dimensions and fonts
         img_size = self.config.VIDEO_SIZE
         base_font_size = self.config.TEXT_SIZE_CONFIG['font_size']
@@ -301,7 +310,16 @@ class FFmpegVideoGenerator:
             for adj in range(-2, 3):
                 if adj != 0:
                     draw.text((x2 + adj, y2), sec_text, font=font_small, fill=(0,0,0,150))
-            draw.text((x2, y2), sec_text, font=font_small, fill='white')
+            # Gradient styling for secondary text
+            mask_size2 = (text_width2 + padding * 2, text_height + padding * 2) # Use main text height approx or recalc
+            mask_img2 = Image.new('L', mask_size2, 0)
+            mask_draw2 = ImageDraw.Draw(mask_img2)
+            mask_draw2.text((padding, padding), sec_text, font=font_small, fill=255)
+            grad_img2 = create_gradient_image(mask_size2, LARAVEL_ACCENT_GRADIENT, "to_right")
+            
+            text_layer2 = Image.new('RGBA', mask_size2, (0, 0, 0, 0))
+            text_layer2.paste(grad_img2, (0, 0), mask_img2)
+            final_frame.paste(text_layer2, (x2 - padding, y2 - padding), text_layer2)
             
         final_frame.save(str(output_path), "PNG")
         return output_path
@@ -380,11 +398,59 @@ class FFmpegVideoGenerator:
                 filtered.append(current)
                 i += 1
         return filtered
+        
+    def _generate_overlay_mask(self, shape: str, diameter: int) -> Path:
+        """Generates a high-quality PNG mask for the specified shape using Pillow."""
+        mask_path = self.config.TEMP_DIR / f"mask_{shape.lower()}_{uuid.uuid4().hex[:8]}.png"
+        
+        # Create high-res mask (2x size) for anti-aliasing
+        size = diameter * 2
+        # Use RGBA mode (transparent background)
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        
+        if shape == "Circle":
+            draw.ellipse((0, 0, size, size), fill=(255, 255, 255, 255))
+        elif shape == "Square":
+            draw.rectangle((0, 0, size, size), fill=(255, 255, 255, 255))
+        elif shape == "Rectangle":
+             # "Rectangle" in this context is just a square crop that fills the bounding box
+             # To make it distinct, let's give it rounded corners
+            corner_radius = size // 10
+            draw.rounded_rectangle((0, 0, size, size), radius=corner_radius, fill=(255, 255, 255, 255))
+        elif shape == "Star":
+            # 5-pointed star
+            cx, cy = size // 2, size // 2
+            outer_radius = size // 2
+            inner_radius = outer_radius * 0.4 # Ratio for star thickness
+            points = []
+            import math
+            angle = -math.pi / 2 # Start at top
+            step = math.pi / 5 # 36 deg
+            
+            for i in range(10):
+                r = outer_radius if i % 2 == 0 else inner_radius
+                x = cx + math.cos(angle) * r
+                y = cy + math.sin(angle) * r
+                points.append((x, y))
+                angle += step
+            draw.polygon(points, fill=(255, 255, 255, 255))
+        else:
+            # Fallback to full white square
+            draw.rectangle((0, 0, size, size), fill=(255, 255, 255, 255))
+            
+        # Downscale for smooth edges
+        image = image.resize((diameter, diameter), Image.Resampling.LANCZOS)
+        image.save(str(mask_path))
+        return mask_path
 
     def _create_slide_with_ffmpeg(self, sentence: str, audio_path: Path, video_path: Optional[Path],
                                   output_path: Path, slide_num: int, is_intro: bool = False,
                                   is_cta: bool = False, circle_video: Optional[Path] = None,
-                                  circle_config: Optional[Dict] = None, language: str = 'en') -> Optional[Path]:
+                                  circle_config: Optional[Dict] = None, language: str = 'en',
+                                  hide_text: bool = False,
+                                  export_fps: int = 30,
+                                  overlay_shape: str = "Circle") -> Optional[Path]:
         try:
             if audio_path is None or not Path(audio_path).exists():
                 print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None or does not exist")
@@ -395,13 +461,16 @@ class FFmpegVideoGenerator:
             duration = get_video_duration(audio_path)
             print(f"🎬 [FFmpeg] Creating slide {slide_num} ({language}) - {source_info} - duration: {duration:.2f}s")
 
-            text_overlay_path = self.config.TEMP_DIR / f"text_{slide_num}_{uuid.uuid4().hex[:8]}.png"
-            if is_intro:
-                self._create_intro_text_png(text_overlay_path, language)
-            elif is_cta:
-                self._create_cta_text_png(text_overlay_path, language)
+            if not hide_text:
+                text_overlay_path = self.config.TEMP_DIR / f"text_{slide_num}_{uuid.uuid4().hex[:8]}.png"
+                if is_intro:
+                    self._create_intro_text_png(text_overlay_path, language)
+                elif is_cta:
+                    self._create_cta_text_png(text_overlay_path, language)
+                else:
+                    self._create_text_overlay_png(sentence, text_overlay_path)
             else:
-                self._create_text_overlay_png(sentence, text_overlay_path)
+                text_overlay_path = None
 
             inputs = []
             filter_parts = []
@@ -413,7 +482,7 @@ class FFmpegVideoGenerator:
                     f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
                     f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
                     f"setsar=1,"
-                    f"fps=30,"
+                    f"fps={export_fps},"
                     f"trim=duration={duration},"
                     f"setpts=PTS-STARTPTS[bg_scaled]"
                 )
@@ -423,16 +492,21 @@ class FFmpegVideoGenerator:
                 grad_path = self.config.TEMP_DIR / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
                 create_gradient_image(self.config.VIDEO_SIZE, LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
                 inputs.extend(['-loop', '1', '-i', str(grad_path)])
-                filter_parts.append(f"[0:v]fps=30,trim=duration={duration}[bg_scaled]")
+                filter_parts.append(f"[0:v]fps={export_fps},trim=duration={duration}[bg_scaled]")
                 input_count = 1
 
             filter_parts.append("[bg_scaled]format=rgba,colorchannelmixer=aa=0.6[dimmed]")
 
-            inputs.extend(['-loop', '1', '-i', str(text_overlay_path)])
-            filter_parts.append(f"[dimmed][{input_count}:v]overlay=0:0:format=auto[with_text]")
-            input_count += 1
+            if text_overlay_path:
+                inputs.extend(['-loop', '1', '-i', str(text_overlay_path)])
+                filter_parts.append(f"[dimmed][{input_count}:v]overlay=0:0:format=auto[with_text]")
+                input_count += 1
+            else:
+                # No text overlay; keep dimmed background as final layer
+                logo_label = "dimmed"
+                # No increment of input_count needed
 
-            logo_label = "with_text"
+            logo_label = "with_text" if text_overlay_path else "dimmed"
             if self.logo_path and self.logo_path.exists():
                 inputs.extend(['-loop', '1', '-i', str(self.logo_path)])
                 cfg = self.config.LOGO_CONFIG
@@ -443,8 +517,8 @@ class FFmpegVideoGenerator:
                     'bottom-right': f'W-w-{cfg["margin"]}:H-h-{cfg["margin"]}',
                 }
                 pos = pos_map.get(cfg['position'], pos_map['top-left'])
-                filter_parts.append(f"[{input_count}:v]scale=50:50[logo_scaled]")
-                filter_parts.append(f"[with_text][logo_scaled]overlay={pos}:format=auto[final]")
+                filter_parts.append(f"[{input_count}:v]scale=150:150[logo_scaled]")
+                filter_parts.append(f"[{logo_label}][logo_scaled]overlay={pos}:format=auto[final]")
                 logo_label = "final"
                 input_count += 1
 
@@ -460,25 +534,31 @@ class FFmpegVideoGenerator:
                     'center': '(W-w)/2:(H-h)/2',
                 }
                 overlay_pos = pos_map.get(position, pos_map['top-right'])
+                # Generate procedural mask
+                mask_path = self._generate_overlay_mask(overlay_shape, diameter)
+                inputs.extend(['-loop', '1', '-i', str(mask_path)])
+                mask_idx = input_count + 1 # video is input_count, mask is input_count+1
+                
+                # Scale video to COVER the shape (increase + crop)
                 filter_parts.append(
-                    f"[{input_count}:v]scale={diameter}:{diameter}:force_original_aspect_ratio=decrease,"
-                    f"pad={diameter}:{diameter}:(ow-iw)/2:(oh-ih)/2,"
-                    f"fps=30,"
+                    f"[{input_count}:v]scale={diameter}:{diameter}:force_original_aspect_ratio=increase,"
+                    f"crop={diameter}:{diameter},"
+                    f"fps={export_fps},"
                     f"trim=duration={duration},"
                     f"setpts=PTS-STARTPTS,"
                     f"format=rgba[circle_sized]"
                 )
-                filter_parts.append(
-                    f"color=black:s={diameter}x{diameter}:d={duration}[black];"
-                    f"[black]geq=lum='if(gt(sqrt((X-{diameter/2})^2+(Y-{diameter/2})^2),{diameter/2}),0,255)',"
-                    f"format=gray[mask]"
-                )
-                filter_parts.append(f"[circle_sized][mask]alphamerge[circle_masked]")
+                
+                # Apply mask
+                filter_parts.append(f"[{mask_idx}:v]alphaextract[mask_alpha]")
+                filter_parts.append(f"[circle_sized][mask_alpha]alphamerge[circle_masked]")
+                
                 filter_parts.append(f"[{logo_label}][circle_masked]overlay={overlay_pos}:format=auto[final_with_circle]")
                 logo_label = "final_with_circle"
-                input_count += 1
+                input_count += 2 # Incremented by 2 (video + mask)
 
-            print(f"🎬 [FFmpeg] Slide {slide_num}: Composition started. Layers: bg={video_path.name if video_path else 'Branded Gradient'}, text={text_overlay_path.name}")
+
+            print(f"🎬 [FFmpeg] Slide {slide_num}: Composition started. Layers: bg={video_path.name if video_path else 'Branded Gradient'}, text={text_overlay_path.name if text_overlay_path else 'None'}")
 
             audio_idx = input_count
             inputs.extend(['-i', str(audio_path)])
@@ -496,7 +576,7 @@ class FFmpegVideoGenerator:
                 '-pix_fmt', 'yuv420p',
                 '-c:a', 'aac',
                 '-b:a', '192k',
-                '-r', '30',
+                '-r', str(export_fps),
                 '-shortest',
                 '-movflags', '+faststart',
                 str(output_path)
@@ -509,13 +589,18 @@ class FFmpegVideoGenerator:
             file_size = output_path.stat().st_size
             print(f"[FFmpeg] Slide {slide_num} created: {file_size / 1024 / 1024:.2f} MB")
             return output_path
+        except subprocess.CalledProcessError as e:
+            print(f"[FFmpeg] Slide {slide_num} failed with return code {e.returncode}")
+            print(f"[FFmpeg] Command: {' '.join(e.cmd)}")
+            print(f"[FFmpeg] Stderr: {e.stderr}")
+            return None
         except Exception as e:
             print(f"[FFmpeg] Slide {slide_num} error: {e}")
             import traceback
             traceback.print_exc()
             return None
         finally:
-            if 'text_overlay_path' in locals() and text_overlay_path.exists():
+            if 'text_overlay_path' in locals() and text_overlay_path and text_overlay_path.exists():
                 text_overlay_path.unlink(missing_ok=True)
 
     def create_final_video(self, sentences: List[str], audio_paths: List[Path],
@@ -528,6 +613,10 @@ class FFmpegVideoGenerator:
                           circle_selection: str = "Random",
                           language: str = 'en',
                           preferred_media_source: Optional[str] = None,
+                          selected_background_video: Optional[Path] = None,
+                          hide_text: bool = False,
+                          export_fps: int = 30,
+                          overlay_shape: str = "Circle",
                           progress_callback=None) -> Path:
         temp_dir = self.config.TEMP_DIR / f"final_{uuid.uuid4().hex[:8]}"
         temp_dir.mkdir(exist_ok=True)
@@ -541,20 +630,21 @@ class FFmpegVideoGenerator:
             
             # Submit intro slide if needed
             if intro_audio:
-                intro_video_bg = self.get_background_video("intro", "Welcome", language, preferred_media_source)
+                # If a specific background video is selected, use it for all slides including intro/cta
+                intro_video_bg = selected_background_video if selected_background_video else self.get_background_video("intro", "Welcome", language, preferred_media_source)
                 if intro_video_bg:
                     source_videos.append(intro_video_bg)
                 intro_output = temp_dir / "slide_intro.mp4"
                 futures.append(executor.submit(
                     self._create_slide_with_ffmpeg,
                     "", intro_audio, intro_video_bg, intro_output, -1, # -1 for intro slide_num
-                    True, False, None, None, language # No circle for intro/cta
+                    True, False, None, None, language, hide_text, export_fps, overlay_shape # No circle for intro/cta but passing shape for consistency if needed or ignored
                 ))
 
             # Submit main content slides
             for i, (sentence, audio_path, keyword) in enumerate(zip(sentences, audio_paths, keywords)):
                 # Get background video for this slide
-                video_bg = self.get_background_video(keyword, sentence, language, preferred_media_source)
+                video_bg = selected_background_video if selected_background_video else self.get_background_video(keyword, sentence, language, preferred_media_source)
                 if video_bg:
                     source_videos.append(video_bg)
                 
@@ -562,20 +652,22 @@ class FFmpegVideoGenerator:
                 futures.append(executor.submit(
                     self._create_slide_with_ffmpeg,
                     sentence, audio_path, video_bg, output_path, i,
-                    False, False, circle_video, circle_config, language
+                    False, False, circle_video, circle_config, language, hide_text, export_fps, overlay_shape
                 ))
                 
             # Submit CTA slide if needed
             if cta_audio:
-                cta_video_bg = self.get_background_video("outro", "Goodbye", language, preferred_media_source)
+                cta_video_bg = selected_background_video if selected_background_video else self.get_background_video("outro", "Goodbye", language, preferred_media_source)
                 if cta_video_bg:
                     source_videos.append(cta_video_bg)
                 cta_output = temp_dir / "slide_cta.mp4"
                 futures.append(executor.submit(
                     self._create_slide_with_ffmpeg,
                     "", cta_audio, cta_video_bg, cta_output, 999, # 999 for cta slide_num
-                    False, True, None, None, language # No circle for intro/cta
+                    False, True, None, None, language, hide_text, export_fps, overlay_shape # No circle for intro/cta
                 ))
+                
+
 
             # Collect results in order of slide_num
             results_map = {}
@@ -651,12 +743,27 @@ class TextToVideoGenerator:
         self.available_music = self._get_available_music()
         self.available_circles = self._get_available_circles()
         self.available_languages = list(SUPPORTED_LANGUAGES.keys())
+        self.available_languages = list(SUPPORTED_LANGUAGES.keys())
+        self.available_models = self.keyword_extractor.get_available_models()
+        self.available_background_videos = self._get_available_background_videos()
 
     def _get_available_voices(self) -> List[str]:
+        # 1. Start with Standard voice
         voices = [self.config.STANDARD_VOICE_NAME]
+        
+        # 2. Add Kokoro Preset Voices
+        try:
+            kokoro_voices = self.tts_manager.get_available_voices("kokoro")
+            voices.extend(kokoro_voices)
+        except Exception:
+            pass
+            
+        # 3. Add XTTS Cloned Voices (from folders)
         if self.config.VOICE_SAMPLES_DIR.is_dir():
             voices.extend([d.name for d in self.config.VOICE_SAMPLES_DIR.iterdir() if d.is_dir()])
-        return sorted(voices)
+            
+        # Deduplicate and sort
+        return sorted(list(set(voices)))
 
     def _get_available_music(self) -> List[str]:
         music_files = self.video_generator.get_available_music_files()
@@ -669,23 +776,36 @@ class TextToVideoGenerator:
                 circles.extend(list(self.config.CIRCLE_OVERLAYS_DIR.glob(ext)))
         return ["Random"] + [v.name for v in sorted(circles)]
 
+    def _get_available_background_videos(self) -> List[str]:
+        videos = []
+        for ext in ['*.mp4', '*.mov', '*.avi', '*.webm']:
+            if self.config.BACKGROUND_VIDEOS_DIR.exists():
+                videos.extend(list(self.config.BACKGROUND_VIDEOS_DIR.glob(ext)))
+        return ["Auto-select (Pexels/Giphy/Local)", "Branded Gradient"] + [v.name for v in sorted(videos)]
+
     def generate_video(self, text: str, speaker_id: str = "Standard Voice (Non-Cloned)",
-                      language: str = 'en',
-                      pexels_keyword: Optional[str] = None,
-                      preferred_media_source: Optional[str] = None,
-                      enable_background_music: bool = True,
-                      music_selection: str = "Random",
-                      music_volume_db: int = -15,
-                      add_intro_slide: bool = True,
-                      add_call_to_action: bool = True,
-                      use_random_voices: bool = False,
-                      enable_circle_overlay: bool = False,
-                      circle_diameter: int = 300,
-                      circle_position: str = "top-right",
-                       circle_border_width: int = 5,
-                       circle_selection: str = "Random",
-                       circle_upload_path: Optional[str] = None,
-                       progress_callback=None) -> Dict:
+                          language: str = 'en',
+                          pexels_keyword: Optional[str] = None,
+                          preferred_media_source: Optional[str] = None,
+                          selected_background_video_name: Optional[str] = None,  # New parameter
+                          enable_background_music: bool = True,
+                          music_selection: str = "Random",
+                          music_volume_db: int = -15,
+                          add_intro_slide: bool = True,
+                          add_call_to_action: bool = True,
+                          use_random_voices: bool = False,
+                          enable_circle_overlay: bool = False,
+                          circle_diameter: int = 300,
+                          circle_position: str = "top-right",
+                           circle_border_width: int = 5,
+                           circle_selection: str = "Random",
+                           circle_upload_path: Optional[str] = None,
+                           hide_text: bool = False,
+                           export_fps: int = 30,
+                           overlay_shape: str = "Circle",
+                           ai_model: str = "mistral:7b",
+                           stress_level: float = 1.0,
+                           progress_callback=None) -> Dict:
         # Reset keywords for this session
         self.keyword_extractor.clear_used()
         input_params = {
@@ -693,6 +813,8 @@ class TextToVideoGenerator:
             'speaker_id': speaker_id,
             'language': language,
             'pexels_keyword': pexels_keyword,
+            'preferred_media_source': preferred_media_source,
+            'selected_background_video_name': selected_background_video_name, # New parameter
             'enable_background_music': enable_background_music,
             'music_selection': music_selection,
             'music_volume_db': music_volume_db,
@@ -704,8 +826,18 @@ class TextToVideoGenerator:
             'circle_position': circle_position,
             'circle_border_width': circle_border_width,
             'circle_selection': circle_selection,
-            'circle_upload_path': str(circle_upload_path) if circle_upload_path else None
+            'circle_upload_path': str(circle_upload_path) if circle_upload_path else None,
+            'hide_text': hide_text,
+            'export_fps': export_fps,
+            'overlay_shape': overlay_shape,
+            'ai_model': ai_model,
+            'stress_level': stress_level
         }
+
+        # Update model if changed
+        if ai_model and ai_model != self.keyword_extractor.model:
+            print(f"[Ollama] Switching model from {self.keyword_extractor.model} to {ai_model}")
+            self.keyword_extractor.model = ai_model
 
         if not text or not text.strip():
             return {"error": "Text cannot be empty", "success": False}
@@ -776,6 +908,22 @@ class TextToVideoGenerator:
                 else:
                     circle_video_path = self.video_generator.get_circle_overlay_video()
 
+            selected_bg_video_path = None
+            print(f"[Debug] Selected background video name from UI: '{selected_background_video_name}'")
+            if selected_background_video_name and selected_background_video_name not in ["Auto-select (Pexels/Giphy/Local)", "Branded Gradient"]:
+                selected_bg_video_path = self.config.BACKGROUND_VIDEOS_DIR / selected_background_video_name
+                print(f"[Debug] Resolving path: {selected_bg_video_path}")
+                if not selected_bg_video_path.exists():
+                    print(f"[Background Video] Selected background video {selected_background_video_name} not found. Falling back to auto-select.")
+                    selected_bg_video_path = None
+                else:
+                    print(f"[Debug] Confirmed background video exists: {selected_bg_video_path}")
+            elif selected_background_video_name == "Branded Gradient":
+                print("[Debug] Using Branded Gradient background")
+                selected_bg_video_path = None # This will trigger the gradient background in _create_slide_with_ffmpeg
+            else:
+                print("[Debug] Auto-select enabled (default behavior)")
+
             # Final Video Generation
             video_temp_path = self.video_generator.create_final_video(
                 sentences=sentences,
@@ -789,6 +937,10 @@ class TextToVideoGenerator:
                 circle_selection=circle_selection,
                 language=language,
                 preferred_media_source=preferred_media_source,
+                selected_background_video=selected_bg_video_path,
+                hide_text=hide_text,
+                export_fps=export_fps,
+                overlay_shape=overlay_shape,
                 progress_callback=video_progress
             )
 
@@ -825,10 +977,20 @@ class TextToVideoGenerator:
             subprocess.run(['ffmpeg', '-y', '-i', str(video_final), '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', str(audio_final)],
                          check=True, capture_output=True)
 
+            # Generate Thumbnail
+            thumbnail_final = session_dir / f"thumbnail_{timestamp}_{language}.jpg"
+            try:
+                get_smart_thumbnail_frame(video_final, thumbnail_final)
+                print(f"✅ Thumbnail generated: {thumbnail_final}")
+            except Exception as e:
+                print(f"❌ Thumbnail generation failed: {e}")
+                thumbnail_final = None
+
             result = {
                 "success": True,
                 "audio_path": str(audio_final),
                 "video_path": str(video_final),
+                "thumbnail_path": str(thumbnail_final) if thumbnail_final and thumbnail_final.exists() else None,
                 "output_directory": str(session_dir),
                 "sentence_count": len(sentences),
                 "language": lang_name,
@@ -838,11 +1000,12 @@ class TextToVideoGenerator:
                 "intro_included": add_intro_slide,
                 "cta_included": add_call_to_action,
                 "video_format": "9:16 Portrait (1080x1920)",
-                "video_backgrounds": "Pexels/Giphy API + Local",
+                "video_backgrounds": selected_background_video_name if selected_background_video_name else "Pexels/Giphy API + Local",
                 "random_voices": use_random_voices,
                 "circle_overlay_enabled": enable_circle_overlay,
                 "circle_position": circle_position if enable_circle_overlay else None,
                 "circle_selection": circle_selection if enable_circle_overlay else None,
+                "hide_text_overlay": hide_text,
             }
 
             DB.save_video(input_params, result)
@@ -885,6 +1048,41 @@ def setup_ui(generator: TextToVideoGenerator):
                             placeholder="Enter your script here...",
                             lines=10
                         )
+                        
+                        # Emoticon Toolbar for Intonation Control
+                        gr.Markdown("### 🎭 Intonation Controls - Click to insert:")
+                        with gr.Row():
+                            btn_semicolon = gr.Button("😐 ;", size="sm", variant="secondary")
+                            btn_colon = gr.Button("🙂 :", size="sm", variant="secondary")
+                            btn_comma = gr.Button("⏸️ ,", size="sm", variant="secondary")
+                            btn_period = gr.Button("⏹️ .", size="sm", variant="secondary")
+                        
+                        with gr.Row():
+                            btn_exclaim = gr.Button("❗😄 !", size="sm", variant="secondary")
+                            btn_question = gr.Button("❓🤔 ?", size="sm", variant="secondary")
+                            btn_dash = gr.Button("➖😶 —", size="sm", variant="secondary")
+                            btn_ellipsis = gr.Button("⏳😌 …", size="sm", variant="secondary")
+                        
+                        with gr.Row():
+                            btn_quote = gr.Button("💬 \"", size="sm", variant="secondary")
+                            btn_stress1 = gr.Button("🔊 ˈ", size="sm", variant="secondary")
+                            btn_stress2 = gr.Button("🔉 ˌ", size="sm", variant="secondary")
+                        
+                        gr.Markdown("""
+                        💡 **Advanced Pronunciation:**
+                        - Link syntax: `[Word](/pronunciation/)` e.g., `[Kokoro](/kˈOkəɹO/)`
+                        - Adjust stress: `[1 level](-1)` or `[2 levels](-2)`
+                        """)
+                        with gr.Row():
+                            ai_model_dropdown = gr.Dropdown(
+                                label="🤖 AI Model",
+                                choices=generator.available_models,
+                                value=generator.available_models[0] if generator.available_models else "mistral:7b",
+                                info="Select LLM for keyword extraction"
+                            )
+                        
+                        stress_level = gr.Slider(0.5, 1.5, 1.0, 0.1, label="Stress Level (Speed)", info="0.5 = Slow/Relaxed, 1.5 = Fast/Stressed")
+
                         with gr.Row():
                             language_dropdown = gr.Dropdown(
                                 label="🌐 Language",
@@ -909,6 +1107,12 @@ def setup_ui(generator: TextToVideoGenerator):
                             label="🔍 Custom Search Keyword",
                             placeholder="e.g., 'cyberpunk city', 'peaceful forest'",
                             info="Leave empty for auto-extraction"
+                        )
+                        background_video_dropdown = gr.Dropdown(
+                            label="🏞️ Select Background Video",
+                            choices=generator.available_background_videos,
+                            value="Auto-select (Pexels/Giphy/Local)",
+                            info="Choose a specific video from your 'background_videos' folder or let the system auto-select."
                         )
                         with gr.Row():
                             enable_music = gr.Checkbox(label="🎵 Add background music", value=True)
@@ -940,28 +1144,71 @@ def setup_ui(generator: TextToVideoGenerator):
                                 value="top-right",
                                 label="Position"
                             )
+                            overlay_shape = gr.Dropdown(
+                                ["Circle", "Rectangle", "Square", "Star"],
+                                value="Circle",
+                                label="Overlay Shape",
+                                info="Shape of the PIP overlay"
+                            )
 
                     with gr.TabItem("⚙️ Advanced"):
                         with gr.Row():
                             enable_intro = gr.Checkbox(label="📢 Add Intro Slide", value=True)
                             enable_cta = gr.Checkbox(label="📣 Add CTA Outro", value=True)
-                        gr.Markdown("More advanced settings coming soon (resolution, frame rate, etc.)")
+                        hide_text = gr.Checkbox(label="🛑 Hide Text Overlay", value=False)
+                        export_fps = gr.Slider(10, 60, 30, 1, label="🎞️ Export FPS", info="Target frame rate for the final video (default: 30)")
+                        gr.Markdown("""
+                        ### 💡 Pronunciation & Stress Control
+                        You can control pronunciation and stress in Kokoro TTS using the following syntax:
+                        
+                        **Link Syntax (Phonemes):**  `[Word](/pronunciation/)`  
+                        Example: `[Kokoro](/kˈOkəɹO/)`
+                        
+                        **Neutral / Pause:**
+                        - `;` → 😐 (Neutral pause)
+                        - `:` → 🙂 (Slight pause with continuation)
+                        - `,` → ⏸️ (Brief pause)
+                        - `.` → ⏹️ (Full stop)
+                        
+                        **Emphasis / Emotion:**
+                        - `!` → ❗😄 (Excitement/Emphasis)
+                        - `?` → ❓🤔 (Question/Curiosity)
+                        - `—` → ➖😶 (Long pause/Interruption)
+                        - `…` → ⏳😌 (Trailing off/Thinking)
+                        
+                        **Speech / Quotation:**
+                        - `"` → 💬 (Quoted speech)
+                        
+                        **Stress Markers:**  
+                        - `ˈ` (Primary stress)
+                        - `ˌ` (Secondary stress)
+                        
+                        **Adjust Stress Level:**  
+                        - `[1 level](-1)` (Reduce stress by 1 level)
+                        - `[2 levels](-2)` (Reduce stress by 2 levels)
+                        
+                        *Tip: Use the slider below to adjust overall speaking speed ('Stress Level').*
+                        """)
 
                 generate_button = gr.Button("🚀 Generate Video", variant="primary", size="lg")
+                engine_status_output = gr.Textbox(label="TTS Engine Status", value="Idle", interactive=False)
                 progress_bar = gr.Textbox(label="⚡ Status", value="Ready", interactive=False)
 
             with gr.Column(scale=1):
                 video_output = gr.Video(label="Generated Video", height=600)
+                thumbnail_output = gr.Image(label="Last Frame Thumbnail", type="filepath")
                 audio_output = gr.Audio(label="Extracted Voiceover")
                 status_output = gr.Markdown(value="*Your video will appear here after generation.*")
 
+
         def generate_wrapper(text, language, speaker, use_random, media_source, keyword,
+                            selected_background_video_name,
                             enable_music, music_select, music_vol,
-                            enable_circle, circle_sel, circle_upload_path, circle_diam, circle_pos, circle_border,
-                            enable_intro, enable_cta, progress=gr.Progress()):
+                            enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val,
+                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, stress_level_val, progress=gr.Progress()):
             
             if not text or not text.strip():
-                return None, None, "❌ **Error:** Please enter some text.", "Ready"
+                return None, None, None, "Idle", "❌ **Error:** Please enter some text.", "Ready"
 
             def update_progress(current, total, message):
                 progress((current, total), desc=message)
@@ -982,32 +1229,56 @@ def setup_ui(generator: TextToVideoGenerator):
                 enable_circle_overlay=enable_circle,
                 circle_diameter=circle_diam,
                 circle_position=circle_pos,
+                circle_border_width=circle_border,
                 circle_selection=circle_sel,
                 circle_upload_path=circle_upload_path,
-                circle_border_width=circle_border,
+                hide_text=hide_text,
+                export_fps=export_fps_val,
+                overlay_shape=overlay_shape_val,
+                ai_model=ai_model_val,
+                stress_level=stress_level_val,
                 progress_callback=update_progress
             )
 
+            engine_status = generator.tts_manager.last_status_message
+            
             if result.get("success"):
                 status_md = f"""### ✅ Generation Complete!
 - **Video:** {result['video_path']}
 - **Duration:** {result.get('duration', 'N/A')}s
 - **Source:** {media_source}
 """
-                return result["video_path"], result["audio_path"], status_md, "Complete!"
+                return result["video_path"], result.get("thumbnail_path"), result["audio_path"], engine_status, status_md, "Complete!"
             
-            return None, None, f"❌ **Error:** {result.get('error', 'Unknown error')}", "Failed"
+            return None, None, None, engine_status, f"❌ **Error:** {result.get('error', 'Unknown error')}", "Failed"
+        
+        # Helper function to insert text at cursor position
+        def insert_symbol(current_text, symbol):
+            return current_text + symbol if current_text else symbol
+        
+        # Connect emoticon buttons to text input
+        btn_semicolon.click(lambda txt: insert_symbol(txt, ";"), inputs=[text_input], outputs=[text_input])
+        btn_colon.click(lambda txt: insert_symbol(txt, ":"), inputs=[text_input], outputs=[text_input])
+        btn_comma.click(lambda txt: insert_symbol(txt, ","), inputs=[text_input], outputs=[text_input])
+        btn_period.click(lambda txt: insert_symbol(txt, "."), inputs=[text_input], outputs=[text_input])
+        btn_exclaim.click(lambda txt: insert_symbol(txt, "!"), inputs=[text_input], outputs=[text_input])
+        btn_question.click(lambda txt: insert_symbol(txt, "?"), inputs=[text_input], outputs=[text_input])
+        btn_dash.click(lambda txt: insert_symbol(txt, "—"), inputs=[text_input], outputs=[text_input])
+        btn_ellipsis.click(lambda txt: insert_symbol(txt, "…"), inputs=[text_input], outputs=[text_input])
+        btn_quote.click(lambda txt: insert_symbol(txt, '"'), inputs=[text_input], outputs=[text_input])
+        btn_stress1.click(lambda txt: insert_symbol(txt, "ˈ"), inputs=[text_input], outputs=[text_input])
+        btn_stress2.click(lambda txt: insert_symbol(txt, "ˌ"), inputs=[text_input], outputs=[text_input])
 
         generate_button.click(
             fn=generate_wrapper,
             inputs=[
                 text_input, language_dropdown, speaker_dropdown, use_random_voices,
-                media_source_dropdown, pexels_keyword,
+                media_source_dropdown, pexels_keyword, background_video_dropdown,
                 enable_music, music_dropdown, music_volume,
-                enable_circle, circle_selection, circle_upload, circle_diameter, circle_position, circle_border_width,
-                enable_intro, enable_cta
+                enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape,
+                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, stress_level
             ],
-            outputs=[video_output, audio_output, status_output, progress_bar]
+            outputs=[video_output, thumbnail_output, audio_output, engine_status_output, status_output, progress_bar]
         )
     return demo
 

@@ -36,6 +36,12 @@ prod:
 down:
 	docker-compose -f $(DOCKER_COMPOSE_FILE) down
 
+rebuild:
+	docker-compose down
+	docker-compose -f $(DOCKER_COMPOSE_FILE_PROD) build --no-cache
+	docker-compose -f $(DOCKER_COMPOSE_FILE_PROD) up --force-recreate
+
+
 ssh:
 	docker exec -it videos.izdrail.com /bin/bash
 

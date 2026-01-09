@@ -43,3 +43,5 @@ torchcodec
 kokoro
 soundfile
 spacy
+pandas<2.0.0
+gTTS
