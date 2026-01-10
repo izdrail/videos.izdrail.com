@@ -159,6 +159,12 @@ class FFmpegVideoGenerator:
         return None
 
     def get_background_video(self, keyword: Optional[str], sentence: Optional[str], language: str = 'en', preferred_source: Optional[str] = None) -> Optional[Path]:
+        """Return a background video Path.
+        Preference order:
+        1. Video from keyword/media API.
+        2. Random local video file.
+        3. Circle overlay video as full-screen fallback.
+        """
         # Collect all candidate keywords
         search_keywords = []
         if keyword:
@@ -170,17 +176,16 @@ class FFmpegVideoGenerator:
             search_keywords.extend(extracted)
 
         for kw in search_keywords:
-            if not kw: continue
-            
+            if not kw:
+                continue
             # Skip if already used (unless it's the only option)
             if kw in self.keyword_extractor.used_keywords and len(search_keywords) > 1:
                 continue
-                
             video = self.media_manager.get_random_media(kw, preferred_source)
             if video:
                 self.keyword_extractor.used_keywords.add(kw)
                 return video
-                
+        # Local video fallback
         for ext in ['*.mp4', '*.mov', '*.avi']:
             if self.config.VIDEOS_DIR.exists():
                 files = list(self.config.VIDEOS_DIR.glob(ext))
@@ -188,8 +193,13 @@ class FFmpegVideoGenerator:
                     selected = random.choice(files)
                     print(f"📁 [Local] Using local background video: {selected.name}")
                     return selected
-        
-        print("💡 [Fallback] No video found from APIs or local folder. Slide will use generated image if SD available.")
+        # Circle overlay fallback as full-screen video
+        circle_video = self.get_circle_overlay_video()
+        if circle_video:
+            print(f"� [Fallback] Using circle overlay video as background: {circle_video.name}")
+            return circle_video
+        # Final fallback – will use gradient in slide creation
+        print("💡 [Fallback] No video found; gradient will be used.")
         return None
 
     def get_circle_overlay_video(self) -> Optional[Path]:
@@ -488,12 +498,27 @@ class FFmpegVideoGenerator:
                 )
                 input_count = 1
             else:
-                print(f"🎨 [FFmpeg] Slide {slide_num}: Using branded gradient background")
-                grad_path = self.config.TEMP_DIR / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
-                create_gradient_image(self.config.VIDEO_SIZE, LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
-                inputs.extend(['-loop', '1', '-i', str(grad_path)])
-                filter_parts.append(f"[0:v]fps={export_fps},trim=duration={duration}[bg_scaled]")
-                input_count = 1
+                # No video found – try using circle overlay as full-screen background
+                circle_bg = self.get_circle_overlay_video()
+                if circle_bg and circle_bg.exists():
+                    print(f"🔁 [FFmpeg] Slide {slide_num}: Using circle overlay video as full background")
+                    inputs.extend(['-stream_loop', '-1', '-i', str(circle_bg)])
+                    filter_parts.append(
+                        f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+                        f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+                        f"setsar=1,"
+                        f"fps={export_fps},"
+                        f"trim=duration={duration},"
+                        f"setpts=PTS-STARTPTS[bg_scaled]"
+                    )
+                    input_count = 1
+                else:
+                    print(f"🎨 [FFmpeg] Slide {slide_num}: Using branded gradient background (fallback)")
+                    grad_path = self.config.TEMP_DIR / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
+                    create_gradient_image(self.config.VIDEO_SIZE, LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
+                    inputs.extend(['-loop', '1', '-i', str(grad_path)])
+                    filter_parts.append(f"[0:v]fps={export_fps},trim=duration={duration}[bg_scaled]")
+                    input_count = 1
 
             filter_parts.append("[bg_scaled]format=rgba,colorchannelmixer=aa=0.6[dimmed]")
 

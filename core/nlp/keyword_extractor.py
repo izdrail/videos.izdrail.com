@@ -22,12 +22,12 @@ class OllamaKeywordExtractor:
             return self.cache[cache_key]
             
         prompt = (
-            f"Analyze the following text and extract up to {top_n} visual subjects, scenes, or concrete objects that would make good background videos. "
-            f"Think like a video editor searching for stock footage. "
-            f"Return ONLY a comma-separated list of {language} keywords (max 2 words each). "
-            "Prioritize physical objects, locations, and actions over abstract concepts.\n"
-            f"Text: \"{text}\"\nKeywords:"
-        )
+    f"Analyze the following text and extract up to {top_n} visual subjects, scenes, or concrete objects that would make good background videos. "
+    f"Think like a video editor searching for stock footage. "
+    f"Return ONLY a comma-separated list of {language} keywords (max 1 word each). "
+    "Prioritize physical objects, locations, and actions over abstract concepts.\n"
+    f"Text: \"{text}\"\nKeywords:"
+)
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -40,10 +40,18 @@ class OllamaKeywordExtractor:
                 raw = response.json().get("response", "").strip()
                 print(f"[Ollama] Raw output: {raw}")
                 # Clean and parse
-                keywords = [kw.strip().lower() for kw in raw.split(",") if kw.strip()]
+                raw_keywords = [kw.strip().lower() for kw in raw.split(",") if kw.strip()]
                 # Further cleaning: remove non-alphanumeric (except spaces)
-                keywords = [re.sub(r'[^a-zA-Z0-9\s]', '', kw) for kw in keywords]
-                result = [kw for kw in keywords if kw][:top_n]
+                keywords = [re.sub(r'[^a-zA-Z0-9\s]', '', kw) for kw in raw_keywords]
+                # Enforce single-word keywords
+                single_words = []
+                for kw in keywords:
+                    first = kw.split()[0] if kw.split() else ""
+                    if first:
+                        single_words.append(first)
+                
+                # Filter out empty and limit to top_n
+                result = single_words[:top_n]
                 self.cache[cache_key] = result
                 return result
         except Exception as e:

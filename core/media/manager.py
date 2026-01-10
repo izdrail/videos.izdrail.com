@@ -3,6 +3,8 @@ Media Manager
 Coordinates multiple media source APIs to find the best background media
 """
 import random
+from collections import defaultdict
+import re
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 from .pexels import PexelsAPI
@@ -21,61 +23,98 @@ class MediaManager:
         }
         self.preferred_order = ["Pexels", "YouTube", "Giphy"]
         self.search_cache = {}
+        # Track successful fetches per source for dynamic prioritization
+        self.source_success_counts = defaultdict(int)
+        # Maximum attempts across sources to improve hit rate
+        self.MAX_ATTEMPTS = 3
+        self._used_media_urls = set()
 
     def get_random_media(self, query: str, preferred_source: Optional[str] = None) -> Optional[Path]:
+        """Fetch a background video for *query*.
+        Attempts multiple times across sources, simplifying the query on retries to always get results.
         """
-        Get a random video/media matching the query from available sources
-        
-        Args:
-            query: Search query
-            preferred_source: Optional source to prioritize (e.g., "Pexels")
-            
-        Returns:
-            Path to downloaded media or None
-        """
-        all_sources = list(self.apis.keys())
-        
-        # Determine source order
-        if preferred_source == "Random" or not preferred_source:
-            random.shuffle(all_sources)
-        else:
-            priority_list = []
-            if preferred_source in self.apis:
-                priority_list.append(preferred_source)
-            for s in self.preferred_order:
-                if s not in priority_list and s in self.apis:
-                    priority_list.append(s)
-            for s in all_sources:
-                if s not in priority_list:
-                    priority_list.append(s)
-            all_sources = priority_list
+        # Use cached source if available
+        cache_key = (query, preferred_source)
+        if cache_key in self.search_cache:
+            cp = self.search_cache[cache_key]
+            if cp and Path(cp).exists():
+                print(f"🔁 [MediaManager] Using cached video for '{query}'")
+                return Path(cp)
 
-        for source_name in all_sources:
-            try:
-                api = self.apis[source_name]
-                # Check if API is functional (has key if needed)
-                if hasattr(api, 'api_key') and source_name != "YouTube" and not api.api_key:
-                    continue
-                
-                # Search and get a random result
-                results = api.search_videos(query)
-                if results:
-                    selected = random.choice(results)
-                    # We need a download path. If config is available, use it.
+        current_query = query
+        attempts = 0
+        
+        while attempts < self.MAX_ATTEMPTS:
+            attempts += 1
+            ordered_sources = self._get_ordered_sources(preferred_source)
+            
+            for source_name in ordered_sources:
+                try:
+                    api = self.apis[source_name]
+                    if hasattr(api, 'api_key') and source_name != "YouTube" and not api.api_key:
+                        continue
+                    
+                    results = api.search_videos(current_query)
+                    if not results:
+                        continue
+                        
+                    # Filter results that were already downloaded in this session if possible
+                    filtered = [r for r in results if r.get('url') not in self._used_media_urls]
+                    if not filtered: filtered = results # Fallback if all used
+                    
+                    selected = random.choice(filtered)
+                    
+                    # Build output path
                     if self.config:
-                        # Sanitize query for folder name
-                        safe_query = "".join([c if c.isalnum() else "_" for c in query.lower()])
-                        keyword_folder = self.config.VIDEOS_DIR / safe_query
+                        safe_q = "".join([c if c.isalnum() else "_" for c in current_query.lower()])
+                        keyword_folder = self.config.VIDEOS_DIR / safe_q
                         keyword_folder.mkdir(parents=True, exist_ok=True)
                         output_path = keyword_folder / f"{source_name.lower()}_{random.randint(1000, 9999)}.mp4"
                     else:
-                        # Fallback to current dir if no config
                         output_path = Path(f"{source_name.lower()}_{random.randint(1000, 9999)}.mp4")
                         
                     if api.download_video(selected.get('url'), output_path):
-                        print(f"🎯 [MediaManager] Selected {source_name} for query: '{query}'")
+                        print(f"🎯 [MediaManager] Selected {source_name} for query: '{current_query}' (attempt {attempts})")
+                        self.source_success_counts[source_name] += 1
+                        self.search_cache[cache_key] = str(output_path)
+                        self._used_media_urls.add(selected.get('url'))
                         return output_path
-            except Exception as e:
-                print(f"[MediaManager] Error with {source_name}: {e}")
+                        
+                except Exception as e:
+                    print(f"[MediaManager] Error with {source_name}: {e}")
             
+            # If we failed, simplify the query for the next attempt
+            old_q = current_query
+            current_query = self._simplify_query(current_query)
+            if current_query == old_q: # No more simplification possible
+                break
+                
+        # Final fallback to local
+        for ext in ['*.mp4', '*.mov', '*.avi']:
+            if self.config and self.config.VIDEOS_DIR.exists():
+                files = list(self.config.VIDEOS_DIR.glob(ext))
+                if files:
+                    selected = random.choice(files)
+                    print(f"📁 [Local] Using local background video: {selected.name}")
+                    return selected
         return None
+
+    def _simplify_query(self, query: str) -> str:
+        """Reduce query complexity to improve search hit rate."""
+        words = query.split()
+        if len(words) > 1:
+            # Try taking just the first word
+            return words[0]
+        return query
+
+    def _get_ordered_sources(self, preferred: Optional[str] = None) -> List[str]:
+        sources = list(self.apis.keys())
+        if preferred and preferred in sources:
+            sources.remove(preferred)
+            ordered = [preferred]
+        else:
+            ordered = []
+        # Sort remaining by success count
+        remaining = sorted(sources, key=lambda s: self.source_success_counts.get(s, 0), reverse=True)
+        ordered.extend(remaining)
+        return ordered
