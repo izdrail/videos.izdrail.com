@@ -11,9 +11,9 @@ from collections import Counter
 class OllamaKeywordExtractor:
     """Uses Ollama API to extract keywords from text"""
     
-    def __init__(self, model: str = "mistral:7b"):
+    def __init__(self, model: str = "mistral:7b", url: Optional[str] = None):
         self.model = model
-        self.url = os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate")
+        self.url = url or os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate")
         self.cache = {}
     
     def extract_keywords(self, text: str, top_n: int = 5, language: str = 'en') -> List[str]:
@@ -58,21 +58,53 @@ class OllamaKeywordExtractor:
             print(f"[Ollama] Error extracting keywords: {e}")
         return []
 
-    @classmethod
-    def get_available_models(cls) -> List[str]:
-        """Fetches available models from the API."""
-        url = os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate").replace("/generate", "/tags")
+    def get_available_models(self) -> List[str]:
+        """Fetches available models from the current instance's API URL."""
+        base_url = self.url
+        if "/generate" in base_url:
+            url = base_url.replace("/generate", "/tags")
+        else:
+            # Try to append /tags if not present
+            from urllib.parse import urlparse
+            p = urlparse(base_url)
+            # If path ends with /api/generate or similar, fix it
+            path = p.path
+            if path.endswith('/generate'):
+                path = path.replace('/generate', '/tags')
+            elif not path.endswith('/tags'):
+                 if not path.endswith('/api'):
+                     path = f"{path.rstrip('/')}/api/tags"
+                 else:
+                     path = f"{path.rstrip('/')}/tags"
+            url = f"{p.scheme}://{p.netloc}{path}"
+
+        models = []
         try:
-            response = requests.get(url, timeout=10)
+            print(f"[Ollama] Fetching models from {url}...")
+            response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 if "models" in data:
-                     return [m["name"] for m in data["models"]]
-                return []
+                     models = [m["name"] for m in data["models"]]
         except Exception as e:
             print(f"[Ollama] Error fetching models: {e}")
-            return []
-        return ["mistral:7b"] # Fallback
+        
+        # Ensure current model and default model are in the list
+        default_model = "mistral:7b"
+        if default_model not in models:
+            models.append(default_model)
+        if self.model and self.model not in models:
+            models.append(self.model)
+        
+        # Log final list to help debug Gradio choice errors
+        print(f"[Ollama] Available models: {models}")
+        return models
+
+    @classmethod
+    def fetch_models_static(cls, base_url: str) -> List[str]:
+        """Static version helping to fetch models for a given base_url without full instance."""
+        temp_extractor = cls(url=base_url)
+        return temp_extractor.get_available_models()
 
 class KeywordExtractor:
     """Orchestrates keyword extraction using Ollama and Spacy fallback"""
@@ -150,6 +182,17 @@ class KeywordExtractor:
     def get_available_models(self) -> List[str]:
         """Proxy to Ollama extractor"""
         return self.ollama_extractor.get_available_models()
+
+    @property
+    def api_url(self) -> str:
+        return self.ollama_extractor.url
+
+    @api_url.setter
+    def api_url(self, value: str):
+        if value and value != self.ollama_extractor.url:
+            print(f"[Ollama] Updating API URL to: {value}")
+            self.ollama_extractor.url = value
+            self.ollama_extractor.cache.clear() # Clear cache on URL change
 
     @property
     def model(self) -> str:

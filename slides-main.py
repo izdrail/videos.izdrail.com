@@ -914,8 +914,7 @@ def setup_ui(generator: TextToVideoGenerator):
                         )
                         circle_upload = gr.File(
                             label="📤 Upload Custom Circle Video",
-                            file_types=["video"],
-                            type="filepath"
+                            file_types=["video"]
                         )
                         with gr.Row():
                             circle_diameter = gr.Slider(150, 600, 300, 25, label="Diameter (px)")
@@ -952,6 +951,19 @@ def setup_ui(generator: TextToVideoGenerator):
                 progress((current, total), desc=message)
                 return f"{current}/{total}: {message}"
 
+            # Gradio 3/4 compatibility for file upload
+            final_circle_path = None
+            if circle_upload_path:
+                if isinstance(circle_upload_path, (list, tuple)):
+                    circle_upload_path = circle_upload_path[0]
+                
+                if hasattr(circle_upload_path, "name"): # Gradio 3 File object
+                    final_circle_path = circle_upload_path.name
+                elif hasattr(circle_upload_path, "path"): # Gradio 4 FileData object
+                    final_circle_path = circle_upload_path.path
+                elif isinstance(circle_upload_path, str): # Raw path string
+                    final_circle_path = circle_upload_path
+
             result = generator.generate_video(
                 text=text,
                 language=language,
@@ -968,7 +980,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 circle_diameter=circle_diam,
                 circle_position=circle_pos,
                 circle_selection=circle_sel,
-                circle_upload_path=circle_upload_path,
+                circle_upload_path=final_circle_path,
                 circle_border_width=circle_border,
                 progress_callback=update_progress
             )
@@ -1057,6 +1069,7 @@ if __name__ == "__main__":
         print("="*80 + "\n")
 
         demo = setup_ui(generator)
+        demo.queue()
         demo.launch(
             server_name="0.0.0.0",
             server_port=1603,

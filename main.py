@@ -829,6 +829,7 @@ class TextToVideoGenerator:
                            export_fps: int = 30,
                            overlay_shape: str = "Circle",
                            ai_model: str = "mistral:7b",
+                           ai_api_url: Optional[str] = None,
                            stress_level: float = 1.0,
                            progress_callback=None) -> Dict:
         # Reset keywords for this session
@@ -856,8 +857,13 @@ class TextToVideoGenerator:
             'export_fps': export_fps,
             'overlay_shape': overlay_shape,
             'ai_model': ai_model,
+            'ai_api_url': ai_api_url,
             'stress_level': stress_level
         }
+
+        # Update API URL if changed
+        if ai_api_url and ai_api_url != self.keyword_extractor.api_url:
+            self.keyword_extractor.api_url = ai_api_url
 
         # Update model if changed
         if ai_model and ai_model != self.keyword_extractor.model:
@@ -1099,12 +1105,20 @@ def setup_ui(generator: TextToVideoGenerator):
                         - Adjust stress: `[1 level](-1)` or `[2 levels](-2)`
                         """)
                         with gr.Row():
+                            ai_api_url = gr.Textbox(
+                                label="🌐 AI API URL",
+                                value=generator.keyword_extractor.api_url,
+                                placeholder="https://ai.izdrail.com/api/generate",
+                                info="Endpoint for Ollama keyword extraction"
+                            )
+                        with gr.Row():
                             ai_model_dropdown = gr.Dropdown(
                                 label="🤖 AI Model",
                                 choices=generator.available_models,
                                 value=generator.available_models[0] if generator.available_models else "mistral:7b",
                                 info="Select LLM for keyword extraction"
                             )
+                            btn_refresh_models = gr.Button("🔄 Refresh Models", size="sm")
                         
                         stress_level = gr.Slider(0.5, 1.5, 1.0, 0.1, label="Stress Level (Speed)", info="0.5 = Slow/Relaxed, 1.5 = Fast/Stressed")
 
@@ -1158,8 +1172,7 @@ def setup_ui(generator: TextToVideoGenerator):
                         )
                         circle_upload = gr.File(
                             label="📤 Upload Custom Circle Video",
-                            file_types=["video"],
-                            type="filepath"
+                            file_types=["video"]
                         )
                         with gr.Row():
                             circle_diameter = gr.Slider(150, 600, 300, 25, label="Diameter (px)")
@@ -1230,7 +1243,7 @@ def setup_ui(generator: TextToVideoGenerator):
                             selected_background_video_name,
                             enable_music, music_select, music_vol,
                             enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val,
-                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, stress_level_val, progress=gr.Progress()):
+                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, progress=gr.Progress()):
             
             if not text or not text.strip():
                 return None, None, None, "Idle", "❌ **Error:** Please enter some text.", "Ready"
@@ -1238,6 +1251,19 @@ def setup_ui(generator: TextToVideoGenerator):
             def update_progress(current, total, message):
                 progress((current, total), desc=message)
                 return f"{current}/{total}: {message}"
+
+            # Gradio 3/4 compatibility for file upload
+            final_circle_path = None
+            if circle_upload_path:
+                if isinstance(circle_upload_path, (list, tuple)):
+                    circle_upload_path = circle_upload_path[0]
+                
+                if hasattr(circle_upload_path, "name"): # Gradio 3 File object
+                    final_circle_path = circle_upload_path.name
+                elif hasattr(circle_upload_path, "path"): # Gradio 4 FileData object
+                    final_circle_path = circle_upload_path.path
+                elif isinstance(circle_upload_path, str): # Raw path string
+                    final_circle_path = circle_upload_path
 
             result = generator.generate_video(
                 text=text,
@@ -1256,11 +1282,12 @@ def setup_ui(generator: TextToVideoGenerator):
                 circle_position=circle_pos,
                 circle_border_width=circle_border,
                 circle_selection=circle_sel,
-                circle_upload_path=circle_upload_path,
+                circle_upload_path=final_circle_path,
                 hide_text=hide_text,
                 export_fps=export_fps_val,
                 overlay_shape=overlay_shape_val,
                 ai_model=ai_model_val,
+                ai_api_url=ai_api_url_val,
                 stress_level=stress_level_val,
                 progress_callback=update_progress
             )
@@ -1293,6 +1320,21 @@ def setup_ui(generator: TextToVideoGenerator):
         btn_quote.click(lambda txt: insert_symbol(txt, '"'), inputs=[text_input], outputs=[text_input])
         btn_stress1.click(lambda txt: insert_symbol(txt, "ˈ"), inputs=[text_input], outputs=[text_input])
         btn_stress2.click(lambda txt: insert_symbol(txt, "ˌ"), inputs=[text_input], outputs=[text_input])
+ 
+        def refresh_models_action(url):
+            from core.nlp.keyword_extractor import OllamaKeywordExtractor
+            try:
+                models = OllamaKeywordExtractor.fetch_models_static(url)
+                return gr.update(choices=models, value=models[0] if models else "mistral:7b")
+            except Exception as e:
+                print(f"Error refreshing models: {e}")
+                return gr.update(choices=["mistral:7b"], value="mistral:7b")
+
+        btn_refresh_models.click(
+            fn=refresh_models_action,
+            inputs=[ai_api_url],
+            outputs=[ai_model_dropdown]
+        )
 
         generate_button.click(
             fn=generate_wrapper,
@@ -1301,7 +1343,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 media_source_dropdown, pexels_keyword, background_video_dropdown,
                 enable_music, music_dropdown, music_volume,
                 enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape,
-                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, stress_level
+                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level
             ],
             outputs=[video_output, thumbnail_output, audio_output, engine_status_output, status_output, progress_bar]
         )
@@ -1368,6 +1410,7 @@ if __name__ == "__main__":
         print("="*80 + "\n")
 
         demo = setup_ui(generator)
+        demo.queue()
         demo.launch(
             server_name="0.0.0.0",
             server_port=1603,

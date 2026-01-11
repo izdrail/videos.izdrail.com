@@ -35,7 +35,7 @@ typing_extensions==4.8.0
 urllib3==1.26.14
 zipp==3.14.0
 python-dotenv
-gradio 
+gradio
 diffusers==0.30
 accelerate
 yt-dlp
@@ -43,5 +43,5 @@ torchcodec
 kokoro
 soundfile
 spacy
-pandas<2.0.0
+pandas
 gTTS
