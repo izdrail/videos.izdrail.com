@@ -69,9 +69,10 @@ class MediaManager:
                         safe_q = "".join([c if c.isalnum() else "_" for c in current_query.lower()])
                         keyword_folder = self.config.VIDEOS_DIR / safe_q
                         keyword_folder.mkdir(parents=True, exist_ok=True)
-                        output_path = keyword_folder / f"{source_name.lower()}_{random.randint(1000, 9999)}.mp4"
+                        output_path = keyword_folder / f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}.mp4"
                     else:
-                        output_path = Path(f"{source_name.lower()}_{random.randint(1000, 9999)}.mp4")
+                        safe_q = "".join([c if c.isalnum() else "_" for c in current_query.lower()])
+                        output_path = Path(f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}.mp4")
                         
                     if api.download_video(selected.get('url'), output_path):
                         print(f"🎯 [MediaManager] Selected {source_name} for query: '{current_query}' (attempt {attempts})")

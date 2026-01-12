@@ -89,7 +89,7 @@ class FFmpegVideoGenerator:
     def __init__(self, config: Config, keyword_extractor: Optional[KeywordExtractor] = None):
         self.config = config
         self.font_path = self._discover_fonts()
-        self.media_manager = MediaManager()
+        self.media_manager = MediaManager(self.config)
         self.keyword_extractor = keyword_extractor or KeywordExtractor()
         self.logo_path = self._find_logo()
         self.sd_manager = None
@@ -384,7 +384,8 @@ class FFmpegVideoGenerator:
     def _create_slide_with_ffmpeg(self, sentence: str, audio_path: Path, video_path: Optional[Path],
                                   output_path: Path, slide_num: int, is_intro: bool = False,
                                   is_cta: bool = False, circle_video: Optional[Path] = None,
-                                  circle_config: Optional[Dict] = None, language: str = 'en') -> Optional[Path]:
+                                  circle_config: Optional[Dict] = None, language: str = 'en',
+                                  overlay_shape: str = "Circle") -> Optional[Path]:
         try:
             if audio_path is None or not Path(audio_path).exists():
                 print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None or does not exist")
@@ -407,7 +408,32 @@ class FFmpegVideoGenerator:
             filter_parts = []
             input_count = 0
 
-            if video_path and video_path.exists():
+            is_split_screen = overlay_shape == "Split Screen" and circle_video and circle_video.exists()
+
+            if is_split_screen:
+                # Top part: Background video or gradient fallback
+                if video_path and video_path.exists():
+                    inputs.extend(['-stream_loop', '-1', '-i', str(video_path)]) # Input 0
+                    filter_parts.append(f"[0:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1[top]")
+                else:
+                    grad_path = self.config.TEMP_DIR / f"grad_top_{slide_num}_{uuid.uuid4().hex[:8]}.png"
+                    create_gradient_image((1080, 960), LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
+                    inputs.extend(['-loop', '1', '-i', str(grad_path)]) # Input 0
+                    filter_parts.append(f"[0:v]scale=1080:960,setsar=1[top]")
+                
+                # Bottom part: Video Overlay
+                inputs.extend(['-stream_loop', '-1', '-i', str(circle_video)]) # Input 1
+                filter_parts.append(f"[1:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1[bottom]")
+                
+                # Combine
+                filter_parts.append(
+                    f"[top][bottom]vstack=inputs=2,"
+                    f"fps=30,"
+                    f"trim=duration={duration},"
+                    f"setpts=PTS-STARTPTS[bg_scaled]"
+                )
+                input_count = 2
+            elif video_path and video_path.exists():
                 inputs.extend(['-stream_loop', '-1', '-i', str(video_path)])
                 filter_parts.append(
                     f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
@@ -528,6 +554,7 @@ class FFmpegVideoGenerator:
                           circle_selection: str = "Random",
                           language: str = 'en',
                           preferred_media_source: Optional[str] = None,
+                          overlay_shape: str = "Circle",
                           progress_callback=None) -> Path:
         temp_dir = self.config.TEMP_DIR / f"final_{uuid.uuid4().hex[:8]}"
         temp_dir.mkdir(exist_ok=True)
@@ -545,7 +572,7 @@ class FFmpegVideoGenerator:
                 futures.append(executor.submit(
                     self._create_slide_with_ffmpeg,
                     "", intro_audio, intro_video_bg, intro_output, -1, # -1 for intro slide_num
-                    True, False, None, None, language # No circle for intro/cta
+                    True, False, None, None, language, overlay_shape # No circle for intro/cta
                 ))
 
             # Submit main content slides
@@ -557,7 +584,7 @@ class FFmpegVideoGenerator:
                 futures.append(executor.submit(
                     self._create_slide_with_ffmpeg,
                     sentence, audio_path, video_bg, output_path, i,
-                    False, False, circle_video, circle_config, language
+                    False, False, circle_video, circle_config, language, overlay_shape
                 ))
                 
             # Submit CTA slide if needed
@@ -567,7 +594,7 @@ class FFmpegVideoGenerator:
                 futures.append(executor.submit(
                     self._create_slide_with_ffmpeg,
                     "", cta_audio, cta_video_bg, cta_output, 999, # 999 for cta slide_num
-                    False, True, None, None, language # No circle for intro/cta
+                    False, True, None, None, language, overlay_shape # No circle for intro/cta
                 ))
 
             # Collect results in order of slide_num
@@ -667,9 +694,8 @@ class TextToVideoGenerator:
                       enable_circle_overlay: bool = False,
                       circle_diameter: int = 300,
                       circle_position: str = "top-right",
-                       circle_border_width: int = 5,
-                       circle_selection: str = "Random",
                        circle_upload_path: Optional[str] = None,
+                       overlay_shape: str = "Circle",
                        progress_callback=None) -> Dict:
         # Reset keywords for this session
         self.keyword_extractor.clear_used()
@@ -689,7 +715,8 @@ class TextToVideoGenerator:
             'circle_position': circle_position,
             'circle_border_width': circle_border_width,
             'circle_selection': circle_selection,
-            'circle_upload_path': str(circle_upload_path) if circle_upload_path else None
+            'circle_upload_path': str(circle_upload_path) if circle_upload_path else None,
+            'overlay_shape': overlay_shape
         }
 
         if not text or not text.strip():
@@ -774,6 +801,7 @@ class TextToVideoGenerator:
                 circle_selection=circle_selection,
                 language=language,
                 preferred_media_source=preferred_media_source,
+                overlay_shape=overlay_shape,
                 progress_callback=video_progress
             )
 
@@ -924,6 +952,12 @@ def setup_ui(generator: TextToVideoGenerator):
                                 value="top-right",
                                 label="Position"
                             )
+                            overlay_shape = gr.Dropdown(
+                                ["Circle", "Rectangle", "Square", "Star", "Split Screen"],
+                                value="Circle",
+                                label="Overlay Shape",
+                                info="Shape of the PIP overlay"
+                            )
 
                     with gr.TabItem("⚙️ Advanced"):
                         with gr.Row():
@@ -941,7 +975,7 @@ def setup_ui(generator: TextToVideoGenerator):
 
         def generate_wrapper(text, language, speaker, use_random, media_source, keyword,
                             enable_music, music_select, music_vol,
-                            enable_circle, circle_sel, circle_upload_path, circle_diam, circle_pos, circle_border,
+                            enable_circle, circle_sel, circle_upload_path, circle_diam, circle_pos, circle_border, overlay_shape_val,
                             enable_intro, enable_cta, progress=gr.Progress()):
             
             if not text or not text.strip():
@@ -982,6 +1016,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 circle_selection=circle_sel,
                 circle_upload_path=final_circle_path,
                 circle_border_width=circle_border,
+                overlay_shape=overlay_shape_val,
                 progress_callback=update_progress
             )
 
@@ -1001,7 +1036,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 text_input, language_dropdown, speaker_dropdown, use_random_voices,
                 media_source_dropdown, pexels_keyword,
                 enable_music, music_dropdown, music_volume,
-                enable_circle, circle_selection, circle_upload, circle_diameter, circle_position, circle_border_width,
+                enable_circle, circle_selection, circle_upload, circle_diameter, circle_position, circle_border_width, overlay_shape,
                 enable_intro, enable_cta
             ],
             outputs=[video_output, audio_output, status_output, progress_bar]
@@ -1072,7 +1107,7 @@ if __name__ == "__main__":
         demo.queue()
         demo.launch(
             server_name="0.0.0.0",
-            server_port=1603,
+            server_port=1604,
             share=False,
             show_error=True
         )

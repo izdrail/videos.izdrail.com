@@ -89,7 +89,7 @@ class FFmpegVideoGenerator:
     def __init__(self, config: Config, keyword_extractor: Optional[KeywordExtractor] = None):
         self.config = config
         self.font_path = self._discover_fonts()
-        self.media_manager = MediaManager()
+        self.media_manager = MediaManager(self.config)
         self.keyword_extractor = keyword_extractor or KeywordExtractor()
         self.logo_path = self._find_logo()
         self.sd_manager = None
@@ -486,7 +486,32 @@ class FFmpegVideoGenerator:
             filter_parts = []
             input_count = 0
 
-            if video_path and video_path.exists():
+            is_split_screen = overlay_shape == "Split Screen" and circle_video and circle_video.exists()
+
+            if is_split_screen:
+                # Top part: Background video or gradient fallback
+                if video_path and video_path.exists():
+                    inputs.extend(['-stream_loop', '-1', '-i', str(video_path)]) # Input 0
+                    filter_parts.append(f"[0:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1[top]")
+                else:
+                    grad_path = self.config.TEMP_DIR / f"grad_top_{slide_num}_{uuid.uuid4().hex[:8]}.png"
+                    create_gradient_image((1080, 960), LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
+                    inputs.extend(['-loop', '1', '-i', str(grad_path)]) # Input 0
+                    filter_parts.append(f"[0:v]scale=1080:960,setsar=1[top]")
+                
+                # Bottom part: Video Overlay
+                inputs.extend(['-stream_loop', '-1', '-i', str(circle_video)]) # Input 1
+                filter_parts.append(f"[1:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1[bottom]")
+                
+                # Combine
+                filter_parts.append(
+                    f"[top][bottom]vstack=inputs=2,"
+                    f"fps={export_fps},"
+                    f"trim=duration={duration},"
+                    f"setpts=PTS-STARTPTS[bg_scaled]"
+                )
+                input_count = 2
+            elif video_path and video_path.exists():
                 inputs.extend(['-stream_loop', '-1', '-i', str(video_path)])
                 filter_parts.append(
                     f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
@@ -547,7 +572,7 @@ class FFmpegVideoGenerator:
                 logo_label = "final"
                 input_count += 1
 
-            if circle_video and circle_video.exists() and circle_config:
+            if circle_video and circle_video.exists() and circle_config and not is_split_screen:
                 inputs.extend(['-stream_loop', '-1', '-i', str(circle_video)])
                 diameter = circle_config.get('diameter', 300)
                 position = circle_config.get('position', 'top-right')
@@ -1067,7 +1092,7 @@ class TextToVideoGenerator:
 # =============== GRADIO UI ===============
 def setup_ui(generator: TextToVideoGenerator):
     with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), title="AI Video Generator Pro") as demo:
-        gr.Markdown("# 🎬 AI Video Generator Pro")
+        gr.Markdown("# 🎬 Shorts Generator")
         gr.Markdown("Create stunning videos with multi-language TTS, auto-backgrounds, and dynamic overlays.")
 
         with gr.Row():
@@ -1183,7 +1208,7 @@ def setup_ui(generator: TextToVideoGenerator):
                                 label="Position"
                             )
                             overlay_shape = gr.Dropdown(
-                                ["Circle", "Rectangle", "Square", "Star"],
+                                ["Circle", "Rectangle", "Square", "Star", "Split Screen"],
                                 value="Circle",
                                 label="Overlay Shape",
                                 info="Shape of the PIP overlay"
