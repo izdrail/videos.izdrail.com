@@ -131,7 +131,7 @@ class Config:
             'hi': {'name': 'Hindi', 'code': 'hi', 'tts_code': 'hi', 'kokoro_code': 'h'},
             # Arabic and Romanian are NOT supported by Kokoro v0.19/v1.0.
             'ar': {'name': 'Arabic', 'code': 'ar', 'tts_code': 'ar', 'kokoro_code': None}, # Use gTTS/XTTS
-            'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': None} # Use gTTS
+            'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': None} # Use gTTS/MMS-TTS
         }
     
     def get_temp_audio_file(self, prefix: str = "audio") -> Path:

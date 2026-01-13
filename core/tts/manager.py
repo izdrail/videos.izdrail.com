@@ -15,6 +15,7 @@ KOKORO_AVAILABLE = False
 XTTS_AVAILABLE = False
 SPEECHBRAIN_AVAILABLE = False
 GTTS_AVAILABLE = False
+MMS_AVAILABLE = False
 
 class TTSManager:
     """Unified manager for various TTS engines"""
@@ -43,6 +44,8 @@ class TTSManager:
             self._load_xtts()
         elif target_engine == "gtts":
             self._load_gtts()
+        elif target_engine == "mms":
+            self._load_mms()
             
     def _load_kokoro(self, lang_code: str = 'a'):
         global KOKORO_AVAILABLE
@@ -89,6 +92,39 @@ class TTSManager:
         except ImportError:
             self.last_status_message = "❌ gTTS library not found"
             print(f"[TTS] {self.last_status_message}")
+
+    def _load_mms(self, repo_id: str = "facebook/mms-tts-ron"):
+        global MMS_AVAILABLE
+        try:
+            # Defensively set offline environment variables
+            import os
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+            
+            from transformers import VitsModel, AutoTokenizer
+            import torch
+            
+            print(f"[TTS] Loading MMS model: {repo_id}...")
+            # Attempt to load from cache
+            self.tokenizer = AutoTokenizer.from_pretrained(repo_id, local_files_only=True)
+            self.model = VitsModel.from_pretrained(repo_id, local_files_only=True)
+            self.loaded_engine = "mms"
+            MMS_AVAILABLE = True
+            self.last_status_message = f"✅ MMS Loaded: {repo_id}"
+            print(f"[TTS] {self.last_status_message}")
+        except Exception as e:
+            # Fallback to online if local fails (though in Docker it shouldn't)
+            try:
+                from transformers import VitsModel, AutoTokenizer
+                self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
+                self.model = VitsModel.from_pretrained(repo_id)
+                self.loaded_engine = "mms"
+                MMS_AVAILABLE = True
+                self.last_status_message = f"✅ MMS Loaded (Online): {repo_id}"
+                print(f"[TTS] {self.last_status_message}")
+            except Exception as e2:
+                self.last_status_message = f"❌ MMS Error: {e2}"
+                print(f"[TTS] {self.last_status_message}")
 
     def _clean_text(self, text: str) -> str:
         """Clean text of custom metadata tags that shouldn't be spoken."""
@@ -140,19 +176,26 @@ class TTSManager:
 
         if engine == "auto":
             # Heuristic: 
-            # 1. If it's a clone voice -> XTTS
-            # 2. If valid Kokoro lang -> Kokoro
-            # 3. Else -> Fallback
-            if is_clone:
+            # 1. If it's Romanian -> MMS (XTTS doesn't support RO)
+            # 2. If it's a clone voice -> XTTS
+            # 3. If valid Kokoro lang -> Kokoro
+            # 4. Else -> Fallback
+            if language == 'ro':
+                engine = "mms"
+            elif is_clone:
                 engine = "xtts"
             elif kokoro_code:
                 engine = "kokoro"
-            elif language in ['es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']:
+            elif language in ['en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']:
                 # Keep XTTS for languages it explicitly supports but Kokoro doesn't
                 engine = "xtts"
             else:
                 engine = "gtts"
                 
+        # Force MMS if the voice is explicitly "MMS-TTS Romanian"
+        if voice_id == "MMS-TTS Romanian":
+            engine = "mms"
+            
         self._load_engine(engine, lang_code=kokoro_code or 'a')
         
         output_path = self.config.TEMP_DIR / f"tts_{uuid.uuid4().hex}.wav"
@@ -164,6 +207,8 @@ class TTSManager:
                 self._generate_xtts(text, voice_id, language, output_path)
             elif self.loaded_engine == "gtts":
                 self._generate_gtts(text, language, output_path)
+            elif self.loaded_engine == "mms":
+                self._generate_mms(text, output_path)
             else:
                 raise ValueError(f"No functional engine for {engine}")
                 
@@ -274,6 +319,23 @@ class TTSManager:
         tts = gTTS(text=text, lang=language)
         tts.save(str(output_path))
 
+    def _generate_mms(self, text: str, output_path: Path):
+        import scipy.io.wavfile as wavfile
+        import torch
+        
+        inputs = self.tokenizer(text, return_tensors="pt")
+        with torch.no_grad():
+            output = self.model(**inputs).waveform
+        
+        # Squeeze and convert to numpy
+        audio_data = output.cpu().numpy().squeeze()
+        # MMS outputs float32, usually normalized. Scale to int16.
+        # But VITS might be at a specific sample rate.
+        # Check model config for sampling rate.
+        sampling_rate = self.model.config.sampling_rate
+        
+        wavfile.write(str(output_path), sampling_rate, audio_data)
+
     def get_available_voices(self, engine: str = "kokoro") -> List[str]:
         """Get voices supported by the engine"""
         if engine == "kokoro":
@@ -282,6 +344,7 @@ class TTSManager:
                 "american-man", "american-man-2", "american-man-3", "american-man-4",
                 "british-woman", "british-woman-2",
                 "british-man", "british-man-2",
-                "spanish-woman", "french-woman", "italian-woman", "italian-man", "portuguese-woman", "portuguese-man"
+                "spanish-woman", "french-woman", "italian-woman", "italian-man", "portuguese-woman", "portuguese-man",
+                "MMS-TTS Romanian"
             ]
         return ["Standard"]
