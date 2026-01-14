@@ -17,7 +17,7 @@ def download_model(name: str, repo_id: str) -> None:
 
     path = snapshot_download(
         repo_id=repo_id,
-        allow_patterns=["*.bin", "*.pt", "*.json", "*.onnx", "*.model"],
+        allow_patterns=["*.bin", "*.pt", "*.pth", "*.json", "*.onnx", "*.model"],
     )
 
     print(f"✔ {name} downloaded successfully")

@@ -58,12 +58,18 @@ class TTSManager:
             from kokoro import KPipeline
             # Explicitly set repo_id to ensure it uses the pre-downloaded model in offline mode
             # lang_code ensures we load the correct phonemizer/vocabulary
-            self.model = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M")
-            self.loaded_engine = "kokoro"
-            self.current_kokoro_lang = lang_code
-            KOKORO_AVAILABLE = True
-            self.last_status_message = f"✅ Kokoro-82M loaded (Lang: {lang_code})"
-            print(f"[TTS] {self.last_status_message}")
+            try:
+                self.model = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M")
+                self.loaded_engine = "kokoro"
+                self.current_kokoro_lang = lang_code
+                KOKORO_AVAILABLE = True
+                self.last_status_message = f"✅ Kokoro-82M loaded (Lang: {lang_code})"
+                print(f"[TTS] {self.last_status_message}")
+            except Exception as e:
+                self.last_status_message = f"❌ Kokoro Load Error: {e}"
+                print(f"[TTS] {self.last_status_message}")
+                # Fallback or re-raise if critical
+                raise
         except ImportError:
             self.last_status_message = "❌ Kokoro library not found"
             print(f"[TTS] {self.last_status_message}")

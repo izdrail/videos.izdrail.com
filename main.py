@@ -1091,7 +1091,7 @@ class TextToVideoGenerator:
 
 # =============== GRADIO UI ===============
 def setup_ui(generator: TextToVideoGenerator):
-    with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), title="AI Video Generator Pro") as demo:
+    with gr.Blocks(title="AI Video Generator Pro") as demo:
         gr.Markdown("# 🎬 Shorts Generator")
         gr.Markdown("Create stunning videos with multi-language TTS, auto-backgrounds, and dynamic overlays.")
 
@@ -1440,7 +1440,8 @@ if __name__ == "__main__":
             server_name="0.0.0.0",
             server_port=1603,
             share=False,
-            show_error=True
+            show_error=True,
+            theme=gr.themes.Soft(primary_hue="blue")
         )
     except Exception as e:
         print(f"\n❌ FATAL ERROR: {e}")
