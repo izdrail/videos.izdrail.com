@@ -32,6 +32,7 @@ class TTSManager:
         self.last_status_message = "Idle. No engine loaded."
         self._lock = threading.Lock() # Lock for _load_engine
         self.lock = threading.Lock() # Lock for generate_speech
+        self.health_status = self.check_engines()
         
     def _load_engine(self, target_engine: str, lang_code: str = 'a'):
         """Lazy load the requested engine"""
@@ -144,6 +145,41 @@ class TTSManager:
         # Example: [1 level], [2 levels](-2)
         text = re.sub(r'\[\d+\s+levels?\](?:\([^)]+\))?', '', text)
         return text.strip()
+
+    def check_engines(self) -> Dict[str, bool]:
+        """Check status of all engines without loading models fully"""
+        status = {
+            "kokoro": False,
+            "xtts": False,
+            "gtts": False,
+            "mms": False
+        }
+        
+        # Check Kokoro
+        try:
+            import kokoro
+            status["kokoro"] = True
+        except ImportError: pass
+        
+        # Check XTTS
+        try:
+            from TTS.api import TTS
+            status["xtts"] = True
+        except ImportError: pass
+        
+        # Check gTTS
+        try:
+            import gtts
+            status["gtts"] = True
+        except ImportError: pass
+        
+        # Check MMS
+        try:
+            import transformers
+            status["mms"] = True
+        except ImportError: pass
+        
+        return status
 
     def generate_speech(self, text: str, voice_id: str, language: str = "en", 
                        engine: Optional[str] = None, speed: float = 1.0) -> Path:

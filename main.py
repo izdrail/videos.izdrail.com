@@ -40,6 +40,10 @@ SPACY_AVAILABLE = True  # Used in main block
 import gradio as gr
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 from pydub import AudioSegment
+try:
+    from langdetect import detect as detect_lang
+except ImportError:
+    detect_lang = None
 from pydub.effects import normalize, low_pass_filter
 from num2words import num2words
 import textwrap
@@ -762,7 +766,7 @@ class FFmpegVideoGenerator:
                     slide_videos[slide['slide_num']] = selected_background_video
         
         # Fetch remaining backgrounds
-        with ThreadPoolExecutor(max_workers=min(10, total_slides)) as fetch_executor:
+        with ThreadPoolExecutor(max_workers=self.config.WORKER_POOL_MEDIA) as fetch_executor:
             fetch_futures = {}
             for slide in slides_data:
                 # Skip if already assigned
@@ -792,6 +796,15 @@ class FFmpegVideoGenerator:
                         progress_callback(completed_fetches, total_slides * 2 + 1, f"Fetching background videos ({completed_fetches}/{total_slides})...")
                 except Exception as e:
                     print(f"⚠️ [Pipeline] Resource fetch failed for slide {s_num}: {e}")
+                    # Edge case: Fallback to local random video if it fails
+                    try:
+                        fallback_video = self.media_manager.get_random_media(["cityscape", "abstract", "office"]) # Broad generic queries
+                        if fallback_video:
+                            print(f"📁 [Pipeline] Applied emergency local fallback for slide {s_num}: {fallback_video.name}")
+                            slide_videos[s_num] = fallback_video
+                            source_videos_to_cleanup.add(fallback_video)
+                    except Exception as e2:
+                        print(f"❌ [Pipeline] Emergency fallback also failed for slide {s_num}: {e2}")
 
         # --- Stage 3: Parallel Rendering ---
         print(f"⚡ [Pipeline] Resources ready. Starting render of {total_slides} slides...")
@@ -799,7 +812,7 @@ class FFmpegVideoGenerator:
         # We need to map result path back to the slide object to preserve order
         render_results = {}
         
-        with ThreadPoolExecutor(max_workers=self.config.MAX_PARALLEL_SLIDES) as render_executor:
+        with ThreadPoolExecutor(max_workers=self.config.WORKER_POOL_RENDERING) as render_executor:
             future_to_slide_idx = {}
             
             for idx_in_list, slide in enumerate(slides_data):
@@ -906,6 +919,31 @@ class TextToVideoGenerator:
         self.config = Config()
         self.keyword_extractor = KeywordExtractor()
         self.tts_manager = TTSManager(self.config)
+        
+    def detect_language(self, text: str) -> str:
+        """Detect language of the input text"""
+        if not detect_lang or not text or len(text.strip()) < 5:
+            return 'en'
+        try:
+            detected = detect_lang(text)
+            # Map detected code to supported ones
+            if detected in self.config.SUPPORTED_LANGUAGES:
+                return detected
+            # Fallback for common mismatches
+            if detected.startswith('zh'): return 'zh'
+            return 'en'
+        except:
+            return 'en'
+            
+    def preview_voice(self, voice_id: str, language: str = 'en', speed: float = 1.0) -> Path:
+        """Generate a short preview of the selected voice"""
+        preview_text = "This is a preview of the selected voice. How does it sound?"
+        if language == 'zh':
+            preview_text = "这是所选声音的预览。听起来怎么样？"
+        elif language == 'ro':
+            preview_text = "Aceasta este o previzualizare a vocii selectate. Cum sună?"
+            
+        return self.tts_manager.generate_speech(preview_text, voice_id, language, speed=speed)
         self.video_generator = FFmpegVideoGenerator(self.config, keyword_extractor=self.keyword_extractor)
         self.available_voices = self._get_available_voices()
         self.available_music = self._get_available_music()
@@ -975,6 +1013,11 @@ class TextToVideoGenerator:
                            ai_api_url: Optional[str] = None,
                            stress_level: float = 1.0,
                            progress_callback=None) -> Dict:
+        # Language Detection
+        if language == 'auto':
+            language = self.detect_language(text)
+            print(f"✨ [NLP] Auto-detected language: {language}")
+            
         # Reset keywords for this session
         self.keyword_extractor.clear_used()
         input_params = {
@@ -1031,7 +1074,7 @@ class TextToVideoGenerator:
         extraction_futures = {}
         sentence_keywords_map = {}
         
-        with ThreadPoolExecutor(max_workers=min(10, len(sentences) + 1)) as executor:
+        with ThreadPoolExecutor(max_workers=self.config.WORKER_POOL_NLP) as executor:
             for i, sent in enumerate(sentences):
                 # Request multiple candidates to ensure we can pick a unique one
                 future = executor.submit(self.keyword_extractor.extract_keywords, sent, 10, language)
@@ -1116,7 +1159,7 @@ class TextToVideoGenerator:
             audio_paths_map = {} # Map index -> path
             completed_audio = 0
             
-            with ThreadPoolExecutor(max_workers=min(8, len(audio_tasks) + 1)) as audio_executor:
+            with ThreadPoolExecutor(max_workers=self.config.WORKER_POOL_TTS) as audio_executor:
                 future_to_task = {}
                 for task in audio_tasks:
                     future = audio_executor.submit(
@@ -1144,6 +1187,14 @@ class TextToVideoGenerator:
                             progress_callback(completed_audio, len(audio_tasks) * 2, f"Generating Audio {completed_audio}/{len(audio_tasks)}")
                     except Exception as e:
                         print(f"❌ [Audio] Failed to generate audio for {task['type']}: {e}")
+                        # Graceful Fallback: Use None or a silent placeholder (optional)
+                        # Here we just mark it as None and skip it in rendering if needed
+                        if task['type'] == 'intro':
+                            intro_audio_path = None
+                        elif task['type'] == 'cta':
+                            cta_audio_path = None
+                        elif task['type'] == 'sentence':
+                            audio_paths_map[task['index']] = None
                         
             # Reconstruct ordered list for sentences
             audio_paths = [audio_paths_map.get(i) for i in range(len(sentences))]
@@ -1355,7 +1406,7 @@ def setup_ui(generator: TextToVideoGenerator):
                             language_dropdown = gr.Dropdown(
                                 label="🌐 Language",
                                 choices=[(SUPPORTED_LANGUAGES[k]['name'], k) for k in generator.available_languages],
-                                value='en'
+                                value='auto'
                             )
                             speaker_dropdown = gr.Dropdown(
                                 label="🎙️ Voice",
@@ -1363,6 +1414,9 @@ def setup_ui(generator: TextToVideoGenerator):
                                 value=generator.config.STANDARD_VOICE_NAME
                             )
                         use_random_voices = gr.Checkbox(label="🎲 Random voice per sentence", value=False)
+                        with gr.Row():
+                            preview_voice_btn = gr.Button("👂 Preview Voice", size="sm")
+                            preview_audio = gr.Audio(label="Voice Preview", interactive=False)
 
                     with gr.TabItem("🎥 Media"):
                         media_source_dropdown = gr.Dropdown(
@@ -1419,6 +1473,12 @@ def setup_ui(generator: TextToVideoGenerator):
                             )
 
                     with gr.TabItem("⚙️ Advanced"):
+                        preset_dropdown = gr.Dropdown(
+                            label="📋 Quick Presets",
+                            choices=["Default", "TikTok Viral", "YouTube Shorts High-Energy", "Instagram Reels Aesthetic"],
+                            value="Default",
+                            info="Select a preset to automatically adjust speed, FPS, and volume."
+                        )
                         with gr.Row():
                             enable_intro = gr.Checkbox(label="📢 Add Intro Slide", value=True)
                             enable_cta = gr.Checkbox(label="📣 Add CTA Outro", value=True)
@@ -1436,6 +1496,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 thumbnail_output = gr.Image(label="Last Frame Thumbnail", type="filepath")
                 audio_output = gr.Audio(label="Extracted Voiceover")
                 social_output = gr.Textbox(label="📢 Social Media Descriptions", lines=15)
+                char_count_display = gr.Markdown(value="**Characters:** 0 | **TikTok:** ✅ | **Shorts:** ✅")
                 status_output = gr.Markdown(value="*Your video will appear here after generation.*")
 
 
@@ -1533,6 +1594,14 @@ def setup_ui(generator: TextToVideoGenerator):
             outputs=[ai_model_dropdown]
         )
 
+        
+        # Audio handlers
+        preview_voice_btn.click(
+            fn=generator.preview_voice,
+            inputs=[speaker_dropdown, language_dropdown, stress_level],
+            outputs=[preview_audio]
+        )
+        
         generate_button.click(
             fn=generate_wrapper,
             inputs=[
@@ -1543,6 +1612,35 @@ def setup_ui(generator: TextToVideoGenerator):
                 enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level
             ],
             outputs=[video_output, thumbnail_output, audio_output, social_output, engine_status_output, status_output, progress_bar]
+        )
+
+        def update_char_counts(text):
+            if not text: return "**Characters:** 0"
+            count = len(text)
+            tiktok_limit = 2200
+            shorts_limit = 5000
+            reels_limit = 2200
+            return f"**Characters:** {count} | **TikTok:** {'✅' if count <= tiktok_limit else '❌'} | **Shorts:** {'✅' if count <= shorts_limit else '❌'} | **Reels:** {'✅' if count <= reels_limit else '❌'}"
+
+        social_output.change(
+            fn=update_char_counts,
+            inputs=[social_output],
+            outputs=[char_count_display]
+        )
+
+        def apply_preset(preset_name):
+            if preset_name == "TikTok Viral":
+                return 1.2, 30, -18, True # Speed, FPS, Music Vol, CTA
+            elif preset_name == "YouTube Shorts High-Energy":
+                return 1.4, 60, -15, True
+            elif preset_name == "Instagram Reels Aesthetic":
+                return 1.0, 30, -25, False
+            return 1.0, 30, -22, True
+
+        preset_dropdown.change(
+            fn=apply_preset,
+            inputs=[preset_dropdown],
+            outputs=[stress_level, export_fps, music_volume, enable_cta]
         )
     return demo
 

@@ -92,8 +92,14 @@ class Config:
         }
         
         # Processing configuration
-        self.MAX_PARALLEL_SLIDES = 3
+        self.MAX_PARALLEL_SLIDES = 4
         self.MIN_IMAGE_DURATION = 10.0
+        
+        # Parallel Worker Pools
+        self.WORKER_POOL_NLP = 10       # IO-bound (API requests to Ollama)
+        self.WORKER_POOL_TTS = 4        # CPU/GPU-bound (XTTS is heavy)
+        self.WORKER_POOL_MEDIA = 10     # IO-bound (Media downloads)
+        self.WORKER_POOL_RENDERING = 4   # CPU-bound (FFmpeg/MoviePy)
         
         # Audio configuration
         self.TEMP_AUDIO_DIR = self.TEMP_DIR / "audio_cache"
@@ -131,7 +137,8 @@ class Config:
             'hi': {'name': 'Hindi', 'code': 'hi', 'tts_code': 'hi', 'kokoro_code': 'h'},
             # Arabic and Romanian are NOT supported by Kokoro v0.19/v1.0.
             'ar': {'name': 'Arabic', 'code': 'ar', 'tts_code': 'ar', 'kokoro_code': None}, # Use gTTS/XTTS
-            'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': None} # Use gTTS/MMS-TTS
+            'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': None}, # Use gTTS/MMS-TTS
+            'auto': {'name': '✨ Auto Detect', 'code': 'auto', 'tts_code': 'en', 'kokoro_code': 'a'}
         }
     
     def get_temp_audio_file(self, prefix: str = "audio") -> Path:

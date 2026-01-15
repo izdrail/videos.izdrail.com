@@ -45,3 +45,4 @@ soundfile
 spacy
 pandas
 gTTS
+langdetect
