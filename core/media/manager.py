@@ -27,6 +27,8 @@ class MediaManager:
         self.search_cache = {}
         # Track successful fetches per source for dynamic prioritization
         self.source_success_counts = defaultdict(int)
+        # Track successful keywords for learning
+        self.successful_keywords = defaultdict(int)
         # Maximum attempts across sources to improve hit rate
         self.MAX_ATTEMPTS = 3
         self._used_media_urls = set()
@@ -62,17 +64,36 @@ class MediaManager:
             if result:
                 return result
 
-        # 2. Second pass: aggressive simplification
-        # If we are here, no video was found for any of the specific keywords.
-        # Try simplifying the *first* (most relevant) keyword, or iterate all if needed.
-        # Let's try simplifying all of them in order.
-        print(f"⚠️ [MediaManager] No videos found for queries: {queries}. Trying simplified queries...")
+        # 2. Second pass: Try fallback keywords (broader/related terms)
+        print(f"⚠️ [MediaManager] No videos found for queries: {queries}. Trying fallback keywords...")
         
+        # Import keyword extractor for fallback generation
+        from core.nlp.keyword_extractor import KeywordExtractor
+        ke = KeywordExtractor()
+        
+        for query in queries[:3]:  # Try fallbacks for top 3 keywords only
+            fallback_keywords = ke.generate_fallback_keywords(query)
+            if fallback_keywords:
+                print(f"🔄 [MediaManager] Trying fallbacks for '{query}': {fallback_keywords}")
+                for fallback in fallback_keywords:
+                    # check cache
+                    cache_key = (fallback, preferred_source)
+                    if cache_key in self.search_cache:
+                        cp = self.search_cache[cache_key]
+                        if cp and Path(cp).exists():
+                            print(f"🔁 [MediaManager] Using cached video for fallback '{fallback}'")
+                            return Path(cp)
+                    
+                    result = self._search_and_download(fallback, preferred_source)
+                    if result:
+                        return result
+        
+        # 3. Third pass: Simple word simplification as last resort
+        print(f"⚠️ [MediaManager] Fallback keywords failed. Trying word simplification...")
         for query in queries:
             simplified = self._simplify_query(query)
             if simplified != query:
                 print(f"🔍 [MediaManager] Trying simplified: '{simplified}' (derived from '{query}')")
-                # check cache
                 cache_key = (simplified, preferred_source)
                 if cache_key in self.search_cache:
                     cp = self.search_cache[cache_key]
@@ -149,9 +170,11 @@ class MediaManager:
                 if api.download_video(selected.get('url'), output_path):
                     print(f"✅ [MediaManager] Selected {source_name} for query: '{query}'")
                     self.source_success_counts[source_name] += 1
+                    self.successful_keywords[query] += 1  # Track successful keyword
                     cache_key = (query, preferred_source)
                     self.search_cache[cache_key] = str(output_path)
                     self._used_media_urls.add(selected.get('url'))
+                    print(f"📊 [MediaManager] Keyword '{query}' success count: {self.successful_keywords[query]}")
                     return output_path
                     
             except Exception as e:

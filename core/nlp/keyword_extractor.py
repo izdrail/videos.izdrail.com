@@ -22,11 +22,15 @@ class OllamaKeywordExtractor:
             return self.cache[cache_key]
             
         prompt = (
-    f"Analyze the following text and extract up to {top_n} visual subjects, scenes, or concrete objects that would make good background videos. "
-    f"Think like a video editor searching for stock footage. "
-    f"Return ONLY a comma-separated list of {language} keywords (max 1 word each). "
-    "Prioritize physical objects, locations, and actions over abstract concepts.\n"
-    f"Text: \"{text}\"\nKeywords:"
+    f"You are a stock footage search expert. Extract {top_n} visual keywords from the text below. "
+    f"Rules:\n"
+    f"- Each keyword must be 1-2 words maximum\n"
+    f"- Prioritize: physical objects, locations, actions, nature, technology, people activities\n"
+    f"- Use common stock footage terms (e.g., 'city skyline', 'ocean waves', 'forest', 'office')\n"
+    f"- Avoid abstract concepts unless they have clear visual representations\n"
+    f"- Return ONLY a comma-separated list in {language}\n\n"
+    f"Text: \"{text}\"\n"
+    f"Keywords:"
 )
         payload = {
             "model": self.model,
@@ -43,15 +47,21 @@ class OllamaKeywordExtractor:
                 raw_keywords = [kw.strip().lower() for kw in raw.split(",") if kw.strip()]
                 # Further cleaning: remove non-alphanumeric (except spaces)
                 keywords = [re.sub(r'[^a-zA-Z0-9\s]', '', kw) for kw in raw_keywords]
-                # Enforce single-word keywords
-                single_words = []
+                # Allow 1-2 word keywords
+                filtered_keywords = []
                 for kw in keywords:
-                    first = kw.split()[0] if kw.split() else ""
-                    if first:
-                        single_words.append(first)
+                    words = kw.split()
+                    if len(words) == 1 and words[0]:
+                        filtered_keywords.append(words[0])
+                    elif len(words) == 2:
+                        # Keep 2-word phrases
+                        filtered_keywords.append(f"{words[0]} {words[1]}")
+                    elif len(words) > 2:
+                        # Take first 2 words if longer
+                        filtered_keywords.append(f"{words[0]} {words[1]}")
                 
                 # Filter out empty and limit to top_n
-                result = single_words[:top_n]
+                result = filtered_keywords[:top_n]
                 self.cache[cache_key] = result
                 return result
         except Exception as e:
@@ -145,12 +155,19 @@ class KeywordExtractor:
             return []
             
         # Try Ollama first
-        ollama_keywords = self.ollama_extractor.extract_keywords(text, top_n, language)
+        ollama_keywords = self.ollama_extractor.extract_keywords(text, top_n * 2, language)  # Get more, then rank
         if ollama_keywords:
-            return ollama_keywords
+            # Rank and return top_n
+            ranked = self.rank_keywords(ollama_keywords)
+            return ranked[:top_n]
         
         # Fallback to Spacy API
-        return self._extract_spacy_fallback(text, top_n)
+        spacy_keywords = self._extract_spacy_fallback(text, top_n * 2)
+        if spacy_keywords:
+            ranked = self.rank_keywords(spacy_keywords)
+            return ranked[:top_n]
+        
+        return []
     
     def _extract_spacy_fallback(self, text: str, top_n: int = 5) -> List[str]:
         """Fallback to external Spacy API if Ollama fails"""
@@ -192,6 +209,123 @@ class KeywordExtractor:
     def clear_used(self):
         """Reset used keywords tracker"""
         self.used_keywords.clear()
+    
+    def rank_keywords(self, keywords: List[str]) -> List[str]:
+        """
+        Rank keywords by quality/searchability.
+        Prioritizes:
+        - Common stock footage categories
+        - Visual/concrete terms
+        - Unused keywords
+        """
+        # Common stock footage categories (high priority)
+        stock_categories = {
+            'nature', 'forest', 'ocean', 'mountain', 'sky', 'sunset', 'sunrise',
+            'city', 'cityscape', 'building', 'office', 'street', 'traffic',
+            'people', 'business', 'meeting', 'technology', 'computer', 'phone',
+            'food', 'cooking', 'restaurant', 'travel', 'beach', 'landscape',
+            'water', 'fire', 'clouds', 'rain', 'snow', 'night', 'day',
+            'abstract', 'motion', 'light', 'color', 'texture', 'pattern',
+            'hands', 'work', 'team', 'collaboration', 'innovation', 'growth'
+        }
+        
+        def score_keyword(kw: str) -> float:
+            score = 0.0
+            kw_lower = kw.lower()
+            
+            # Bonus for unused keywords
+            if kw not in self.used_keywords:
+                score += 10.0
+            
+            # Bonus for stock footage categories
+            for category in stock_categories:
+                if category in kw_lower:
+                    score += 5.0
+                    break
+            
+            # Bonus for 2-word phrases (more specific)
+            if len(kw.split()) == 2:
+                score += 3.0
+            
+            # Penalty for very generic terms
+            generic_terms = {'thing', 'stuff', 'item', 'object', 'concept', 'idea'}
+            if kw_lower in generic_terms:
+                score -= 5.0
+            
+            # Bonus for visual action words
+            visual_actions = {'moving', 'flowing', 'growing', 'building', 'working', 'walking', 'running', 'flying'}
+            if any(action in kw_lower for action in visual_actions):
+                score += 2.0
+            
+            return score
+        
+        # Sort by score (descending)
+        ranked = sorted(keywords, key=score_keyword, reverse=True)
+        return ranked
+    
+    def generate_fallback_keywords(self, keyword: str) -> List[str]:
+        """
+        Generate fallback keywords for when primary search fails.
+        Returns broader/related terms.
+        """
+        fallbacks = []
+        kw_lower = keyword.lower()
+        
+        # Category mappings for common terms
+        category_map = {
+            # Nature
+            'tree': ['forest', 'nature', 'woods'],
+            'flower': ['garden', 'nature', 'plants'],
+            'garden': ['nature', 'plants', 'outdoor'],
+            'ocean': ['water', 'sea', 'waves'],
+            'mountain': ['landscape', 'nature', 'outdoor'],
+            'river': ['water', 'nature', 'stream'],
+            
+            # Urban
+            'building': ['city', 'architecture', 'urban'],
+            'office': ['business', 'workplace', 'indoor'],
+            'street': ['city', 'urban', 'traffic'],
+            'car': ['traffic', 'transportation', 'vehicle'],
+            
+            # Technology
+            'computer': ['technology', 'office', 'digital'],
+            'phone': ['technology', 'communication', 'mobile'],
+            'code': ['technology', 'programming', 'digital'],
+            'data': ['technology', 'digital', 'abstract'],
+            
+            # People/Activities
+            'meeting': ['business', 'people', 'office'],
+            'team': ['business', 'people', 'collaboration'],
+            'work': ['business', 'office', 'people'],
+            'cooking': ['food', 'kitchen', 'chef'],
+        }
+        
+        # Check if keyword or its parts are in category map
+        for key, values in category_map.items():
+            if key in kw_lower:
+                fallbacks.extend(values)
+                break
+        
+        # If multi-word, try first word only
+        words = keyword.split()
+        if len(words) > 1:
+            fallbacks.append(words[0])
+        
+        # Generic safe fallbacks
+        generic_fallbacks = ['abstract', 'motion', 'light', 'texture', 'landscape', 'cityscape']
+        
+        # Return unique fallbacks
+        unique_fallbacks = []
+        seen = set([kw_lower])
+        
+        for fb in fallbacks + generic_fallbacks:
+            if fb not in seen:
+                unique_fallbacks.append(fb)
+                seen.add(fb)
+                if len(unique_fallbacks) >= 5:
+                    break
+        
+        return unique_fallbacks
         
     def sanitize_keyword(self, keyword: str) -> str:
         """Clean a keyword for API search"""
