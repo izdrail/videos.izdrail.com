@@ -919,6 +919,13 @@ class TextToVideoGenerator:
         self.config = Config()
         self.keyword_extractor = KeywordExtractor()
         self.tts_manager = TTSManager(self.config)
+        self.video_generator = FFmpegVideoGenerator(self.config, keyword_extractor=self.keyword_extractor)
+        self.available_voices = self._get_available_voices()
+        self.available_music = self._get_available_music()
+        self.available_circles = self._get_available_circles()
+        self.available_languages = list(SUPPORTED_LANGUAGES.keys())
+        self.available_models = self.keyword_extractor.get_available_models()
+        self.available_background_videos = self._get_available_background_videos()
         
     def detect_language(self, text: str) -> str:
         """Detect language of the input text"""
@@ -944,14 +951,6 @@ class TextToVideoGenerator:
             preview_text = "Aceasta este o previzualizare a vocii selectate. Cum sună?"
             
         return self.tts_manager.generate_speech(preview_text, voice_id, language, speed=speed)
-        self.video_generator = FFmpegVideoGenerator(self.config, keyword_extractor=self.keyword_extractor)
-        self.available_voices = self._get_available_voices()
-        self.available_music = self._get_available_music()
-        self.available_circles = self._get_available_circles()
-        self.available_languages = list(SUPPORTED_LANGUAGES.keys())
-        self.available_languages = list(SUPPORTED_LANGUAGES.keys())
-        self.available_models = self.keyword_extractor.get_available_models()
-        self.available_background_videos = self._get_available_background_videos()
 
     def _get_available_voices(self) -> List[str]:
         # 1. Start with Standard voice
