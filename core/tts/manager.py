@@ -17,6 +17,8 @@ SPEECHBRAIN_AVAILABLE = False
 GTTS_AVAILABLE = False
 MMS_AVAILABLE = False
 
+import threading
+
 class TTSManager:
     """Unified manager for various TTS engines"""
     
@@ -28,24 +30,26 @@ class TTSManager:
         self.loaded_engine = None
         self.current_kokoro_lang = None
         self.last_status_message = "Idle. No engine loaded."
+        self._lock = threading.Lock()
         
     def _load_engine(self, target_engine: str, lang_code: str = 'a'):
         """Lazy load the requested engine"""
-        if self.loaded_engine == target_engine:
-            if target_engine == "kokoro" and self.current_kokoro_lang != lang_code:
-                # Reload Kokoro for new language
-                pass
-            else:
-                return
-            
-        if target_engine == "kokoro":
-            self._load_kokoro(lang_code)
-        elif target_engine == "xtts":
-            self._load_xtts()
-        elif target_engine == "gtts":
-            self._load_gtts()
-        elif target_engine == "mms":
-            self._load_mms()
+        with self._lock:
+            if self.loaded_engine == target_engine:
+                if target_engine == "kokoro" and self.current_kokoro_lang != lang_code:
+                    # Reload Kokoro for new language
+                    pass
+                else:
+                    return
+                
+            if target_engine == "kokoro":
+                self._load_kokoro(lang_code)
+            elif target_engine == "xtts":
+                self._load_xtts()
+            elif target_engine == "gtts":
+                self._load_gtts()
+            elif target_engine == "mms":
+                self._load_mms()
             
     def _load_kokoro(self, lang_code: str = 'a'):
         global KOKORO_AVAILABLE
@@ -157,13 +161,12 @@ class TTSManager:
         # Clean text first
         text = self._clean_text(text)
 
-        # Check cache
+        # 1. Immediate Cache Check
+        # We check the database for an existing file that matches the text, voice, and language.
         cached = self.db.get_cached_tts(text, voice_id, language)
-        # Note: We are ignoring speed in cache key for now to avoid cache misses on slight speed changes, 
-        # or we should include it. For valid stress/speed, we SHOULD include it.
-        # But `db` schema might need update. Let's assume standard speed 1.0 for cache or skip cache if non-standard.
-        if cached and speed == 1.0:
-            return cached
+        if cached and Path(cached).exists():
+            print(f"🔁 [TTS] Reusing cached audio for: '{text[:30]}...' ({voice_id})")
+            return Path(cached)
             
         # Determine capabilities
         lang_config = self.config.SUPPORTED_LANGUAGES.get(language, {})
@@ -198,13 +201,20 @@ class TTSManager:
             else:
                 engine = "gtts"
                 
+                
         # Force MMS if the voice is explicitly "MMS-TTS Romanian"
         if voice_id == "MMS-TTS Romanian":
             engine = "mms"
+        # Only force Kokoro for these names if it's NOT a clone
+        elif not is_clone and (voice_id in ["sexy", "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_michael", "am_adam", "am_liam", "am_puck"] 
+                             or voice_id.startswith("af_") or voice_id.startswith("am_") 
+                             or voice_id.startswith("bf_") or voice_id.startswith("bm_")):
+            engine = "kokoro"
             
         self._load_engine(engine, lang_code=kokoro_code or 'a')
         
-        output_path = self.config.TEMP_DIR / f"tts_{uuid.uuid4().hex}.wav"
+        # Use persistent audio cache directory from config
+        output_path = self.config.TEMP_AUDIO_DIR / f"tts_{uuid.uuid4().hex}.wav"
         
         try:
             if self.loaded_engine == "kokoro":

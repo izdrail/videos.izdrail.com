@@ -31,7 +31,7 @@ class Config:
         self.DEVICE = "cpu"
         
         # Standard voice for default selection
-        self.STANDARD_VOICE_NAME = "Standard Voice (Non-Cloned)"
+        self.STANDARD_VOICE_NAME = "sexy"
         
         # Additional directory paths
         self.VIDEO_OVERLAYS_DIR = self.ROOT_DIR / "video-overlays"

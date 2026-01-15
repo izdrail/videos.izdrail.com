@@ -14,7 +14,13 @@ from pathlib import Path
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
+import warnings
 import torch
+
+# Suppress specific deprecation warnings that are out of our control (internal to libraries like transformers)
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers.utils.generic")
+warnings.filterwarnings("ignore", message=".*torch.utils._pytree._register_pytree_node.*")
+
 import torchaudio
 
 # Core imports
@@ -161,42 +167,50 @@ class FFmpegVideoGenerator:
     def get_background_video(self, keyword: Optional[str], sentence: Optional[str], language: str = 'en', preferred_source: Optional[str] = None) -> Optional[Path]:
         """Return a background video Path.
         Preference order:
-        1. Video from keyword/media API.
+        1. Video from keyword/media API (checking list of keywords).
         2. Random local video file.
         3. Circle overlay video as full-screen fallback.
         """
         # Collect all candidate keywords
         search_keywords = []
         if keyword:
-            search_keywords.append(self.keyword_extractor.sanitize_keyword(keyword))
-        elif sentence:
+            sanitized = self.keyword_extractor.sanitize_keyword(keyword)
+            if sanitized:
+                search_keywords.append(sanitized)
+        
+        if sentence:
             extracted = self.keyword_extractor.extract_keywords(sentence, 10, language)
             # Sort: unused first
             extracted.sort(key=lambda kw: kw in self.keyword_extractor.used_keywords)
             search_keywords.extend(extracted)
+        
+        # Filter duplicates and empty
+        final_keywords = []
+        seen = set()
+        for k in search_keywords:
+            if k and k not in seen:
+                final_keywords.append(k)
+                seen.add(k)
+                
+        # Try to find media using the list of keywords
+        video = self.media_manager.get_random_media(final_keywords, preferred_source)
+        if video:
+            # Mark the keywords used that led to this video (approximate, we mark all passed to be safe or just the top one? 
+            # The manager doesn't return which keyword worked. Let's mark the first one or all.)
+            # Better to mark the first one as "used" to avoid repetition if possible, 
+            # but since we don't know which one hit, let's just mark the primary ones.
+            for k in final_keywords[:3]: 
+                self.keyword_extractor.used_keywords.add(k)
+            return video
 
-        for kw in search_keywords:
-            if not kw:
-                continue
-            # Skip if already used (unless it's the only option)
-            if kw in self.keyword_extractor.used_keywords and len(search_keywords) > 1:
-                continue
-            video = self.media_manager.get_random_media(kw, preferred_source)
-            if video:
-                self.keyword_extractor.used_keywords.add(kw)
-                return video
-        # Local video fallback
-        for ext in ['*.mp4', '*.mov', '*.avi']:
-            if self.config.VIDEOS_DIR.exists():
-                files = list(self.config.VIDEOS_DIR.glob(ext))
-                if files:
-                    selected = random.choice(files)
-                    print(f"📁 [Local] Using local background video: {selected.name}")
-                    return selected
+        # Local video fallback (The MediaManager has a fallback, but we keep this as a failsafe or if MediaManager returned None)
+        # MediaManager already does a local fallback, but if that failed or returned None...
+        # We can try again or just proceed to circle/gradient.
+        
         # Circle overlay fallback as full-screen video
         circle_video = self.get_circle_overlay_video()
         if circle_video:
-            print(f"� [Fallback] Using circle overlay video as background: {circle_video.name}")
+            print(f"🎨 [Fallback] Using circle overlay video as background: {circle_video.name}")
             return circle_video
         # Final fallback – will use gradient in slide creation
         print("💡 [Fallback] No video found; gradient will be used.")
@@ -667,79 +681,177 @@ class FFmpegVideoGenerator:
                           hide_text: bool = False,
                           export_fps: int = 30,
                           overlay_shape: str = "Circle",
+                          intro_text: Optional[str] = None,
                           progress_callback=None) -> Path:
+        
+        # Setup temp directory
         temp_dir = self.config.TEMP_DIR / f"final_{uuid.uuid4().hex[:8]}"
         temp_dir.mkdir(exist_ok=True)
+        source_videos_to_cleanup = set()
         
-        slide_paths = []
-        source_videos = []
+        # --- Stage 1: Prepare Slide Data ---
+        # We organize all slides (Intro, Main Sentences, CTA) into a uniform structure
+        slides_data = []
         
-        # Parallel slide generation
-        with ThreadPoolExecutor(max_workers=self.config.MAX_PARALLEL_SLIDES) as executor:
-            futures = []
+        # Content Slides
+        for i, (sentence, a_path, kw) in enumerate(zip(sentences, audio_paths, keywords)):
+            slides_data.append({
+                'type': 'content',
+                'text': sentence,
+                'audio_path': a_path,
+                'keyword': kw,
+                'sentence': sentence, 
+                'slide_num': i,
+                'is_intro': False,
+                'is_cta': False
+            })
             
-            # Submit intro slide if needed
-            if intro_audio:
-                # If a specific background video is selected, use it for all slides including intro/cta
-                intro_video_bg = selected_background_video if selected_background_video else self.get_background_video("intro", "Welcome", language, preferred_media_source)
-                if intro_video_bg:
-                    source_videos.append(intro_video_bg)
-                intro_output = temp_dir / "slide_intro.mp4"
-                futures.append(executor.submit(
-                    self._create_slide_with_ffmpeg,
-                    "", intro_audio, intro_video_bg, intro_output, -1, # -1 for intro slide_num
-                    True, False, None, None, language, hide_text, export_fps, overlay_shape # No circle for intro/cta but passing shape for consistency if needed or ignored
-                ))
-
-            # Submit main content slides
-            for i, (sentence, audio_path, keyword) in enumerate(zip(sentences, audio_paths, keywords)):
-                # Get background video for this slide
-                video_bg = selected_background_video if selected_background_video else self.get_background_video(keyword, sentence, language, preferred_media_source)
-                if video_bg:
-                    source_videos.append(video_bg)
+        # Intro
+        if intro_audio:
+            intro_slide = {
+                'type': 'intro',
+                'text': intro_text if intro_text else "Welcome",
+                'audio_path': intro_audio,
+                'keyword': "intro", 
+                'sentence': intro_text if intro_text else "Welcome",
+                'slide_num': -1, # Special ID
+                'is_intro': True,
+                'is_cta': False
+            }
+            if len(slides_data) >= 2:
+                # Random position between 2 and 5 (or end)
+                max_idx = min(len(slides_data), 5)
+                start_idx = 2
+                if max_idx < start_idx: max_idx = start_idx
                 
-                output_path = temp_dir / f"slide_{i:03d}.mp4"
-                futures.append(executor.submit(
-                    self._create_slide_with_ffmpeg,
-                    sentence, audio_path, video_bg, output_path, i,
-                    False, False, circle_video, circle_config, language, hide_text, export_fps, overlay_shape
-                ))
-                
-            # Submit CTA slide if needed
-            if cta_audio:
-                cta_video_bg = selected_background_video if selected_background_video else self.get_background_video("outro", "Goodbye", language, preferred_media_source)
-                if cta_video_bg:
-                    source_videos.append(cta_video_bg)
-                cta_output = temp_dir / "slide_cta.mp4"
-                futures.append(executor.submit(
-                    self._create_slide_with_ffmpeg,
-                    "", cta_audio, cta_video_bg, cta_output, 999, # 999 for cta slide_num
-                    False, True, None, None, language, hide_text, export_fps, overlay_shape # No circle for intro/cta
-                ))
-                
+                insert_idx = random.randint(start_idx, max_idx)
+                print(f"🎲 [Pipeline] Inserting intro at index {insert_idx}")
+                slides_data.insert(insert_idx, intro_slide)
+            else:
+                # Fallback to start
+                print(f"🎲 [Pipeline] Not enough slides for random insert. Placing intro at start.")
+                slides_data.insert(0, intro_slide)
+            
+        # CTA
+        if cta_audio:
+            slides_data.append({
+                'type': 'cta',
+                'text': "",
+                'audio_path': cta_audio,
+                'keyword': "outro",
+                'sentence': "Goodbye",
+                'slide_num': 999,
+                'is_intro': False,
+                'is_cta': True
+            })
 
+        total_slides = len(slides_data)
+        print(f"🚀 [Pipeline] Starting parallel generation for {total_slides} slides...")
 
-            # Collect results in order of slide_num
-            results_map = {}
-            for i, future in enumerate(as_completed(futures)):
+        # --- Stage 2: Parallel Resource Fetching ---
+        # We search and download background videos for each slide in parallel
+        total_slides = len(slides_data)
+        print(f"🚀 [Pipeline] Starting parallel fetching for {total_slides} slides...")
+        slide_videos = {}
+        
+        # If user selected a specific local video, use it for all content slides
+        if selected_background_video and selected_background_video.exists():
+            print(f"📁 [Pipeline] Using user-selected background video: {selected_background_video.name}")
+            for slide in slides_data:
+                if not slide['is_intro'] and not slide['is_cta']:
+                    slide_videos[slide['slide_num']] = selected_background_video
+        
+        # Fetch remaining backgrounds
+        with ThreadPoolExecutor(max_workers=min(10, total_slides)) as fetch_executor:
+            fetch_futures = {}
+            for slide in slides_data:
+                # Skip if already assigned
+                if slide['slide_num'] in slide_videos:
+                    continue
+                    
+                future = fetch_executor.submit(
+                    self.get_background_video,
+                    slide['keyword'],
+                    slide['sentence'],
+                    language,
+                    preferred_media_source
+                )
+                fetch_futures[future] = slide['slide_num']
+            
+            completed_fetches = 0
+            for future in as_completed(fetch_futures):
+                s_num = fetch_futures[future]
+                try:
+                    video_path = future.result()
+                    if video_path:
+                        slide_videos[s_num] = video_path
+                        source_videos_to_cleanup.add(video_path)
+                    
+                    completed_fetches += 1
+                    if progress_callback:
+                        progress_callback(completed_fetches, total_slides * 2 + 1, f"Fetching background videos ({completed_fetches}/{total_slides})...")
+                except Exception as e:
+                    print(f"⚠️ [Pipeline] Resource fetch failed for slide {s_num}: {e}")
+
+        # --- Stage 3: Parallel Rendering ---
+        print(f"⚡ [Pipeline] Resources ready. Starting render of {total_slides} slides...")
+        
+        # We need to map result path back to the slide object to preserve order
+        render_results = {}
+        
+        with ThreadPoolExecutor(max_workers=self.config.MAX_PARALLEL_SLIDES) as render_executor:
+            future_to_slide_idx = {}
+            
+            for idx_in_list, slide in enumerate(slides_data):
+                video_bg = slide_videos.get(slide['slide_num'])
+                output_path = temp_dir / f"slide_{slide['type']}_{slide['slide_num']}.mp4"
+                
+                future = render_executor.submit(
+                    self._create_slide_with_ffmpeg,
+                    slide['text'],
+                    slide['audio_path'],
+                    video_bg,
+                    output_path,
+                    slide['slide_num'],
+                    slide['is_intro'],
+                    slide['is_cta'],
+                    circle_video,
+                    circle_config,
+                    language,
+                    hide_text,
+                    export_fps,
+                    overlay_shape
+                )
+                future_to_slide_idx[future] = idx_in_list
+                
+            # Collect Render Results
+            completed_renders = 0
+            for future in as_completed(future_to_slide_idx):
+                idx = future_to_slide_idx[future]
                 try:
                     path_created = future.result()
                     if path_created:
-                        slide_paths.append(path_created)
+                        render_results[idx] = path_created
+                    completed_renders += 1
                     if progress_callback:
-                        progress_callback(i + 1, len(futures), "Generating slides...")
+                        progress_callback(total_slides + completed_renders, total_slides * 2 + 1, "Rendering slides...")
                 except Exception as e:
-                    print(f"[FFmpeg] Slide error: {e}")
-        
-        # Sort slide_paths based on their slide_num
-        slide_paths.sort(key=lambda p: int(re.search(r'slide_(\w+)\.mp4', p.name).group(1)) if re.search(r'slide_(\d+)\.mp4', p.name) else (0 if 'intro' in p.name else (9999 if 'cta' in p.name else 0)))
+                    print(f"❌ [Pipeline] Render failed for slide index {idx}: {e}")
 
+        # Assemble paths in the correct order based on slides_data list
+        slide_paths = []
+        for i in range(len(slides_data)):
+            if i in render_results:
+                slide_paths.append(render_results[i])
+        
+        # (Removed old sort_key logic)
 
         if not slide_paths:
             raise ValueError("No slides created")
 
+        # --- Stage 4: Concatenation ---
         if progress_callback:
-            progress_callback(len(sentences), len(sentences), "Concatenating slides...")
+            progress_callback(total_slides * 2, total_slides * 2, "Concatenating final video...")
 
         concat_file = self.config.TEMP_DIR / f"concat_{uuid.uuid4().hex[:8]}.txt"
         with open(concat_file, 'w') as f:
@@ -756,7 +868,13 @@ class FFmpegVideoGenerator:
             str(output_path)
         ]
         print("[FFmpeg] Concatenating slides...")
-        subprocess.run(concat_cmd, check=True, capture_output=True)
+        try:
+            subprocess.run(concat_cmd, check=True, capture_output=True)
+            print(f"✅ [Pipeline] Final video created: {output_path}")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ [FFmpeg] Cleanup failed: {e}")
+            pass
+            
         concat_file.unlink(missing_ok=True)
         
         # Cleanup rendered slides
@@ -767,8 +885,8 @@ class FFmpegVideoGenerator:
                 pass
         
         # Cleanup source background videos (only those downloaded/sourced for this session)
-        print(f"🧹 [Cleanup] Removing {len(source_videos)} source background videos...")
-        for sv_path in source_videos:
+        print(f"🧹 [Cleanup] Removing {len(source_videos_to_cleanup)} source background videos...")
+        for sv_path in source_videos_to_cleanup:
             try:
                 # Check if it's in the background_videos directory (don't delete user/permanent assets elsewhere)
                 if sv_path.exists() and str(self.config.VIDEOS_DIR.absolute()) in str(sv_path.absolute()):
@@ -908,10 +1026,43 @@ class TextToVideoGenerator:
         session_dir = self.config.OUTPUT_DIR / f"video_{timestamp}_{language}"
         session_dir.mkdir(exist_ok=True)
 
+        # Parallel Keyword Extraction
+        print(f"🧠 [NLP] Extracting keywords for {len(sentences)} sentences in parallel...")
+        extraction_futures = {}
+        sentence_keywords_map = {}
+        
+        with ThreadPoolExecutor(max_workers=min(10, len(sentences) + 1)) as executor:
+            for i, sent in enumerate(sentences):
+                # Request multiple candidates to ensure we can pick a unique one
+                future = executor.submit(self.keyword_extractor.extract_keywords, sent, 10, language)
+                extraction_futures[future] = i
+                
+            for future in as_completed(extraction_futures):
+                idx = extraction_futures[future]
+                try:
+                    candidates = future.result()
+                    sentence_keywords_map[idx] = candidates
+                except Exception as e:
+                    print(f"⚠️ [NLP] Keyword extraction failed for sentence {idx}: {e}")
+                    sentence_keywords_map[idx] = []
+
+        # Assign unique keywords sequentially to ensure no duplicates
         sentence_keywords = []
-        for sent in sentences:
-            kw = self.keyword_extractor.get_best_unique_keyword(sent, language)
-            sentence_keywords.append(kw)
+        for i in range(len(sentences)):
+            candidates = sentence_keywords_map.get(i, [])
+            selected_kw = None
+            for kw in candidates:
+                if kw not in self.keyword_extractor.used_keywords:
+                    selected_kw = kw
+                    self.keyword_extractor.used_keywords.add(kw)
+                    break
+            
+            # If all used or empty, fallback to first candidate or None (will fallback to auto in pipeline)
+            if not selected_kw and candidates:
+                selected_kw = candidates[0] 
+                
+            sentence_keywords.append(selected_kw)
+            print(f"  - Sentence {i}: '{selected_kw}'")
 
         audio_paths = []
         intro_audio_path = None
@@ -924,21 +1075,83 @@ class TextToVideoGenerator:
 
             voices_for_sentences = [random.choice(self.available_voices) for _ in sentences] if use_random_voices else [speaker_id] * len(sentences)
 
+            # Prepare all audio tasks
+            audio_tasks = []
+            
+            # 1. Intro Task
             if add_intro_slide:
                 intro_voice = speaker_id if not use_random_voices else random.choice(self.available_voices)
                 intro_msg = self.config.INTRO_MESSAGES.get(language, self.config.INTRO_MESSAGES['en'])
-                intro_audio_path = self.tts_manager.generate_speech(intro_msg, intro_voice, language)
+                audio_tasks.append({
+                    'type': 'intro',
+                    'text': intro_msg,
+                    'voice': intro_voice,
+                    'index': -1
+                })
 
+            # 2. Sentence Tasks
             for i, (sentence, voice) in enumerate(zip(sentences, voices_for_sentences)):
-                if progress_callback:
-                    progress_callback(i + 1, len(sentences) * 2, f"Generating audio {i + 1}/{len(sentences)}")
-                audio_path = self.tts_manager.generate_speech(sentence, voice, language)
-                audio_paths.append(audio_path)
-
+                audio_tasks.append({
+                    'type': 'sentence',
+                    'text': sentence,
+                    'voice': voice,
+                    'index': i
+                })
+                
+            # 3. CTA Task
             if add_call_to_action:
                 cta_voice = speaker_id if not use_random_voices else voices_for_sentences[-1]
                 cta_msg = self.config.CTA_MESSAGES.get(language, self.config.CTA_MESSAGES['en'])
-                cta_audio_path = self.tts_manager.generate_speech(cta_msg, cta_voice, language)
+                audio_tasks.append({
+                    'type': 'cta',
+                    'text': cta_msg,
+                    'voice': cta_voice,
+                    'index': 999
+                })
+
+            # Execute Audio Generation in Parallel
+            if progress_callback:
+                progress_callback(1, len(sentences) * 2, "Starting parallel audio generation...")
+                
+            audio_paths_map = {} # Map index -> path
+            completed_audio = 0
+            
+            with ThreadPoolExecutor(max_workers=min(8, len(audio_tasks) + 1)) as audio_executor:
+                future_to_task = {}
+                for task in audio_tasks:
+                    future = audio_executor.submit(
+                        self.tts_manager.generate_speech,
+                        task['text'],
+                        task['voice'],
+                        language
+                    )
+                    future_to_task[future] = task
+                    
+                for future in as_completed(future_to_task):
+                    task = future_to_task[future]
+                    try:
+                        path_result = future.result()
+                        if task['type'] == 'intro':
+                            intro_audio_path = path_result
+                        elif task['type'] == 'cta':
+                            cta_audio_path = path_result
+                        elif task['type'] == 'sentence':
+                            audio_paths_map[task['index']] = path_result
+                            
+                        completed_audio += 1
+                        if progress_callback:
+                            progress_callback(completed_audio, len(audio_tasks) * 2, f"Generating Audio {completed_audio}/{len(audio_tasks)}")
+                    except Exception as e:
+                        print(f"❌ [Audio] Failed to generate audio for {task['type']}: {e}")
+                        
+            # Reconstruct ordered list for sentences
+            audio_paths = [audio_paths_map.get(i) for i in range(len(sentences))]
+            # Filter out failures if any (though logic expects matching lengths, so we might have None holes. 
+            # create_final_video expects matching lists. If failure, we might crash.
+            # Let's ensure no Nones or handle them. 
+            # If fallback needed, maybe generate silence or skip? 
+            # For now, let's assume success or propagate Nones to be caught later.
+
 
             def video_progress(current, total, message):
                 if progress_callback:
@@ -997,6 +1210,7 @@ class TextToVideoGenerator:
                 hide_text=hide_text,
                 export_fps=export_fps,
                 overlay_shape=overlay_shape,
+                intro_text=intro_msg if add_intro_slide else None,
                 progress_callback=video_progress
             )
 
@@ -1026,7 +1240,17 @@ class TextToVideoGenerator:
                 video_temp_path = video_with_music
 
             lang_name = SUPPORTED_LANGUAGES.get(language, {}).get('name', language)
-            video_final = session_dir / f"video_{timestamp}_{language}.mp4"
+            
+            # Determine keyword for filename
+            filename_keyword = "generated"
+            if pexels_keyword and pexels_keyword.strip():
+                # Use provided Pexels keyword
+                filename_keyword = "".join([c if c.isalnum() else "_" for c in pexels_keyword.strip().lower()])
+            elif sentence_keywords and len(sentence_keywords) > 0 and sentence_keywords[0]:
+                # Use first extract keyword
+                filename_keyword = "".join([c if c.isalnum() else "_" for c in sentence_keywords[0].lower()])
+                
+            video_final = session_dir / f"video_{filename_keyword}_{timestamp}_{language}.mp4"
             shutil.move(str(video_temp_path), str(video_final))
 
             audio_final = session_dir / f"audio_{timestamp}_{language}.mp3"
@@ -1105,30 +1329,9 @@ def setup_ui(generator: TextToVideoGenerator):
                             lines=10
                         )
                         
-                        # Emoticon Toolbar for Intonation Control
-                        gr.Markdown("### 🎭 Intonation Controls - Click to insert:")
-                        with gr.Row():
-                            btn_semicolon = gr.Button("😐 ;", size="sm", variant="secondary")
-                            btn_colon = gr.Button("🙂 :", size="sm", variant="secondary")
-                            btn_comma = gr.Button("⏸️ ,", size="sm", variant="secondary")
-                            btn_period = gr.Button("⏹️ .", size="sm", variant="secondary")
+
                         
-                        with gr.Row():
-                            btn_exclaim = gr.Button("❗😄 !", size="sm", variant="secondary")
-                            btn_question = gr.Button("❓🤔 ?", size="sm", variant="secondary")
-                            btn_dash = gr.Button("➖😶 —", size="sm", variant="secondary")
-                            btn_ellipsis = gr.Button("⏳😌 …", size="sm", variant="secondary")
-                        
-                        with gr.Row():
-                            btn_quote = gr.Button("💬 \"", size="sm", variant="secondary")
-                            btn_stress1 = gr.Button("🔊 ˈ", size="sm", variant="secondary")
-                            btn_stress2 = gr.Button("🔉 ˌ", size="sm", variant="secondary")
-                        
-                        gr.Markdown("""
-                        💡 **Advanced Pronunciation:**
-                        - Link syntax: `[Word](/pronunciation/)` e.g., `[Kokoro](/kˈOkəɹO/)`
-                        - Adjust stress: `[1 level](-1)` or `[2 levels](-2)`
-                        """)
+
                         with gr.Row():
                             ai_api_url = gr.Textbox(
                                 label="🌐 AI API URL",
@@ -1140,12 +1343,12 @@ def setup_ui(generator: TextToVideoGenerator):
                             ai_model_dropdown = gr.Dropdown(
                                 label="🤖 AI Model",
                                 choices=generator.available_models,
-                                value=generator.available_models[0] if generator.available_models else "mistral:7b",
+                                value="mistral:7b",
                                 info="Select LLM for keyword extraction"
                             )
                             btn_refresh_models = gr.Button("🔄 Refresh Models", size="sm")
                         
-                        stress_level = gr.Slider(0.5, 1.5, 1.0, 0.1, label="Stress Level (Speed)", info="0.5 = Slow/Relaxed, 1.5 = Fast/Stressed")
+
 
                         with gr.Row():
                             language_dropdown = gr.Dropdown(
@@ -1163,7 +1366,7 @@ def setup_ui(generator: TextToVideoGenerator):
                     with gr.TabItem("🎥 Media"):
                         media_source_dropdown = gr.Dropdown(
                             label="🎞️ Preferred Media Source",
-                            choices=["Random", "Pexels", "YouTube", "Giphy", "Dailymotion", "Vimeo", "Twitch", "PeerTube", "api.video", "Cloudflare Stream", "Mux", "Kaltura", "JSON2Video"],
+                            choices=["Random", "Pexels", "Pixabay", "YouTube", "Giphy", "Dailymotion", "Vimeo", "Twitch", "PeerTube", "api.video", "Cloudflare Stream", "Mux", "Kaltura", "JSON2Video"],
                             value="Random",
                             info="Select your primary source for background videos (Random shuffles available APIs)"
                         )
@@ -1185,7 +1388,7 @@ def setup_ui(generator: TextToVideoGenerator):
                                 choices=generator.available_music,
                                 value="Random"
                             )
-                        music_volume = gr.Slider(-40, -5, -15, 1, label="Music Volume (dB)")
+                        music_volume = gr.Slider(-40, -5, -22, 1, label="Music Volume (dB)")
 
                     with gr.TabItem("⭕ Overlays"):
                         enable_circle = gr.Checkbox(label="Enable Picture-in-Picture Circle", value=False)
@@ -1220,38 +1423,7 @@ def setup_ui(generator: TextToVideoGenerator):
                             enable_cta = gr.Checkbox(label="📣 Add CTA Outro", value=True)
                         hide_text = gr.Checkbox(label="🛑 Hide Text Overlay", value=False)
                         export_fps = gr.Slider(10, 60, 30, 1, label="🎞️ Export FPS", info="Target frame rate for the final video (default: 30)")
-                        gr.Markdown("""
-                        ### 💡 Pronunciation & Stress Control
-                        You can control pronunciation and stress in Kokoro TTS using the following syntax:
-                        
-                        **Link Syntax (Phonemes):**  `[Word](/pronunciation/)`  
-                        Example: `[Kokoro](/kˈOkəɹO/)`
-                        
-                        **Neutral / Pause:**
-                        - `;` → 😐 (Neutral pause)
-                        - `:` → 🙂 (Slight pause with continuation)
-                        - `,` → ⏸️ (Brief pause)
-                        - `.` → ⏹️ (Full stop)
-                        
-                        **Emphasis / Emotion:**
-                        - `!` → ❗😄 (Excitement/Emphasis)
-                        - `?` → ❓🤔 (Question/Curiosity)
-                        - `—` → ➖😶 (Long pause/Interruption)
-                        - `…` → ⏳😌 (Trailing off/Thinking)
-                        
-                        **Speech / Quotation:**
-                        - `"` → 💬 (Quoted speech)
-                        
-                        **Stress Markers:**  
-                        - `ˈ` (Primary stress)
-                        - `ˌ` (Secondary stress)
-                        
-                        **Adjust Stress Level:**  
-                        - `[1 level](-1)` (Reduce stress by 1 level)
-                        - `[2 levels](-2)` (Reduce stress by 2 levels)
-                        
-                        *Tip: Use the slider below to adjust overall speaking speed ('Stress Level').*
-                        """)
+
 
                 generate_button = gr.Button("🚀 Generate Video", variant="primary", size="lg")
                 engine_status_output = gr.Textbox(label="TTS Engine Status", value="Idle", interactive=False)
@@ -1261,6 +1433,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 video_output = gr.Video(label="Generated Video", height=600)
                 thumbnail_output = gr.Image(label="Last Frame Thumbnail", type="filepath")
                 audio_output = gr.Audio(label="Extracted Voiceover")
+                social_output = gr.Textbox(label="📢 Social Media Descriptions", lines=15)
                 status_output = gr.Markdown(value="*Your video will appear here after generation.*")
 
 
@@ -1268,10 +1441,10 @@ def setup_ui(generator: TextToVideoGenerator):
                             selected_background_video_name,
                             enable_music, music_select, music_vol,
                             enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val,
-                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, progress=gr.Progress()):
+                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, progress=gr.Progress()):
             
             if not text or not text.strip():
-                return None, None, None, "Idle", "❌ **Error:** Please enter some text.", "Ready"
+                return None, None, None, None, "Idle", "❌ **Error:** Please enter some text.", "Ready"
 
             def update_progress(current, total, message):
                 progress((current, total), desc=message)
@@ -1313,38 +1486,30 @@ def setup_ui(generator: TextToVideoGenerator):
                 overlay_shape=overlay_shape_val,
                 ai_model=ai_model_val,
                 ai_api_url=ai_api_url_val,
-                stress_level=stress_level_val,
+
                 progress_callback=update_progress
             )
 
             engine_status = generator.tts_manager.last_status_message
             
             if result.get("success"):
+                # Generate social media descriptions using keywords
+                keywords_used = generator.keyword_extractor.used_keywords
+                progress((99, 100), desc="Generating social media descriptions...")
+                social_desc = generator.keyword_extractor.generate_social_media_descriptions(
+                    text, list(keywords_used), language
+                )
+
                 status_md = f"""### ✅ Generation Complete!
 - **Video:** {result['video_path']}
 - **Duration:** {result.get('duration', 'N/A')}s
 - **Source:** {media_source}
 """
-                return result["video_path"], result.get("thumbnail_path"), result["audio_path"], engine_status, status_md, "Complete!"
+                return result["video_path"], result.get("thumbnail_path"), result["audio_path"], social_desc, engine_status, status_md, "Complete!"
             
-            return None, None, None, engine_status, f"❌ **Error:** {result.get('error', 'Unknown error')}", "Failed"
+            return None, None, None, None, engine_status, f"❌ **Error:** {result.get('error', 'Unknown error')}", "Failed"
         
-        # Helper function to insert text at cursor position
-        def insert_symbol(current_text, symbol):
-            return current_text + symbol if current_text else symbol
-        
-        # Connect emoticon buttons to text input
-        btn_semicolon.click(lambda txt: insert_symbol(txt, ";"), inputs=[text_input], outputs=[text_input])
-        btn_colon.click(lambda txt: insert_symbol(txt, ":"), inputs=[text_input], outputs=[text_input])
-        btn_comma.click(lambda txt: insert_symbol(txt, ","), inputs=[text_input], outputs=[text_input])
-        btn_period.click(lambda txt: insert_symbol(txt, "."), inputs=[text_input], outputs=[text_input])
-        btn_exclaim.click(lambda txt: insert_symbol(txt, "!"), inputs=[text_input], outputs=[text_input])
-        btn_question.click(lambda txt: insert_symbol(txt, "?"), inputs=[text_input], outputs=[text_input])
-        btn_dash.click(lambda txt: insert_symbol(txt, "—"), inputs=[text_input], outputs=[text_input])
-        btn_ellipsis.click(lambda txt: insert_symbol(txt, "…"), inputs=[text_input], outputs=[text_input])
-        btn_quote.click(lambda txt: insert_symbol(txt, '"'), inputs=[text_input], outputs=[text_input])
-        btn_stress1.click(lambda txt: insert_symbol(txt, "ˈ"), inputs=[text_input], outputs=[text_input])
-        btn_stress2.click(lambda txt: insert_symbol(txt, "ˌ"), inputs=[text_input], outputs=[text_input])
+
  
         def refresh_models_action(url):
             from core.nlp.keyword_extractor import OllamaKeywordExtractor
@@ -1368,9 +1533,9 @@ def setup_ui(generator: TextToVideoGenerator):
                 media_source_dropdown, pexels_keyword, background_video_dropdown,
                 enable_music, music_dropdown, music_volume,
                 enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape,
-                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level
+                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url
             ],
-            outputs=[video_output, thumbnail_output, audio_output, engine_status_output, status_output, progress_bar]
+            outputs=[video_output, thumbnail_output, audio_output, social_output, engine_status_output, status_output, progress_bar]
         )
     return demo
 
@@ -1391,7 +1556,7 @@ if __name__ == "__main__":
     print("="*80)
     print("\n✅ FEATURES:")
     print("  ✓ Multi-language TTS (English, Chinese, Spanish, Hindi, Arabic, Romanian)")
-    print("  ✓ Video backgrounds (Pexels API + Giphy API + Local)")
+    print("  ✓ Video backgrounds (Pexels, Pixabay, Giphy, Local)")
     print("  ✓ Circle overlay videos (PIP style)")
     print("  ✓ FFmpeg native processing (5-10x faster)")
     print("  ✓ SQLite caching (TTS + videos)")
@@ -1424,11 +1589,12 @@ if __name__ == "__main__":
 
         print("\n💡 SETUP CHECKLIST:")
         print("  1. Set PEXELS_API_KEY in .env file")
-        print("  2. Set GIPHY_API_KEY in .env file")
-        print("  3. Run: ollama serve (for keyword extraction)")
-        print("  4. Add circle overlay videos to circle_overlays/ folder")
-        print("  5. Add background music to background_music/ folder")
-        print("  6. Add logo image to background_images/ folder")
+        print("  2. Set PIXABAY_API_KEY in .env file")
+        print("  3. Set GIPHY_API_KEY in .env file")
+        print("  4. Run: ollama serve (for keyword extraction)")
+        print("  5. Add circle overlay videos to circle_overlays/ folder")
+        print("  6. Add background music to background_music/ folder")
+        print("  7. Add logo image to background_images/ folder")
 
         print("\n🚀 STARTING SERVER...")
         print("   Access at: http://localhost:1603")
