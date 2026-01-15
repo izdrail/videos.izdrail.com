@@ -71,12 +71,12 @@ class GenerationDB:
             
             conn.commit()
     
-    def get_cached_tts(self, text: str, identifier: str, language: str = 'en') -> Optional[Path]:
+    def get_cached_tts(self, text: str, identifier: str, language: str = 'en', speed: float = 1.0) -> Optional[Path]:
         """
         Get cached TTS audio
         identifier can be speaker_id or voice_id depending on the TTS system
         """
-        cache_key = f"{text}_{identifier}_{language}"
+        cache_key = f"{text}_{identifier}_{language}_{speed}"
         text_hash = hashlib.sha256(cache_key.encode()).hexdigest()
         
         with self.lock, sqlite3.connect(self.db_path) as conn:
@@ -91,12 +91,12 @@ class GenerationDB:
                 return Path(row[0])
         return None
     
-    def save_tts(self, text: str, identifier: str, language: str, audio_path: Path):
+    def save_tts(self, text: str, identifier: str, language: str, audio_path: Path, speed: float = 1.0):
         """
         Save TTS audio to cache
         identifier can be speaker_id or voice_id depending on the TTS system
         """
-        cache_key = f"{text}_{identifier}_{language}"
+        cache_key = f"{text}_{identifier}_{language}_{speed}"
         text_hash = hashlib.sha256(cache_key.encode()).hexdigest()
         
         with self.lock, sqlite3.connect(self.db_path) as conn:

@@ -30,7 +30,8 @@ class TTSManager:
         self.loaded_engine = None
         self.current_kokoro_lang = None
         self.last_status_message = "Idle. No engine loaded."
-        self._lock = threading.Lock()
+        self._lock = threading.Lock() # Lock for _load_engine
+        self.lock = threading.Lock() # Lock for generate_speech
         
     def _load_engine(self, target_engine: str, lang_code: str = 'a'):
         """Lazy load the requested engine"""
@@ -162,8 +163,8 @@ class TTSManager:
         text = self._clean_text(text)
 
         # 1. Immediate Cache Check
-        # We check the database for an existing file that matches the text, voice, and language.
-        cached = self.db.get_cached_tts(text, voice_id, language)
+        # We check the database for an existing file that matches the text, voice, language, and speed.
+        cached = self.db.get_cached_tts(text, voice_id, language, speed=speed)
         if cached and Path(cached).exists():
             print(f"🔁 [TTS] Reusing cached audio for: '{text[:30]}...' ({voice_id})")
             return Path(cached)
@@ -211,38 +212,39 @@ class TTSManager:
                              or voice_id.startswith("bf_") or voice_id.startswith("bm_")):
             engine = "kokoro"
             
-        self._load_engine(engine, lang_code=kokoro_code or 'a')
-        
-        # Use persistent audio cache directory from config
-        output_path = self.config.TEMP_AUDIO_DIR / f"tts_{uuid.uuid4().hex}.wav"
-        
-        try:
-            if self.loaded_engine == "kokoro":
-                self._generate_kokoro(text, voice_id, output_path, speed)
-            elif self.loaded_engine == "xtts":
-                self._generate_xtts(text, voice_id, language, output_path)
-            elif self.loaded_engine == "gtts":
-                self._generate_gtts(text, language, output_path)
-            elif self.loaded_engine == "mms":
-                self._generate_mms(text, output_path)
-            else:
-                raise ValueError(f"No functional engine for {engine}")
-                
-            # Post-process
-            improved_path = improve_audio_quality(output_path)
-            if improved_path != output_path:
-                output_path.unlink(missing_ok=True)
-                output_path = improved_path
-                
-            # Save to cache
-            self.db.save_tts(text, voice_id, language, output_path)
-            return output_path
+        with self.lock:
+            self._load_engine(engine, lang_code=kokoro_code or 'a')
             
-        except Exception as e:
-            print(f"[TTS] Generation failed with {engine}: {e}")
-            if output_path.exists():
-                output_path.unlink()
-            return None
+            # Use persistent audio cache directory from config
+            output_path = self.config.TEMP_AUDIO_DIR / f"tts_{uuid.uuid4().hex}.wav"
+            
+            try:
+                if self.loaded_engine == "kokoro":
+                    self._generate_kokoro(text, voice_id, output_path, speed)
+                elif self.loaded_engine == "xtts":
+                    self._generate_xtts(text, voice_id, language, output_path, speed)
+                elif self.loaded_engine == "gtts":
+                    self._generate_gtts(text, language, output_path)
+                elif self.loaded_engine == "mms":
+                    self._generate_mms(text, output_path)
+                else:
+                    raise ValueError(f"No functional engine for {engine}")
+                
+                # Post-process
+                improved_path = improve_audio_quality(output_path)
+                if improved_path != output_path:
+                    output_path.unlink(missing_ok=True)
+                    output_path = improved_path
+                    
+                # Save to cache
+                self.db.save_tts(text, voice_id, language, output_path, speed=speed)
+                return output_path
+                
+            except Exception as e:
+                print(f"[TTS] Generation failed with {engine}: {e}")
+                if output_path.exists():
+                    output_path.unlink()
+                return None
 
     def _generate_kokoro(self, text: str, voice_id: str, output_path: Path, speed: float = 1.0):
         import scipy.io.wavfile as wavfile
@@ -303,7 +305,7 @@ class TTSManager:
         full_audio = (full_audio * 32767).astype(np.int16)
         wavfile.write(str(output_path), 24000, full_audio)
 
-    def _generate_xtts(self, text: str, voice_id: str, language: str, output_path: Path):
+    def _generate_xtts(self, text: str, voice_id: str, language: str, output_path: Path, speed: float = 1.0):
         # Handle cloning if voice_id is a path or name of sample
         speaker_wav = None
         if voice_id.endswith(".wav"):
@@ -319,7 +321,8 @@ class TTSManager:
                 text=text,
                 file_path=str(output_path),
                 speaker_wav=speaker_wav,
-                language=language[:2]
+                language=language[:2],
+                speed=speed
             )
         else:
             # Fallback to standard speaker
@@ -327,7 +330,8 @@ class TTSManager:
                 text=text,
                 file_path=str(output_path),
                 speaker="Conditioning Latent", # Default standard
-                language=language[:2]
+                language=language[:2],
+                speed=speed
             )
 
     def _generate_gtts(self, text: str, language: str, output_path: Path):

@@ -1123,7 +1123,8 @@ class TextToVideoGenerator:
                         self.tts_manager.generate_speech,
                         task['text'],
                         task['voice'],
-                        language
+                        language,
+                        speed=stress_level
                     )
                     future_to_task[future] = task
                     
@@ -1423,6 +1424,7 @@ def setup_ui(generator: TextToVideoGenerator):
                             enable_cta = gr.Checkbox(label="📣 Add CTA Outro", value=True)
                         hide_text = gr.Checkbox(label="🛑 Hide Text Overlay", value=False)
                         export_fps = gr.Slider(10, 60, 30, 1, label="🎞️ Export FPS", info="Target frame rate for the final video (default: 30)")
+                        stress_level = gr.Slider(0.8, 1.5, 1.0, 0.1, label="🗣️ Voice Speed / Stress", info="1.0 is normal, higher is faster/more energetic")
 
 
                 generate_button = gr.Button("🚀 Generate Video", variant="primary", size="lg")
@@ -1441,7 +1443,7 @@ def setup_ui(generator: TextToVideoGenerator):
                             selected_background_video_name,
                             enable_music, music_select, music_vol,
                             enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val,
-                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, progress=gr.Progress()):
+                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, progress=gr.Progress()):
             
             if not text or not text.strip():
                 return None, None, None, None, "Idle", "❌ **Error:** Please enter some text.", "Ready"
@@ -1486,6 +1488,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 overlay_shape=overlay_shape_val,
                 ai_model=ai_model_val,
                 ai_api_url=ai_api_url_val,
+                stress_level=stress_level_val,
 
                 progress_callback=update_progress
             )
@@ -1496,9 +1499,13 @@ def setup_ui(generator: TextToVideoGenerator):
                 # Generate social media descriptions using keywords
                 keywords_used = generator.keyword_extractor.used_keywords
                 progress((99, 100), desc="Generating social media descriptions...")
-                social_desc = generator.keyword_extractor.generate_social_media_descriptions(
-                    text, list(keywords_used), language
-                )
+                try:
+                    social_desc = generator.keyword_extractor.generate_social_media_descriptions(
+                        text, list(keywords_used), language
+                    )
+                except Exception as e:
+                    print(f"⚠️ [Social] Failed to generate descriptions: {e}")
+                    social_desc = "⚠️ Social media descriptions could not be generated (Ollama/LLM timeout or error)."
 
                 status_md = f"""### ✅ Generation Complete!
 - **Video:** {result['video_path']}
@@ -1533,7 +1540,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 media_source_dropdown, pexels_keyword, background_video_dropdown,
                 enable_music, music_dropdown, music_volume,
                 enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape,
-                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url
+                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level
             ],
             outputs=[video_output, thumbnail_output, audio_output, social_output, engine_status_output, status_output, progress_bar]
         )
