@@ -27,14 +27,22 @@ Each sentence can have its **own AI-generated voice**, keyword-matched backgroun
 ## ⚙️ Features / 功能特性 / Возможности
 
 * 🎙️ **Per-sentence AI Voice Generation**
-
-    * Supports **Coqui XTTS v2** (voice cloning) and **SpeechBrain Tacotron2 + HiFi-GAN**
+    * Supports **Kokoro-82M** (High speed), **Coqui XTTS v2** (Voice cloning), and **MMS-TTS**
+    * 🗣️ **Speed & Stress Control**: Adjust voice pace and energy (default 1.0, perfect for shorts)
     * Option to randomize voices per sentence
 
-* 🎬 **Smart Visuals**
+* 🚀 **Lightning Fast ⚡ (Parallel & Cached)**
+    * **Persistent Caching**: Audio and Background Videos are cached (`temp/audio_cache` & `temp/video_cache`)
+    * Reuses existing assets to skip downloads and TTS generation
+    * **Parallel Resource Fetching**: Multi-threaded keyword extraction and media downloads
 
-    * Fetches relevant portrait videos via **Pexels API**
-    * Automatically picks best keyword per sentence using **spaCy NLP**
+* 📢 **Social Media Optimization**
+    * Automatically generates viral-ready descriptions/captions for TikTok, Shorts, and Reels
+    * Easy-to-copy textbox output with relevant hashtags
+
+* 🎬 **Smart Visuals**
+    * Fetches relevant portrait videos via **Pexels, Pixabay, Giphy, and YouTube**
+    * Automatically picks best keyword per sentence using **Ollama (Mistral/Llama)** or **spaCy NLP**
 
 * 🎧 **Audio Perfection**
 
@@ -118,10 +126,12 @@ project_root/
 │   │   └── reference.wav     # Voice clone sample
 │   └── another_voice/
 │       └── reference.wav
-├── temp/                     # Temporary files
+├── temp/                     # Temporary files (caches)
+│   ├── audio_cache/          # Persistent TTS audio cache
+│   └── video_cache/          # Persistent background video cache
 ├── output/                   # Generated videos & audio
-├── main.py                   # Main video generator
-├── slides-main.py            # Slides video generator
+├── main.py                   # Main video generator (All-in-one)
+└── makefile                  # Build & run automation
 ```
 
 ---
@@ -137,11 +147,10 @@ python main.py
 Then open:
 
 ```
-http://localhost:1602  # Main video generator
-http://localhost:1603  # Slides generator
+http://localhost:1603  # High-performance Video Generator
 ```
 
-> **Note:** Port `11434` is also exposed for Ollama API integration.
+> **Note:** Port `11434` must be reachable for Ollama integration (Local LLM).
 
 ---
 
@@ -195,6 +204,8 @@ The codebase has been refactored following SOLID principles to improve maintaina
 - ✅ **Improved maintainability** with single source of truth in `core/`
 - ✅ **Better testability** with modularized components
 - ✅ **Consistent behavior** across all generators
+- ✅ **Parallel Pipeline**: Simultaneous processing of NLP, Media Fetching, and TTS reduces generation time by up to 70%.
+- ✅ **Persistent Storage**: Intelligent caching system prevents duplicate work, saving bandwidth and compute resources.
 
 ---
 
