@@ -11,6 +11,7 @@ from .pexels import PexelsAPI
 from .giphy import GiphyAPI
 from .youtube import YouTubeAPI
 from .pixabay import PixabayAPI
+from .unsplash import UnsplashAPI
 
 class MediaManager:
     """Coordinates search and download across multiple media APIs"""
@@ -21,9 +22,10 @@ class MediaManager:
             "Pexels": PexelsAPI(),
             "Pixabay": PixabayAPI(),
             "Giphy": GiphyAPI(),
-            "YouTube": YouTubeAPI()
+            "YouTube": YouTubeAPI(),
+            "Unsplash": UnsplashAPI(config.UNSPLASH_ACCESS_KEY if config else None)
         }
-        self.preferred_order = ["Pexels", "YouTube", "Giphy"]
+        self.preferred_order = ["Pexels", "YouTube", "Unsplash", "Giphy"]
         self.search_cache = {}
         # Track successful fetches per source for dynamic prioritization
         self.source_success_counts = defaultdict(int)
@@ -106,7 +108,7 @@ class MediaManager:
                     return result
 
         # Final fallback to local
-        for ext in ['*.mp4', '*.mov', '*.avi']:
+        for ext in ['*.mp4', '*.mov', '*.avi', '*.jpg', '*.png']:
             if self.config and self.config.VIDEOS_DIR.exists():
                 files = list(self.config.VIDEOS_DIR.glob(ext))
                 if files:
@@ -135,7 +137,6 @@ class MediaManager:
                     keyword_folder.mkdir(parents=True, exist_ok=True)
                     
                     # Caching: Check if we already have a video in this keyword folder
-                    existing_videos = list(keyword_folder.glob("*.mp4"))
                     if existing_videos:
                         selected_existing = random.choice(existing_videos)
                         print(f"🔁 [MediaManager] Reusing existing local video for '{query}': {selected_existing.name}")
@@ -143,6 +144,17 @@ class MediaManager:
                         cache_key = (query, preferred_source)
                         self.search_cache[cache_key] = str(selected_existing)
                         return selected_existing
+                    
+                    # Also check for images if source is Unsplash or we want to support images generally
+                    if source_name == "Unsplash":
+                        existing_images = list(keyword_folder.glob("*.jpg")) + list(keyword_folder.glob("*.png"))
+                        if existing_images:
+                            selected_existing = random.choice(existing_images)
+                            print(f"🔁 [MediaManager] Reusing existing local image for '{query}': {selected_existing.name}")
+                            self.source_success_counts[source_name] += 1
+                            cache_key = (query, preferred_source)
+                            self.search_cache[cache_key] = str(selected_existing)
+                            return selected_existing
                 
                 # If no config or no existing video, proceed to search/download
                 results = api.search_videos(query)
@@ -161,9 +173,17 @@ class MediaManager:
                 selected = random.choice(filtered)
                 
                 if self.config:
-                    output_path = keyword_folder / f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}.mp4"
+                    # Determine extension based on source or URL
+                    ext = ".mp4"
+                    if source_name == "Unsplash" or (selected.get('url') and '.jpg' in selected.get('url')):
+                         ext = ".jpg"
+                        
+                    output_path = keyword_folder / f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}{ext}"
                 else:
-                    output_path = Path(f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}.mp4")
+                    ext = ".mp4"
+                    if source_name == "Unsplash" or (selected.get('url') and '.jpg' in selected.get('url')):
+                         ext = ".jpg"
+                    output_path = Path(f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}{ext}")
                     
                 # Download
                 print(f"⬇️ [MediaManager] Downloading video from {source_name} for '{query}'...")

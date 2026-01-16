@@ -140,6 +140,11 @@ class Config:
             'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': None}, # Use gTTS/MMS-TTS
             'auto': {'name': '✨ Auto Detect', 'code': 'auto', 'tts_code': 'en', 'kokoro_code': 'a'}
         }
+        
+        # Unsplash Configuration
+        self.UNSPLASH_APP_ID = os.getenv("UNSPLASH_APP_ID")
+        self.UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
+        self.UNSPLASH_SECRET_KEY = os.getenv("UNSPLASH_SECRET_KEY")
     
     def get_temp_audio_file(self, prefix: str = "audio") -> Path:
         """Generate a temporary audio file path"""

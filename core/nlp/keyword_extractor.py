@@ -69,33 +69,83 @@ class OllamaKeywordExtractor:
         return []
 
     def generate_social_media_descriptions(self, text: str, keywords: List[str], language: str = 'en') -> str:
-        """Generate social media descriptions for the video"""
-        prompt = (
-            f"Based on the following video script and visual keywords, generate engaging social media descriptions for TikTok, YouTube, and LinkedIn. "
-            f"Include relevant hashtags.\n\n"
-            f"Video Script: \"{text[:1000]}...\"\n"
-            f"Visual Keywords Used: {', '.join(keywords)}\n\n"
-            f"Format the output clearly with headers for each platform.\n"
-            f"Language: {language}"
-        )
-        
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.7, "num_predict": 500}
-        }
-        
+        """
+        Generates social media descriptions (YouTube Title, Description, Hashtags)
+        using Ollama based on the video script and keywords.
+        """
         try:
-            print(f"[Ollama] Generating social media descriptions...")
-            response = requests.post(self.url, json=payload, timeout=60)
+            prompt = f"""
+            You are a professional social media manager. 
+            Based on the following video script and extracted keywords, create:
+            1. A catchy YouTube Video Title (max 60 chars)
+            2. A compelling Video Description (max 200 chars)
+            3. A list of 10 relevant hashtags
+            4. A short TikTok/Reels caption (max 100 chars)
+
+            Script: "{text[:1000]}..."
+            Keywords: {', '.join(keywords)}
+            Language: {language}
+
+            Output format:
+            Title: [Title]
+            Description: [Description]
+            Hashtags: #tag1 #tag2 ...
+            TikTok: [Caption]
+            """
+
+            response = requests.post(
+                self.url, # Changed from f"{self.base_url}/api/generate" to self.url
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.7
+                    }
+                },
+                timeout=30
+            )
+            
             if response.status_code == 200:
-                result = response.json().get("response", "").strip()
-                return result
+                result = response.json()
+                return result.get('response', '').strip()
+            return "Failed to generate descriptions."
+            
         except Exception as e:
-            print(f"[Ollama] Error generating descriptions: {e}")
-            return "Could not generate descriptions."
-        return "No response from LLM."
+            print(f"Error generating descriptions: {e}")
+            return f"Error: {str(e)}"
+
+    def generate_script_from_text(self, text: str) -> str:
+        """
+        Generates a clean TTS ready script from raw text using Ollama.
+        Removes [pause] and other non-spoken instructions.
+        """
+        try:
+            prompt = f"Generate a tts readys script no [pause] or anything like that from the following text: {text}"
+
+            payload = {
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.7
+                }
+            }
+
+            response = requests.post(
+                self.url, # Changed from f"{self.base_url}/api/generate" to self.url
+                json=payload,
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result.get('response', '').strip()
+            return text # Return original text on failure
+            
+        except Exception as e:
+            print(f"Error generating script: {e}")
+            return text
 
     @staticmethod
     def fetch_models_static(base_url: str) -> List[str]:
@@ -358,4 +408,7 @@ class KeywordExtractor:
 
     def generate_social_media_descriptions(self, text: str, keywords: List[str], language: str = 'en') -> str:
         return self.ollama_extractor.generate_social_media_descriptions(text, keywords, language)
+
+    def generate_script_from_text(self, text: str) -> str:
+        return self.ollama_extractor.generate_script_from_text(text)
 

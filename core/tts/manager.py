@@ -16,6 +16,7 @@ XTTS_AVAILABLE = False
 SPEECHBRAIN_AVAILABLE = False
 GTTS_AVAILABLE = False
 MMS_AVAILABLE = False
+CHATTERBOX_AVAILABLE = False
 
 import threading
 
@@ -52,6 +53,8 @@ class TTSManager:
                 self._load_gtts()
             elif target_engine == "mms":
                 self._load_mms()
+            elif target_engine == "chatterbox":
+                self._load_chatterbox()
             
     def _load_kokoro(self, lang_code: str = 'a'):
         global KOKORO_AVAILABLE
@@ -138,6 +141,26 @@ class TTSManager:
                 self.last_status_message = f"❌ MMS Error: {e2}"
                 print(f"[TTS] {self.last_status_message}")
 
+    def _load_chatterbox(self):
+        global CHATTERBOX_AVAILABLE
+        try:
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+            import torchaudio
+            
+            self.last_status_message = "⏳ Loading Chatterbox..."
+            print(f"[TTS] {self.last_status_message}")
+            
+            # Using Multilingual model by default for broader support
+            self.model = ChatterboxMultilingualTTS.from_pretrained(device=self.config.DEVICE)
+            self.loaded_engine = "chatterbox"
+            CHATTERBOX_AVAILABLE = True
+            
+            self.last_status_message = "✅ Chatterbox Multilingual loaded"
+            print(f"[TTS] {self.last_status_message}")
+        except Exception as e:
+            self.last_status_message = f"❌ Chatterbox Error: {e}"
+            print(f"[TTS] {self.last_status_message}")
+
     def _clean_text(self, text: str) -> str:
         """Clean text of custom metadata tags that shouldn't be spoken."""
         import re
@@ -152,7 +175,8 @@ class TTSManager:
             "kokoro": False,
             "xtts": False,
             "gtts": False,
-            "mms": False
+            "mms": False,
+            "chatterbox": False
         }
         
         # Check Kokoro
@@ -177,6 +201,12 @@ class TTSManager:
         try:
             import transformers
             status["mms"] = True
+        except ImportError: pass
+        
+        # Check Chatterbox
+        try:
+            import chatterbox
+            status["chatterbox"] = True
         except ImportError: pass
         
         return status
@@ -263,6 +293,8 @@ class TTSManager:
                     self._generate_gtts(text, language, output_path)
                 elif self.loaded_engine == "mms":
                     self._generate_mms(text, output_path)
+                elif self.loaded_engine == "chatterbox":
+                    self._generate_chatterbox(text, output_path, language)
                 else:
                     raise ValueError(f"No functional engine for {engine}")
                 
@@ -392,6 +424,25 @@ class TTSManager:
         
         wavfile.write(str(output_path), sampling_rate, audio_data)
 
+    def _generate_chatterbox(self, text: str, output_path: Path, language: str):
+        import torchaudio
+        
+        # Clean text
+        text = self._clean_text(text)
+        
+        # Chatterbox expects language codes like 'en', 'fr', etc.
+        # Ensure we pass the correct language ID if supported
+        # Defaulting to 'en' if not specified or fallback
+        lang_id = language if language else 'en'
+        
+        # Generate
+        # Note: The model might be multilingual or single language depending on how we refine _load_chatterbox
+        # Currently assuming Multilingual
+        wav = self.model.generate(text, language_id=lang_id)
+        
+        # Save
+        torchaudio.save(str(output_path), wav, self.model.sr)
+
     def get_available_voices(self, engine: str = "kokoro") -> List[str]:
         """Get voices supported by the engine"""
         if engine == "kokoro":
@@ -401,6 +452,7 @@ class TTSManager:
                 "british-woman", "british-woman-2",
                 "british-man", "british-man-2",
                 "spanish-woman", "french-woman", "italian-woman", "italian-man", "portuguese-woman", "portuguese-man",
-                "MMS-TTS Romanian"
+                "MMS-TTS Romanian",
+                "Chatterbox Multilingual"
             ]
         return ["Standard"]

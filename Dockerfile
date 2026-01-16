@@ -43,6 +43,7 @@ COPY requirements.txt .
 
 RUN python3 -m venv /opt/venv && \
     pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir "Cython<3.0" && \
     pip install --no-cache-dir -r requirements.txt && \
     python -m spacy download en_core_web_sm && \
     rm -rf /root/.cache/pip

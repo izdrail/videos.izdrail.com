@@ -529,8 +529,14 @@ class FFmpegVideoGenerator:
                     f"setpts=PTS-STARTPTS[bg_scaled]"
                 )
                 input_count = 2
+                input_count = 2
             elif video_path and video_path.exists():
-                inputs.extend(['-stream_loop', '-1', '-i', str(video_path)])
+                is_image = video_path.suffix.lower() in ['.jpg', '.jpeg', '.png']
+                if is_image:
+                    inputs.extend(['-loop', '1', '-i', str(video_path)])
+                else:
+                    inputs.extend(['-stream_loop', '-1', '-i', str(video_path)])
+                
                 filter_parts.append(
                     f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
                     f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
@@ -1379,6 +1385,8 @@ def setup_ui(generator: TextToVideoGenerator):
                             placeholder="Enter your script here...",
                             lines=10
                         )
+                        with gr.Row():
+                            btn_generate_script = gr.Button("✨ AI Clean & Generate Script (No Pauses)", variant="secondary", size="sm")
                         
 
                         
@@ -1593,6 +1601,25 @@ def setup_ui(generator: TextToVideoGenerator):
             outputs=[ai_model_dropdown]
         )
 
+        def generate_script_action(text, ai_model, api_url):
+            if not text or not text.strip():
+                return text
+            
+            # Update connection settings just in case
+            if api_url and api_url != generator.keyword_extractor.api_url:
+                generator.keyword_extractor.api_url = api_url
+            if ai_model and ai_model != generator.keyword_extractor.model:
+                generator.keyword_extractor.model = ai_model
+                
+            print(f"Generating clean script for: {text[:50]}...")
+            return generator.keyword_extractor.generate_script_from_text(text)
+
+        btn_generate_script.click(
+            fn=generate_script_action,
+            inputs=[text_input, ai_model_dropdown, ai_api_url],
+            outputs=[text_input]
+        )
+
         
         # Audio handlers
         preview_voice_btn.click(
@@ -1711,7 +1738,8 @@ if __name__ == "__main__":
             server_port=1603,
             share=False,
             show_error=True,
-            theme=gr.themes.Soft(primary_hue="blue")
+            theme=gr.themes.Soft(primary_hue="blue"),
+            mcp_server=True
         )
     except Exception as e:
         print(f"\n❌ FATAL ERROR: {e}")
