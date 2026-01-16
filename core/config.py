@@ -96,7 +96,7 @@ class Config:
         self.MIN_IMAGE_DURATION = 10.0
         
         # Parallel Worker Pools
-        self.WORKER_POOL_NLP = 10       # IO-bound (API requests to Ollama)
+        self.WORKER_POOL_NLP = 20       # IO-bound (API requests to Ollama)
         self.WORKER_POOL_TTS = 4        # CPU/GPU-bound (XTTS is heavy)
         self.WORKER_POOL_MEDIA = 10     # IO-bound (Media downloads)
         self.WORKER_POOL_RENDERING = 4   # CPU-bound (FFmpeg/MoviePy)
@@ -135,6 +135,7 @@ class Config:
             'it': {'name': 'Italian', 'code': 'it', 'tts_code': 'it', 'kokoro_code': 'i'},
             'pt': {'name': 'Brazilian Portuguese', 'code': 'pt', 'tts_code': 'pt', 'kokoro_code': 'p'},
             'hi': {'name': 'Hindi', 'code': 'hi', 'tts_code': 'hi', 'kokoro_code': 'h'},
+            'ja': {'name': 'Japanese', 'code': 'ja', 'tts_code': 'ja', 'kokoro_code': 'j'},
             # Arabic and Romanian are NOT supported by Kokoro v0.19/v1.0.
             'ar': {'name': 'Arabic', 'code': 'ar', 'tts_code': 'ar', 'kokoro_code': None}, # Use gTTS/XTTS
             'ro': {'name': 'Romanian', 'code': 'ro', 'tts_code': 'ro', 'kokoro_code': None}, # Use gTTS/MMS-TTS
@@ -145,6 +146,10 @@ class Config:
         self.UNSPLASH_APP_ID = os.getenv("UNSPLASH_APP_ID")
         self.UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
         self.UNSPLASH_SECRET_KEY = os.getenv("UNSPLASH_SECRET_KEY")
+        
+        # AI/NLP Configuration
+        self.AI_MODEL = os.getenv("AI_MODEL", "mistral:7b")
+        self.OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate")
     
     def get_temp_audio_file(self, prefix: str = "audio") -> Path:
         """Generate a temporary audio file path"""

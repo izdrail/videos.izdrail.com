@@ -252,19 +252,16 @@ class TTSManager:
 
         if engine == "auto":
             # Heuristic: 
-            # 1. If it's Romanian -> MMS (XTTS doesn't support RO)
-            # 2. If it's a clone voice -> XTTS
-            # 3. If valid Kokoro lang -> Kokoro
-            # 4. Else -> Fallback
-            if language == 'ro':
-                engine = "mms"
-            elif is_clone:
+            # 1. If it's a clone voice -> XTTS (XTTS is best for cloning)
+            # 2. If it's Romanian -> MMS (XTTS doesn't support RO, Kokoro doesn't support RO)
+            # 3. If valid Kokoro lang -> Kokoro (Kokoro is fastest)
+            # 4. Fallback to gTTS (Most compatible but online)
+            if is_clone:
                 engine = "xtts"
+            elif language == 'ro':
+                engine = "mms"
             elif kokoro_code:
                 engine = "kokoro"
-            elif language in ['en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']:
-                # Keep XTTS for languages it explicitly supports but Kokoro doesn't
-                engine = "xtts"
             else:
                 engine = "gtts"
                 
@@ -347,8 +344,12 @@ class TTSManager:
             "italian-man": "im_nicola",
             "portuguese-woman": "pf_dora",
             "portuguese-man": "pm_alex",
-            "japanese-voice": "jm_kumo", # Example heuristic
-            "chinese-voice": "zf_xiaobei", # Example heuristic
+            "japanese-voice": "jf_choing",
+            "japanese-man": "jm_kumo",
+            "chinese-voice": "zf_xiaobei",
+            "chinese-man": "zm_yunjian",
+            "hindi-voice": "hf_alpha",
+            "hindi-man": "hm_omega",
             
             # Legacy mappings
             "asrm": "af_bella",
@@ -452,6 +453,7 @@ class TTSManager:
                 "british-woman", "british-woman-2",
                 "british-man", "british-man-2",
                 "spanish-woman", "french-woman", "italian-woman", "italian-man", "portuguese-woman", "portuguese-man",
+                "japanese-voice", "japanese-man", "chinese-voice", "chinese-man", "hindi-voice", "hindi-man",
                 "MMS-TTS Romanian",
                 "Chatterbox Multilingual"
             ]

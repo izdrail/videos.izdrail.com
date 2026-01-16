@@ -8,18 +8,25 @@ from TTS.api import TTS
 import torch
 import traceback
 
-# Fix for PyTorch 2.6+ secure loading - comprehensive TTS allowlist
+# Fix for PyTorch 2.4+ secure loading - comprehensive TTS allowlist
 try:
-    from TTS.tts.configs.xtts_config import XttsConfig
-    from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
-    from TTS.config.shared_configs import BaseDatasetConfig
-    from TTS.tts.configs.shared_configs import BaseAudioConfig
-    torch.serialization.add_safe_globals([
-        XttsConfig, XttsAudioConfig, XttsArgs, 
-        BaseDatasetConfig, BaseAudioConfig
-    ])
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        from TTS.tts.configs.xtts_config import XttsConfig
+        from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
+        from TTS.config.shared_configs import BaseDatasetConfig
+        from TTS.tts.configs.shared_configs import BaseAudioConfig
+        torch.serialization.add_safe_globals([
+            XttsConfig, XttsAudioConfig, XttsArgs, 
+            BaseDatasetConfig, BaseAudioConfig
+        ])
 except ImportError as e:
     print(f"[WARNING] Could not import TTS classes for PyTorch allowlist: {e}")
+
+# SpeechBrain compatibility fix for newer torchaudio
+import torchaudio
+if not hasattr(torchaudio, "list_audio_backends"):
+    torchaudio.list_audio_backends = lambda: []
+
 
 def main():
     print("Pre-downloading XTTS model...")

@@ -91,7 +91,7 @@ class YouTubeAPI(BaseMediaAPI):
                 video_url
             ]
             
-            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, timeout=30)
             return result.returncode == 0 and output_path.exists()
             
         except Exception as e:

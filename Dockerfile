@@ -1,7 +1,7 @@
 # ========================================
 # Base Image (Python 3.10)
 # ========================================
-FROM python:3.10-slim
+FROM python:3.11
 
 WORKDIR /app
 
@@ -42,9 +42,8 @@ RUN apt-get update && apt-get upgrade -y && \
 COPY requirements.txt .
 
 RUN python3 -m venv /opt/venv && \
-    pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir "Cython<3.0" && \
-    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir --prefer-binary -r requirements.txt && \
     python -m spacy download en_core_web_sm && \
     rm -rf /root/.cache/pip
 

@@ -12,6 +12,7 @@ from .giphy import GiphyAPI
 from .youtube import YouTubeAPI
 from .pixabay import PixabayAPI
 from .unsplash import UnsplashAPI
+from core.nlp.neuron_extractor import NeuronExtractor
 
 class MediaManager:
     """Coordinates search and download across multiple media APIs"""
@@ -25,7 +26,8 @@ class MediaManager:
             "YouTube": YouTubeAPI(),
             "Unsplash": UnsplashAPI(config.UNSPLASH_ACCESS_KEY if config else None)
         }
-        self.preferred_order = ["Pexels", "YouTube", "Unsplash", "Giphy"]
+        self.neuron_extractor = NeuronExtractor(model=config.AI_MODEL if config else "mistral:7b")
+        self.preferred_order = ["Pexels", "Unsplash", "Pixabay", "Giphy", "YouTube"]
         self.search_cache = {}
         # Track successful fetches per source for dynamic prioritization
         self.source_success_counts = defaultdict(int)
@@ -35,7 +37,7 @@ class MediaManager:
         self.MAX_ATTEMPTS = 3
         self._used_media_urls = set()
 
-    def get_random_media(self, queries: List[str], preferred_source: Optional[str] = None) -> Optional[Path]:
+    def get_random_media(self, queries: List[str], preferred_source: Optional[str] = None, context: Optional[str] = None, use_snn: bool = False) -> Optional[Path]:
         """Fetch a background video for a list of *queries*.
         Tries each query in the list across all sources.
         """
@@ -50,7 +52,8 @@ class MediaManager:
             if q and q not in seen:
                 unique_queries.append(q)
                 seen.add(q)
-        queries = unique_queries
+        # Limit to top 5 unique queries to reduce API requests
+        queries = unique_queries[:5]
 
         # 1. First pass: Try exact matches for all queries
         for query in queries:
@@ -62,7 +65,8 @@ class MediaManager:
                     print(f"🔁 [MediaManager] Using cached video for '{query}'")
                     return Path(cp)
 
-            result = self._search_and_download(query, preferred_source)
+            print(f"🔍 [MediaManager] Searching across all sources for query: '{query}'...")
+            result = self._search_and_download(query, preferred_source, context=context, use_snn=use_snn)
             if result:
                 return result
 
@@ -73,7 +77,7 @@ class MediaManager:
         from core.nlp.keyword_extractor import KeywordExtractor
         ke = KeywordExtractor()
         
-        for query in queries[:3]:  # Try fallbacks for top 3 keywords only
+        for query in queries[:2]:  # Try fallbacks for top 2 keywords only to save requests
             fallback_keywords = ke.generate_fallback_keywords(query)
             if fallback_keywords:
                 print(f"🔄 [MediaManager] Trying fallbacks for '{query}': {fallback_keywords}")
@@ -86,7 +90,7 @@ class MediaManager:
                             print(f"🔁 [MediaManager] Using cached video for fallback '{fallback}'")
                             return Path(cp)
                     
-                    result = self._search_and_download(fallback, preferred_source)
+                    result = self._search_and_download(fallback, preferred_source, context=context)
                     if result:
                         return result
         
@@ -103,7 +107,7 @@ class MediaManager:
                         print(f"🔁 [MediaManager] Using cached video for '{simplified}'")
                         return Path(cp)
                         
-                result = self._search_and_download(simplified, preferred_source)
+                result = self._search_and_download(simplified, preferred_source, context=context)
                 if result:
                     return result
 
@@ -117,7 +121,7 @@ class MediaManager:
                     return selected
         return None
 
-    def _search_and_download(self, query: str, preferred_source: Optional[str]) -> Optional[Path]:
+    def _search_and_download(self, query: str, preferred_source: Optional[str], context: Optional[str] = None, use_snn: bool = False) -> Optional[Path]:
         """Internal helper to search single query across all sources"""
         ordered_sources = self._get_ordered_sources(preferred_source)
         
@@ -135,6 +139,8 @@ class MediaManager:
                 if self.config:
                     keyword_folder = self.config.VIDEOS_DIR / safe_q
                     keyword_folder.mkdir(parents=True, exist_ok=True)
+                    
+                    existing_videos = list(keyword_folder.glob("*.mp4")) + list(keyword_folder.glob("*.mov"))
                     
                     # Caching: Check if we already have a video in this keyword folder
                     if existing_videos:
@@ -156,33 +162,46 @@ class MediaManager:
                             self.search_cache[cache_key] = str(selected_existing)
                             return selected_existing
                 
-                # If no config or no existing video, proceed to search/download
-                results = api.search_videos(query)
+                # Optimization: For maximum speed, we fetch only 1 candidate and skip Neuron AI
+                # unless SNN mode is explicitly enabled for deep filtering.
+                num_candidates = 10 if use_snn else 1
+                
+                results = api.search_videos(query, per_page=num_candidates)
                 if not results:
                     continue
                     
                 # Filter results that were already downloaded in this session
-                filtered = [r for r in results if r.get('url') not in self._used_media_urls]
+                # This filtering should happen before selection, regardless of SNN
+                filtered_results = [r for r in results if r.get('url') not in self._used_media_urls]
                 
-                if not filtered and results:
-                    filtered = results 
+                # If all results were already used, allow re-using them for this search attempt
+                if not filtered_results and results:
+                    filtered_results = results 
                 
-                if not filtered: 
+                if not filtered_results: 
                     continue
                 
-                selected = random.choice(filtered)
+                # Selection Logic
+                if len(filtered_results) > 1:
+                     print(f"[MediaManager] Using Neuron AI to evaluate {len(filtered_results)} candidates for: '{context[:50]}...'")
+                     evaluated = self.neuron_extractor.evaluate_media(context, filtered_results, use_snn=use_snn)
+                     selected = evaluated[0]['media'] if evaluated else filtered_results[0]
+                     if evaluated:
+                        print(f"🧠 [MediaManager] Neuron AI chose: {selected.get('title', 'Untitled')}")
+                else:
+                    selected = filtered_results[0]
                 
                 if self.config:
                     # Determine extension based on source or URL
                     ext = ".mp4"
                     if source_name == "Unsplash" or (selected.get('url') and '.jpg' in selected.get('url')):
-                         ext = ".jpg"
+                        ext = ".jpg"
                         
                     output_path = keyword_folder / f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}{ext}"
                 else:
                     ext = ".mp4"
                     if source_name == "Unsplash" or (selected.get('url') and '.jpg' in selected.get('url')):
-                         ext = ".jpg"
+                        ext = ".jpg"
                     output_path = Path(f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}{ext}")
                     
                 # Download

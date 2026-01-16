@@ -168,7 +168,7 @@ class FFmpegVideoGenerator:
                 return Path(mf['path'])
         return None
 
-    def get_background_video(self, keyword: Optional[str], sentence: Optional[str], language: str = 'en', preferred_source: Optional[str] = None) -> Optional[Path]:
+    def get_background_video(self, keyword: Optional[str], sentence: Optional[str], language: str = 'en', preferred_source: Optional[str] = None, use_snn: bool = False) -> Optional[Path]:
         """Return a background video Path.
         Preference order:
         1. Video from keyword/media API (checking list of keywords).
@@ -183,7 +183,7 @@ class FFmpegVideoGenerator:
                 search_keywords.append(sanitized)
         
         if sentence:
-            extracted = self.keyword_extractor.extract_keywords(sentence, 10, language)
+            extracted = self.keyword_extractor.extract_keywords(sentence, 5, language, use_snn=use_snn)
             # Sort: unused first
             extracted.sort(key=lambda kw: kw in self.keyword_extractor.used_keywords)
             search_keywords.extend(extracted)
@@ -197,7 +197,7 @@ class FFmpegVideoGenerator:
                 seen.add(k)
                 
         # Try to find media using the list of keywords
-        video = self.media_manager.get_random_media(final_keywords, preferred_source)
+        video = self.media_manager.get_random_media(final_keywords, preferred_source, context=sentence, use_snn=use_snn)
         if video:
             # Mark the keywords used that led to this video (approximate, we mark all passed to be safe or just the top one? 
             # The manager doesn't return which keyword worked. Let's mark the first one or all.)
@@ -692,6 +692,7 @@ class FFmpegVideoGenerator:
                           export_fps: int = 30,
                           overlay_shape: str = "Circle",
                           intro_text: Optional[str] = None,
+                          use_snn: bool = False,
                           progress_callback=None) -> Path:
         
         # Setup temp directory
@@ -784,7 +785,8 @@ class FFmpegVideoGenerator:
                     slide['keyword'],
                     slide['sentence'],
                     language,
-                    preferred_media_source
+                    preferred_media_source,
+                    use_snn=use_snn
                 )
                 fetch_futures[future] = slide['slide_num']
             
@@ -1017,6 +1019,7 @@ class TextToVideoGenerator:
                            ai_model: str = "mistral:7b",
                            ai_api_url: Optional[str] = None,
                            stress_level: float = 1.0,
+                           use_snn: bool = False,
                            progress_callback=None) -> Dict:
         # Language Detection
         if language == 'auto':
@@ -1049,7 +1052,8 @@ class TextToVideoGenerator:
             'overlay_shape': overlay_shape,
             'ai_model': ai_model,
             'ai_api_url': ai_api_url,
-            'stress_level': stress_level
+            'stress_level': stress_level,
+            'use_snn': use_snn
         }
 
         # Update API URL if changed
@@ -1268,6 +1272,7 @@ class TextToVideoGenerator:
                 export_fps=export_fps,
                 overlay_shape=overlay_shape,
                 intro_text=intro_msg if add_intro_slide else None,
+                use_snn=use_snn,
                 progress_callback=video_progress
             )
 
@@ -1372,7 +1377,7 @@ class TextToVideoGenerator:
 
 # =============== GRADIO UI ===============
 def setup_ui(generator: TextToVideoGenerator):
-    with gr.Blocks(title="AI Video Generator Pro") as demo:
+    with gr.Blocks(title="AI Video Generator Pro", theme=gr.themes.Soft(primary_hue="blue")) as demo:
         gr.Markdown("# 🎬 Shorts Generator")
         gr.Markdown("Create stunning videos with multi-language TTS, auto-backgrounds, and dynamic overlays.")
 
@@ -1492,6 +1497,7 @@ def setup_ui(generator: TextToVideoGenerator):
                         hide_text = gr.Checkbox(label="🛑 Hide Text Overlay", value=False)
                         export_fps = gr.Slider(10, 60, 30, 1, label="🎞️ Export FPS", info="Target frame rate for the final video (default: 30)")
                         stress_level = gr.Slider(0.8, 1.5, 1.0, 0.1, label="🗣️ Voice Speed / Stress", info="1.0 is normal, higher is faster/more energetic")
+                        use_snn_checkbox = gr.Checkbox(label="🧠 Use SNN Biological Evaluation (Slow but Realistic)", value=False)
 
 
                 generate_button = gr.Button("🚀 Generate Video", variant="primary", size="lg")
@@ -1511,7 +1517,7 @@ def setup_ui(generator: TextToVideoGenerator):
                             selected_background_video_name,
                             enable_music, music_select, music_vol,
                             enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val,
-                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, progress=gr.Progress()):
+                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, progress=gr.Progress()):
             
             if not text or not text.strip():
                 return None, None, None, None, "Idle", "❌ **Error:** Please enter some text.", "Ready"
@@ -1557,7 +1563,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 ai_model=ai_model_val,
                 ai_api_url=ai_api_url_val,
                 stress_level=stress_level_val,
-
+                use_snn=use_snn_val,
                 progress_callback=update_progress
             )
 
@@ -1635,7 +1641,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 media_source_dropdown, pexels_keyword, background_video_dropdown,
                 enable_music, music_dropdown, music_volume,
                 enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape,
-                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level
+                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level, use_snn_checkbox
             ],
             outputs=[video_output, thumbnail_output, audio_output, social_output, engine_status_output, status_output, progress_bar]
         )
@@ -1737,9 +1743,7 @@ if __name__ == "__main__":
             server_name="0.0.0.0",
             server_port=1603,
             share=False,
-            show_error=True,
-            theme=gr.themes.Soft(primary_hue="blue"),
-            mcp_server=True
+            show_error=True
         )
     except Exception as e:
         print(f"\n❌ FATAL ERROR: {e}")

@@ -7,6 +7,9 @@ import re
 import requests
 from typing import List, Optional
 from collections import Counter
+import spacy
+from collections import Counter
+from .neuron_extractor import NeuronExtractor
 
 class OllamaKeywordExtractor:
     """Uses Ollama API to extract keywords from text"""
@@ -191,6 +194,19 @@ class KeywordExtractor:
     
     def __init__(self, ollama_model: str = "mistral:7b"):
         self.ollama_extractor = OllamaKeywordExtractor(model=ollama_model)
+        self.neuron_extractor = NeuronExtractor(model=ollama_model)
+        
+        # Initialize local spaCy for instant extraction
+        try:
+            self.nlp = spacy.load("en_core_web_md")
+        except:
+            # Fallback to sm if md is not available
+            try:
+                self.nlp = spacy.load("en_core_web_sm")
+            except:
+                self.nlp = None
+                print("[NLP] Warning: Local spaCy model not found. Using fallback methods.")
+
         self.relevant_pos = {'NOUN', 'PROPN', 'ADJ'}
         self.exclude_words = {
             'thing', 'things', 'something', 'someone', 'way', 'time', 'day',
@@ -199,25 +215,61 @@ class KeywordExtractor:
         }
         self.used_keywords = set()
     
-    def extract_keywords(self, text: str, top_n: int = 5, language: str = 'en') -> List[str]:
-        """Main entry point for keyword extraction"""
+    def extract_keywords(self, text: str, top_n: int = 5, language: str = 'en', use_neuron_ai: bool = True, use_snn: bool = False) -> List[str]:
+        """Main entry point for keyword extraction. Prioritizes local spaCy for speed."""
         if not text.strip():
             return []
             
-        # Try Ollama first
-        ollama_keywords = self.ollama_extractor.extract_keywords(text, top_n * 2, language)  # Get more, then rank
-        if ollama_keywords:
-            # Rank and return top_n
-            ranked = self.rank_keywords(ollama_keywords)
-            return ranked[:top_n]
+        # 1. Try local spaCy extraction (INSTANT)
+        candidates = self._extract_spacy_local(text, top_n * 2)
         
-        # Fallback to Spacy API
-        spacy_keywords = self._extract_spacy_fallback(text, top_n * 2)
-        if spacy_keywords:
-            ranked = self.rank_keywords(spacy_keywords)
+        # 2. If spaCy fails or returns too few, fallback to Ollama (SLOW)
+        if len(candidates) < 2 and language == 'en':
+            ollama_keywords = self.ollama_extractor.extract_keywords(text, min(4, top_n * 2), language)
+            candidates.extend([k for k in ollama_keywords if k not in candidates])
+
+        if candidates:
+            if use_neuron_ai:
+                # Use local vector evaluation for max speed
+                neuron_results = self.neuron_extractor.evaluate_keywords(text, candidates, language, use_snn=use_snn)
+                if neuron_results:
+                    return [res['keyword'] for res in neuron_results[:top_n]]
+            
+            # Rank and return top_n
+            ranked = self.rank_keywords(candidates)
             return ranked[:top_n]
         
         return []
+
+    def _extract_spacy_local(self, text: str, top_n: int = 5) -> List[str]:
+        """Extract keywords using local Spacy model"""
+        if not self.nlp:
+            return []
+            
+        doc = self.nlp(text.lower())
+        candidates = []
+        
+        # Prioritize Entities (Locations, Orgs, Products)
+        for ent in doc.ents:
+            if ent.label_ in {"GPE", "LOC", "ORG", "PRODUCT", "EVENT"}:
+                candidates.append(ent.text)
+                
+        # Add high-value POS tags
+        for token in doc:
+            if (token.pos_ in self.relevant_pos and 
+                not token.is_stop and 
+                len(token.text) > 2 and 
+                token.text.isalpha() and 
+                token.text not in self.exclude_words):
+                candidates.append(token.text)
+        
+        if not candidates:
+            return []
+            
+        # Count and get most common, preserving order for entities
+        counts = Counter(candidates)
+        return [word for word, count in counts.most_common(top_n)]
+
     
     def _extract_spacy_fallback(self, text: str, top_n: int = 5) -> List[str]:
         """Fallback to external Spacy API if Ollama fails"""
@@ -257,8 +309,9 @@ class KeywordExtractor:
         return keywords[0] if keywords else None
 
     def clear_used(self):
-        """Reset used keywords tracker"""
+        """Reset used keywords tracker and biological memory"""
         self.used_keywords.clear()
+        self.neuron_extractor.clear_memory()
     
     def rank_keywords(self, keywords: List[str]) -> List[str]:
         """
