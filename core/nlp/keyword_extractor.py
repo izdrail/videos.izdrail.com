@@ -249,12 +249,21 @@ class KeywordExtractor:
         doc = self.nlp(text.lower())
         candidates = []
         
-        # Prioritize Entities (Locations, Orgs, Products)
+        # 1. Prioritize Entities (Locations, Orgs, Products)
         for ent in doc.ents:
-            if ent.label_ in {"GPE", "LOC", "ORG", "PRODUCT", "EVENT"}:
+            if ent.label_ in {"GPE", "LOC", "ORG", "PRODUCT", "EVENT", "PERSON"}:
                 candidates.append(ent.text)
+        
+        # 2. Extract Noun Phrases (2-3 words) - EXTREMELY HIGH VALUE for search
+        # We skip chunks that are just stop words or too long.
+        for chunk in doc.noun_chunks:
+            # Clean the chunk text (remove front/back articles/stop words)
+            clean_chunk = " ".join([t.text for t in chunk if not t.is_stop and t.pos_ in {"NOUN", "PROPN", "ADJ"}])
+            if clean_chunk and len(clean_chunk.split()) >= 1:
+                # Prioritize multi-word phrases by adding them first
+                candidates.append(clean_chunk)
                 
-        # Add high-value POS tags
+        # 3. Add high-value individual tokens
         for token in doc:
             if (token.pos_ in self.relevant_pos and 
                 not token.is_stop and 

@@ -35,10 +35,11 @@ class YouTubeAPI(BaseMediaAPI):
             return self.search_cache[cache_key]
         
         try:
-            # Use yt-dlp to search YouTube
+            # Add negative search terms to proactively filter out music/interviews
+            clean_query = f"{query} -lyrics -\"official video\" -\"music video\" -interview -commentary"
             cmd = [
                 'yt-dlp',
-                f'ytsearch{per_page}:{query}',
+                f'ytsearch{per_page}:{clean_query}',
                 '--get-id',
                 '--get-title',
                 '--get-duration',
@@ -53,12 +54,18 @@ class YouTubeAPI(BaseMediaAPI):
                 results = []
                 
                 # Parse output (alternating title and ID)
+                bad_keywords = ["lyrics", "official video", "music video", "interview", "commentary", "podcast", "vlog"]
                 for i in range(0, len(lines), 2):
                     if i + 1 < len(lines):
+                        title = lines[i]
+                        # Final filter: skip if any bad keyword is still in title
+                        if any(bk in title.lower() for bk in bad_keywords):
+                            continue
+                            
                         results.append({
                             'url': f'https://www.youtube.com/watch?v={lines[i+1]}',
                             'id': lines[i+1],
-                            'title': lines[i]
+                            'title': title
                         })
                 
                 # Cache results
@@ -91,7 +98,7 @@ class YouTubeAPI(BaseMediaAPI):
                 video_url
             ]
             
-            result = subprocess.run(cmd, capture_output=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, timeout=60)
             return result.returncode == 0 and output_path.exists()
             
         except Exception as e:

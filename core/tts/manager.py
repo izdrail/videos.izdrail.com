@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from ..database import DB
 from ..utils.audio import improve_audio_quality
+from pydub import AudioSegment
 
 # Engine-specific imports handled lazily
 KOKORO_AVAILABLE = False
@@ -68,7 +69,7 @@ class TTSManager:
             # Explicitly set repo_id to ensure it uses the pre-downloaded model in offline mode
             # lang_code ensures we load the correct phonemizer/vocabulary
             try:
-                self.model = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M")
+                self.model = KPipeline(lang_code=lang_code)
                 self.loaded_engine = "kokoro"
                 self.current_kokoro_lang = lang_code
                 KOKORO_AVAILABLE = True
@@ -162,11 +163,23 @@ class TTSManager:
             print(f"[TTS] {self.last_status_message}")
 
     def _clean_text(self, text: str) -> str:
-        """Clean text of custom metadata tags that shouldn't be spoken."""
+        """Clean text of custom metadata tags and problematic punctuation for TTS."""
         import re
         # Remove [N level] or [N levels] optionally followed by (...)
-        # Example: [1 level], [2 levels](-2)
         text = re.sub(r'\[\d+\s+levels?\](?:\([^)]+\))?', '', text)
+        
+        # Standardize ellipsis
+        text = re.sub(r'\.{2,}', '...', text)
+        
+        # Remove characters that often cause phonemizer warnings or "words count mismatch"
+        # We keep standard punctuation . , ! ? : ; ' " -
+        # But we remove or replace others.
+        text = text.replace('*', ' ').replace('#', ' ').replace('@', ' ')
+        text = text.replace('_', ' ').replace('~', ' ')
+        
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
         return text.strip()
 
     def check_engines(self) -> Dict[str, bool]:
@@ -276,12 +289,13 @@ class TTSManager:
             engine = "kokoro"
             
         with self.lock:
-            self._load_engine(engine, lang_code=kokoro_code or 'a')
-            
             # Use persistent audio cache directory from config
             output_path = self.config.TEMP_AUDIO_DIR / f"tts_{uuid.uuid4().hex}.wav"
+            print(f"▶ [TTS] Starting generation for: '{text[:50]}...' using {engine}")
             
             try:
+                self._load_engine(engine, lang_code=kokoro_code or 'a')
+                
                 if self.loaded_engine == "kokoro":
                     self._generate_kokoro(text, voice_id, output_path, speed)
                 elif self.loaded_engine == "xtts":
@@ -295,7 +309,11 @@ class TTSManager:
                 else:
                     raise ValueError(f"No functional engine for {engine}")
                 
+                if not output_path.exists():
+                     raise FileNotFoundError(f"Engine {self.loaded_engine} claims success but {output_path} is missing")
+
                 # Post-process
+                print(f"🪄 [TTS] Post-processing audio quality...")
                 improved_path = improve_audio_quality(output_path)
                 if improved_path != output_path:
                     output_path.unlink(missing_ok=True)
@@ -303,13 +321,24 @@ class TTSManager:
                     
                 # Save to cache
                 self.db.save_tts(text, voice_id, language, output_path, speed=speed)
+                print(f"✅ [TTS] Successfully generated: {output_path}")
                 return output_path
                 
             except Exception as e:
-                print(f"[TTS] Generation failed with {engine}: {e}")
-                if output_path.exists():
-                    output_path.unlink()
-                return None
+                print(f"❌ [TTS] Generation failed with {engine}: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # Emergency Fallback: Generate a 1-second silent WAV file
+                try:
+                    if not output_path.exists():
+                        silent = AudioSegment.silent(duration=1000) # 1 sec
+                        silent.export(str(output_path), format="wav")
+                        print(f"📁 [TTS] Created emergency silent fallback at: {output_path}")
+                    return output_path
+                except Exception as e2:
+                    print(f"💀 [TTS] Even emergency fallback failed: {e2}")
+                    return None
 
     def _generate_kokoro(self, text: str, voice_id: str, output_path: Path, speed: float = 1.0):
         import scipy.io.wavfile as wavfile
@@ -369,7 +398,12 @@ class TTSManager:
         # Process chunks
         all_audio = []
         for gs, ps, audio in self.model(text, voice=kk_voice, speed=speed):
-            all_audio.append(audio)
+            if audio is not None and len(audio) > 0:
+                all_audio.append(audio)
+        
+        if not all_audio:
+            raise ValueError(f"Kokoro failed to generate any audio chunks for text: {text[:50]}...")
+            
         full_audio = np.concatenate(all_audio)
         full_audio = (full_audio * 32767).astype(np.int16)
         wavfile.write(str(output_path), 24000, full_audio)

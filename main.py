@@ -480,8 +480,12 @@ class FFmpegVideoGenerator:
                                   export_fps: int = 30,
                                   overlay_shape: str = "Circle") -> Optional[Path]:
         try:
-            if audio_path is None or not Path(audio_path).exists():
-                print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None or does not exist")
+            if audio_path is None:
+                print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None. Check TTS logs for generation failures.")
+                return None
+            
+            if not Path(audio_path).exists():
+                print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path does not exist: {audio_path}")
                 return None
             
             source_info = f"Video: {video_path.name}" if video_path else "Background: Image/Color"
@@ -1020,6 +1024,7 @@ class TextToVideoGenerator:
                            ai_api_url: Optional[str] = None,
                            stress_level: float = 1.0,
                            use_snn: bool = False,
+                           audio_only: bool = False,
                            progress_callback=None) -> Dict:
         # Language Detection
         if language == 'auto':
@@ -1053,7 +1058,8 @@ class TextToVideoGenerator:
             'ai_model': ai_model,
             'ai_api_url': ai_api_url,
             'stress_level': stress_level,
-            'use_snn': use_snn
+            'use_snn': use_snn,
+            'audio_only': audio_only
         }
 
         # Update API URL if changed
@@ -1079,42 +1085,46 @@ class TextToVideoGenerator:
         session_dir.mkdir(exist_ok=True)
 
         # Parallel Keyword Extraction
-        print(f"🧠 [NLP] Extracting keywords for {len(sentences)} sentences in parallel...")
-        extraction_futures = {}
-        sentence_keywords_map = {}
-        
-        with ThreadPoolExecutor(max_workers=self.config.WORKER_POOL_NLP) as executor:
-            for i, sent in enumerate(sentences):
-                # Request multiple candidates to ensure we can pick a unique one
-                future = executor.submit(self.keyword_extractor.extract_keywords, sent, 10, language)
-                extraction_futures[future] = i
-                
-            for future in as_completed(extraction_futures):
-                idx = extraction_futures[future]
-                try:
-                    candidates = future.result()
-                    sentence_keywords_map[idx] = candidates
-                except Exception as e:
-                    print(f"⚠️ [NLP] Keyword extraction failed for sentence {idx}: {e}")
-                    sentence_keywords_map[idx] = []
-
-        # Assign unique keywords sequentially to ensure no duplicates
         sentence_keywords = []
-        for i in range(len(sentences)):
-            candidates = sentence_keywords_map.get(i, [])
-            selected_kw = None
-            for kw in candidates:
-                if kw not in self.keyword_extractor.used_keywords:
-                    selected_kw = kw
-                    self.keyword_extractor.used_keywords.add(kw)
-                    break
+        if not audio_only:
+            print(f"🧠 [NLP] Extracting keywords for {len(sentences)} sentences in parallel...")
+            extraction_futures = {}
+            sentence_keywords_map = {}
             
-            # If all used or empty, fallback to first candidate or None (will fallback to auto in pipeline)
-            if not selected_kw and candidates:
-                selected_kw = candidates[0] 
+            with ThreadPoolExecutor(max_workers=self.config.WORKER_POOL_NLP) as executor:
+                for i, sent in enumerate(sentences):
+                    # Request multiple candidates to ensure we can pick a unique one
+                    future = executor.submit(self.keyword_extractor.extract_keywords, sent, 10, language)
+                    extraction_futures[future] = i
+                    
+                for future in as_completed(extraction_futures):
+                    idx = extraction_futures[future]
+                    try:
+                        candidates = future.result()
+                        sentence_keywords_map[idx] = candidates
+                    except Exception as e:
+                        print(f"⚠️ [NLP] Keyword extraction failed for sentence {idx}: {e}")
+                        sentence_keywords_map[idx] = []
+    
+            # Assign unique keywords sequentially to ensure no duplicates
+            for i in range(len(sentences)):
+                candidates = sentence_keywords_map.get(i, [])
+                selected_kw = None
+                for kw in candidates:
+                    if kw not in self.keyword_extractor.used_keywords:
+                        selected_kw = kw
+                        self.keyword_extractor.used_keywords.add(kw)
+                        break
                 
-            sentence_keywords.append(selected_kw)
-            print(f"  - Sentence {i}: '{selected_kw}'")
+                # If all used or empty, fallback to first candidate or None (will fallback to auto in pipeline)
+                if not selected_kw and candidates:
+                    selected_kw = candidates[0] 
+                    
+                sentence_keywords.append(selected_kw)
+                print(f"  - Sentence {i}: '{selected_kw}'")
+        else:
+            # Placeholder for audio-only
+            sentence_keywords = [None] * len(sentences)
 
         audio_paths = []
         intro_audio_path = None
@@ -1184,6 +1194,8 @@ class TextToVideoGenerator:
                     task = future_to_task[future]
                     try:
                         path_result = future.result()
+                        print(f"🔈 [Audio] Task {task['type']} (idx: {task['index']}) completed: {path_result}")
+                        
                         if task['type'] == 'intro':
                             intro_audio_path = path_result
                         elif task['type'] == 'cta':
@@ -1195,8 +1207,12 @@ class TextToVideoGenerator:
                         if progress_callback:
                             progress_callback(completed_audio, len(audio_tasks) * 2, f"Generating Audio {completed_audio}/{len(audio_tasks)}")
                     except Exception as e:
-                        print(f"❌ [Audio] Failed to generate audio for {task['type']}: {e}")
-                        # Graceful Fallback: Use None or a silent placeholder (optional)
+                        print(f"❌ [Audio] Unexpected task error for {task['type']}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Graceful Fallback handled inside generate_speech usually,
+                        # but if generate_speech crashed before creating fallback:
+                        path_result = None
                         # Here we just mark it as None and skip it in rendering if needed
                         if task['type'] == 'intro':
                             intro_audio_path = None
@@ -1207,37 +1223,24 @@ class TextToVideoGenerator:
                         
             # Reconstruct ordered list for sentences
             audio_paths = [audio_paths_map.get(i) for i in range(len(sentences))]
-            # Filter out failures if any (though logic expects matching lengths, so we might have None holes. 
-            # create_final_video expects matching lists. If failure, we might crash.
-            # Let's ensure no Nones or handle them. 
-            # If fallback needed, maybe generate silence or skip? 
-            # For now, let's assume success or propagate Nones to be caught later.
+            # Ensure no Nones remain in audio_paths to prevent rendering failures
+            for i in range(len(audio_paths)):
+                if audio_paths[i] is None:
+                    print(f"⚠️ [Audio] Emergency! audio_paths[{i}] is None. Creating late fallback...")
+                    fallback_path = self.config.TEMP_AUDIO_DIR / f"late_fallback_{uuid.uuid4().hex[:8]}.wav"
+                    try:
+                        AudioSegment.silent(duration=1000).export(str(fallback_path), format="wav")
+                        audio_paths[i] = fallback_path
+                        print(f"📁 [Audio] Late fallback created: {fallback_path}")
+                    except Exception as eLate:
+                        print(f"💀 [Audio] Late fallback FAILED: {eLate}")
 
-
+            # Define video_progress callback here, as it's used in the video generation path
             def video_progress(current, total, message):
                 if progress_callback:
                     progress_callback(len(sentences) + current, len(sentences) * 2, message)
 
-            circle_config = {
-                'diameter': circle_diameter,
-                'position': circle_position,
-                'border_width': circle_border_width,
-            }
-            circle_video_path = None
-            if enable_circle_overlay:
-                if circle_upload_path and Path(circle_upload_path).exists():
-                    # Move uploaded file to session dir just in case
-                    uploaded_path = Path(circle_upload_path)
-                    circle_video_path = session_dir / f"uploaded_circle_{uploaded_path.name}"
-                    shutil.copy(circle_upload_path, circle_video_path)
-                elif circle_selection and circle_selection != "Random":
-                    circle_video_path = self.config.CIRCLE_OVERLAYS_DIR / circle_selection
-                    if not circle_video_path.exists():
-                        print(f"[Circle] Selected overlay {circle_selection} not found, falling back to random")
-                        circle_video_path = self.video_generator.get_circle_overlay_video()
-                else:
-                    circle_video_path = self.video_generator.get_circle_overlay_video()
-
+            # Define selected_bg_video_path here, as it's used in the video generation path
             selected_bg_video_path = None
             print(f"[Debug] Selected background video name from UI: '{selected_background_video_name}'")
             if selected_background_video_name and selected_background_video_name not in ["Auto-select (Pexels/Giphy/Local)", "Branded Gradient"]:
@@ -1254,84 +1257,154 @@ class TextToVideoGenerator:
             else:
                 print("[Debug] Auto-select enabled (default behavior)")
 
-            # Final Video Generation
-            video_temp_path = self.video_generator.create_final_video(
-                sentences=sentences,
-                audio_paths=audio_paths,
-                keywords=sentence_keywords,
-                intro_audio=intro_audio_path,
-                cta_audio=cta_audio_path,
-                music_volume_db=music_volume_db,
-                circle_video=circle_video_path,
-                circle_config=circle_config,
-                circle_selection=circle_selection,
-                language=language,
-                preferred_media_source=preferred_media_source,
-                selected_background_video=selected_bg_video_path,
-                hide_text=hide_text,
-                export_fps=export_fps,
-                overlay_shape=overlay_shape,
-                intro_text=intro_msg if add_intro_slide else None,
-                use_snn=use_snn,
-                progress_callback=video_progress
-            )
 
-            if enable_background_music and music_path and music_path.exists():
+            if audio_only:
+                # --- AUDIO ONLY STITCHING ---
                 if progress_callback:
-                    progress_callback(len(sentences) * 2 - 1, len(sentences) * 2, "Adding background music...")
-                audio_extract = self.config.TEMP_DIR / f"extracted_{uuid.uuid4().hex[:8]}.wav"
-                subprocess.run(['ffmpeg', '-y', '-i', str(video_temp_path), '-vn', '-acodec', 'pcm_s16le', str(audio_extract)],
-                             check=True, capture_output=True)
-                voice_seg = AudioSegment.from_file(str(audio_extract))
-                music = AudioSegment.from_file(str(music_path)) + music_volume_db
-                if len(music) < len(voice_seg):
-                    loops = (len(voice_seg) // len(music)) + 2
-                    music = music * loops
-                music = music[:len(voice_seg)]
-                music = music.fade_in(1000).fade_out(1000)
-                mixed = voice_seg.overlay(music)
-                mixed_audio = self.config.TEMP_DIR / f"mixed_{uuid.uuid4().hex[:8]}.wav"
-                mixed.export(str(mixed_audio), format="wav")
-                video_with_music = self.config.TEMP_DIR / f"with_music_{uuid.uuid4().hex[:8]}.mp4"
-                subprocess.run(['ffmpeg', '-y', '-i', str(video_temp_path), '-i', str(mixed_audio),
-                              '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-map', '0:v:0', '-map', '1:a:0', '-shortest',
-                              str(video_with_music)], check=True, capture_output=True)
-                audio_extract.unlink(missing_ok=True)
-                mixed_audio.unlink(missing_ok=True)
-                video_temp_path.unlink(missing_ok=True)
-                video_temp_path = video_with_music
-
-            lang_name = SUPPORTED_LANGUAGES.get(language, {}).get('name', language)
-            
-            # Determine keyword for filename
-            filename_keyword = "generated"
-            if pexels_keyword and pexels_keyword.strip():
-                # Use provided Pexels keyword
-                filename_keyword = "".join([c if c.isalnum() else "_" for c in pexels_keyword.strip().lower()])
-            elif sentence_keywords and len(sentence_keywords) > 0 and sentence_keywords[0]:
-                # Use first extract keyword
-                filename_keyword = "".join([c if c.isalnum() else "_" for c in sentence_keywords[0].lower()])
+                    progress_callback(len(sentences) + 1, len(sentences) * 2, "Stitching audio files...")
                 
-            video_final = session_dir / f"video_{filename_keyword}_{timestamp}_{language}.mp4"
-            shutil.move(str(video_temp_path), str(video_final))
-
-            audio_final = session_dir / f"audio_{timestamp}_{language}.mp3"
-            subprocess.run(['ffmpeg', '-y', '-i', str(video_final), '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', str(audio_final)],
-                         check=True, capture_output=True)
-
-            # Generate Thumbnail
-            thumbnail_final = session_dir / f"thumbnail_{timestamp}_{language}.jpg"
-            try:
-                get_smart_thumbnail_frame(video_final, thumbnail_final)
-                print(f"✅ Thumbnail generated: {thumbnail_final}")
-            except Exception as e:
-                print(f"❌ Thumbnail generation failed: {e}")
+                final_audio_segments = AudioSegment.empty()
+                
+                # Intro
+                if intro_audio_path and Path(intro_audio_path).exists():
+                    final_audio_segments += AudioSegment.from_file(str(intro_audio_path))
+                    # Small pause
+                    final_audio_segments += AudioSegment.silent(duration=300)
+                
+                # Sentences
+                for i, p in enumerate(audio_paths):
+                    if p and Path(p).exists():
+                        seg = AudioSegment.from_file(str(p))
+                        final_audio_segments += seg
+                        # Natural pause between sentences
+                        if i < len(audio_paths) - 1:
+                            final_audio_segments += AudioSegment.silent(duration=500)
+                            
+                # CTA
+                if cta_audio_path and Path(cta_audio_path).exists():
+                    final_audio_segments += AudioSegment.silent(duration=500)
+                    final_audio_segments += AudioSegment.from_file(str(cta_audio_path))
+                
+                # Add background music if enabled
+                if enable_background_music and music_path and music_path.exists():
+                    if progress_callback:
+                        progress_callback(len(sentences) + 2, len(sentences) * 2, "Adding background music...")
+                    
+                    bg_music = AudioSegment.from_file(str(music_path)) + music_volume_db
+                    if len(bg_music) < len(final_audio_segments):
+                        loops = (len(final_audio_segments) // len(bg_music)) + 2
+                        bg_music = bg_music * loops
+                    bg_music = bg_music[:len(final_audio_segments)]
+                    bg_music = bg_music.fade_in(1000).fade_out(1000)
+                    final_audio_segments = final_audio_segments.overlay(bg_music)
+                
+                audio_final = session_dir / f"audio_only_{timestamp}_{language}.mp3"
+                final_audio_segments.export(str(audio_final), format="mp3", bitrate="192k")
+                
+                video_final = None
                 thumbnail_final = None
+                lang_name = SUPPORTED_LANGUAGES.get(language, {}).get('name', language)
+            else:
+                # --- FULL VIDEO GENERATION ---
+                # Circle logic
+                circle_config = {
+                    'diameter': circle_diameter,
+                    'position': circle_position,
+                    'border_width': circle_border_width,
+                }
+                circle_video_path = None
+                if enable_circle_overlay:
+                    if circle_upload_path and Path(circle_upload_path).exists():
+                        # Move uploaded file to session dir just in case
+                        uploaded_path = Path(circle_upload_path)
+                        circle_video_path = session_dir / f"uploaded_circle_{uploaded_path.name}"
+                        shutil.copy(circle_upload_path, circle_video_path)
+                    elif circle_selection and circle_selection != "Random":
+                        circle_video_path = self.config.CIRCLE_OVERLAYS_DIR / circle_selection
+                        if not circle_video_path.exists():
+                            print(f"[Circle] Selected overlay {circle_selection} not found, falling back to random")
+                            circle_video_path = self.video_generator.get_circle_overlay_video()
+                    else:
+                        circle_video_path = self.video_generator.get_circle_overlay_video()
+
+                # Final Video Generation
+                video_temp_path = self.video_generator.create_final_video(
+                    sentences=sentences,
+                    audio_paths=audio_paths,
+                    keywords=sentence_keywords,
+                    intro_audio=intro_audio_path,
+                    cta_audio=cta_audio_path,
+                    music_volume_db=music_volume_db,
+                    circle_video=circle_video_path,
+                    circle_config=circle_config,
+                    circle_selection=circle_selection,
+                    language=language,
+                    preferred_media_source=preferred_media_source,
+                    selected_background_video=selected_bg_video_path,
+                    hide_text=hide_text,
+                    export_fps=export_fps,
+                    overlay_shape=overlay_shape,
+                    intro_text=intro_msg if add_intro_slide else None,
+                    use_snn=use_snn,
+                    progress_callback=video_progress
+                )
+
+                if enable_background_music and music_path and music_path.exists():
+                    if progress_callback:
+                        progress_callback(len(sentences) * 2 - 1, len(sentences) * 2, "Adding background music...")
+                    audio_extract = self.config.TEMP_DIR / f"extracted_{uuid.uuid4().hex[:8]}.wav"
+                    subprocess.run(['ffmpeg', '-y', '-i', str(video_temp_path), '-vn', '-acodec', 'pcm_s16le', str(audio_extract)],
+                                 check=True, capture_output=True)
+                    voice_seg = AudioSegment.from_file(str(audio_extract))
+                    music = AudioSegment.from_file(str(music_path)) + music_volume_db
+                    if len(music) < len(voice_seg):
+                        loops = (len(voice_seg) // len(music)) + 2
+                        music = music * loops
+                    music = music[:len(voice_seg)]
+                    music = music.fade_in(1000).fade_out(1000)
+                    mixed = voice_seg.overlay(music)
+                    mixed_audio = self.config.TEMP_DIR / f"mixed_{uuid.uuid4().hex[:8]}.wav"
+                    mixed.export(str(mixed_audio), format="wav")
+                    video_with_music = self.config.TEMP_DIR / f"with_music_{uuid.uuid4().hex[:8]}.mp4"
+                    subprocess.run(['ffmpeg', '-y', '-i', str(video_temp_path), '-i', str(mixed_audio),
+                                  '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-map', '0:v:0', '-map', '1:a:0', '-shortest',
+                                  str(video_with_music)], check=True, capture_output=True)
+                    audio_extract.unlink(missing_ok=True)
+                    mixed_audio.unlink(missing_ok=True)
+                    video_temp_path.unlink(missing_ok=True)
+                    video_temp_path = video_with_music
+
+                lang_name = SUPPORTED_LANGUAGES.get(language, {}).get('name', language)
+                
+                # Determine keyword for filename
+                filename_keyword = "generated"
+                if pexels_keyword and pexels_keyword.strip():
+                    # Use provided Pexels keyword
+                    filename_keyword = "".join([c if c.isalnum() else "_" for c in pexels_keyword.strip().lower()])
+                elif sentence_keywords and len(sentence_keywords) > 0 and sentence_keywords[0]:
+                    # Use first extract keyword
+                    filename_keyword = "".join([c if c.isalnum() else "_" for c in sentence_keywords[0].lower()])
+                    
+                video_final = session_dir / f"video_{filename_keyword}_{timestamp}_{language}.mp4"
+                shutil.move(str(video_temp_path), str(video_final))
+
+                audio_final = session_dir / f"audio_{timestamp}_{language}.mp3"
+                subprocess.run(['ffmpeg', '-y', '-i', str(video_final), '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', str(audio_final)],
+                             check=True, capture_output=True)
+
+                # Generate Thumbnail
+                thumbnail_final = session_dir / f"thumbnail_{timestamp}_{language}.jpg"
+                try:
+                    get_smart_thumbnail_frame(video_final, thumbnail_final)
+                    print(f"✅ Thumbnail generated: {thumbnail_final}")
+                except Exception as e:
+                    print(f"❌ Thumbnail generation failed: {e}")
+                    thumbnail_final = None
 
             result = {
                 "success": True,
                 "audio_path": str(audio_final),
-                "video_path": str(video_final),
+                "video_path": str(video_final) if video_final else None,
                 "thumbnail_path": str(thumbnail_final) if thumbnail_final and thumbnail_final.exists() else None,
                 "output_directory": str(session_dir),
                 "sentence_count": len(sentences),
@@ -1498,6 +1571,7 @@ def setup_ui(generator: TextToVideoGenerator):
                         export_fps = gr.Slider(10, 60, 30, 1, label="🎞️ Export FPS", info="Target frame rate for the final video (default: 30)")
                         stress_level = gr.Slider(0.8, 1.5, 1.0, 0.1, label="🗣️ Voice Speed / Stress", info="1.0 is normal, higher is faster/more energetic")
                         use_snn_checkbox = gr.Checkbox(label="🧠 Use SNN Biological Evaluation (Slow but Realistic)", value=False)
+                        audio_only_checkbox = gr.Checkbox(label="🔊 Only generate audio (skip video rendering)", value=False)
 
 
                 generate_button = gr.Button("🚀 Generate Video", variant="primary", size="lg")
@@ -1517,7 +1591,7 @@ def setup_ui(generator: TextToVideoGenerator):
                             selected_background_video_name,
                             enable_music, music_select, music_vol,
                             enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val,
-                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, progress=gr.Progress()):
+                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, audio_only_val, progress=gr.Progress()):
             
             if not text or not text.strip():
                 return None, None, None, None, "Idle", "❌ **Error:** Please enter some text.", "Ready"
@@ -1545,6 +1619,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 speaker_id=speaker,
                 pexels_keyword=keyword.strip() if keyword else None,
                 preferred_media_source=media_source,
+                selected_background_video_name=selected_background_video_name,
                 enable_background_music=enable_music,
                 music_selection=music_select,
                 music_volume_db=music_vol,
@@ -1564,6 +1639,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 ai_api_url=ai_api_url_val,
                 stress_level=stress_level_val,
                 use_snn=use_snn_val,
+                audio_only=audio_only_val,
                 progress_callback=update_progress
             )
 
@@ -1641,7 +1717,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 media_source_dropdown, pexels_keyword, background_video_dropdown,
                 enable_music, music_dropdown, music_volume,
                 enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape,
-                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level, use_snn_checkbox
+                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level, use_snn_checkbox, audio_only_checkbox
             ],
             outputs=[video_output, thumbnail_output, audio_output, social_output, engine_status_output, status_output, progress_bar]
         )

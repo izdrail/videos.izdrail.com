@@ -45,6 +45,7 @@ RUN python3 -m venv /opt/venv && \
     pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir --prefer-binary -r requirements.txt && \
     python -m spacy download en_core_web_sm && \
+    python -m spacy download en_core_web_md && \
     rm -rf /root/.cache/pip
 
 # ========================================

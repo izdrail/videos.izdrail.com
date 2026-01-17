@@ -162,9 +162,14 @@ class MediaManager:
                             self.search_cache[cache_key] = str(selected_existing)
                             return selected_existing
                 
-                # Optimization: For maximum speed, we fetch only 1 candidate and skip Neuron AI
-                # unless SNN mode is explicitly enabled for deep filtering.
-                num_candidates = 10 if use_snn else 1
+                # Optimization: Evaluation is now LOCAL and INSTANT (spaCy vectors).
+                # We can fetch multiple candidates and filter them without LLM latency.
+                num_candidates = 10
+                
+                # Check if API supports video search (some might only be images)
+                if not hasattr(api, 'search_videos'):
+                    print(f"[MediaManager] {source_name} does not support search_videos. Skipping.")
+                    continue
                 
                 results = api.search_videos(query, per_page=num_candidates)
                 if not results:
@@ -185,8 +190,20 @@ class MediaManager:
                 if len(filtered_results) > 1:
                      print(f"[MediaManager] Using Neuron AI to evaluate {len(filtered_results)} candidates for: '{context[:50]}...'")
                      evaluated = self.neuron_extractor.evaluate_media(context, filtered_results, use_snn=use_snn)
-                     selected = evaluated[0]['media'] if evaluated else filtered_results[0]
+                     
+                     # Safe extraction: evaluated list might be empty or missing 'media' key if Ollama had an error
+                     selected = None
                      if evaluated:
+                        try:
+                            # Try to get 'media' key, fallback to direct object or first filtered result
+                            selected = evaluated[0].get('media') or evaluated[0]
+                        except Exception as eSelection:
+                            print(f"⚠️ [MediaManager] Selection error: {eSelection}")
+                            selected = filtered_results[0]
+                     else:
+                        selected = filtered_results[0]
+                        
+                     if selected and isinstance(selected, dict):
                         print(f"🧠 [MediaManager] Neuron AI chose: {selected.get('title', 'Untitled')}")
                 else:
                     selected = filtered_results[0]

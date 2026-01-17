@@ -116,8 +116,22 @@ class NeuronExtractor:
         if not target_doc.vector_norm:
             return None
             
-        # Context doc for consistency
-        context_doc = self.nlp(context[:500].lower())
+        # Refine context: Focus on significant tokens (Nouns, Entities, Adjectives)
+        # Nouns/Proper Nouns are weighted twice (Subject-Booster)
+        context_doc_full = self.nlp(context[:500].lower())
+        essence_tokens = []
+        for t in context_doc_full:
+            if t.is_stop or t.is_punct: continue
+            if t.pos_ in {"NOUN", "PROPN"}:
+                essence_tokens.extend([t.text, t.text]) # Double weight
+            elif t.pos_ in {"ADJ", "VERB"}:
+                essence_tokens.append(t.text)
+                
+        if not essence_tokens:
+            essence_tokens = [t.text for t in context_doc_full if not t.is_stop]
+            
+        context_clean = " ".join(essence_tokens[:40]) 
+        context_doc = self.nlp(context_clean)
         
         def get_sim(anchor_key):
             sim = target_doc.similarity(self._anchor_docs[anchor_key])
@@ -255,16 +269,19 @@ class NeuronExtractor:
                 evs = data.get("evals", [])
                 results = []
                 for e in evs:
-                    results.append({
-                        "index": e.get("idx"),
-                        "attention": e.get("att", 0.5),
-                        "amygdala": {"salience": e.get("amy", 0.0)},
-                        "reward": {"dopamine": e.get("rew", 0.0)},
-                        "insula": {"pain": e.get("ins", 0.0)},
-                        "vmpfc": {"value": e.get("vmp", 0.0)},
-                        "hippocampus": {"consistency": e.get("hip", 0.0)},
-                        "dlpfc": {"authority": e.get("dlp", 0.0)}
-                    })
+                    idx = e.get("idx")
+                    if idx is not None and idx < len(media_items):
+                        results.append({
+                            "index": idx,
+                            "media": media_items[idx], # CRITICAL: Re-attach original media object
+                            "attention": e.get("att", 0.5),
+                            "amygdala": {"salience": e.get("amy", 0.0)},
+                            "reward": {"dopamine": e.get("rew", 0.0)},
+                            "insula": {"pain": e.get("ins", 0.0)},
+                            "vmpfc": {"value": e.get("vmp", 0.0)},
+                            "hippocampus": {"consistency": e.get("hip", 0.0)},
+                            "dlpfc": {"authority": e.get("dlp", 0.0)}
+                        })
                 return results
         except Exception as e:
             print(f"[NeuronAI] Media batch query error: {e}")
@@ -296,8 +313,26 @@ class NeuronExtractor:
             # Attention (Multiplier for visibility)
             attention = neuron_output.get('attention', 0.5) + 0.5 # Range 0.5 to 1.5
             
+            # Relevance / Consistency (Hippocampus) - CRITICAL for user context
+            consistency = neuron_output.get('hippocampus', {}).get('consistency', 0.5)
+            
+            # CONTENT PENALTY SYSTEM
+            # Penalize talking heads, lyrics, or specific YouTube commentary styles
+            bad_content_penalty = 0.0
+            media_title = neuron_output.get('media', {}).get('title', '').lower()
+            bad_keywords = ["lyrics", "official video", "music video", "interview", "commentary", "vlog", "podcast", "review", "teaser", "trailer"]
+            for bk in bad_keywords:
+                if bk in media_title:
+                    bad_content_penalty += 0.4
+            
+            # If it's a YouTube lyric video, it's almost certainly bad for background
+            if "lyrics" in media_title:
+                bad_content_penalty += 1.0
+
             # Final Score Calculation
-            score = (reward + emotion + value + identity) - (pain * 2.0)
+            # Consistency is now the DOMINANT factor (4.0x) to ensure relevance.
+            # Identity and Reward are secondary motivators.
+            score = (reward + emotion + value + identity) + (consistency * 5.0) - (pain * 2.0) - (bad_content_penalty * 3.0)
             return score * attention
             
         except (KeyError, TypeError) as e:
