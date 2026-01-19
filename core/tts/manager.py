@@ -66,7 +66,6 @@ class TTSManager:
             os.environ["TRANSFORMERS_OFFLINE"] = "1"
             
             from kokoro import KPipeline
-            # Explicitly set repo_id to ensure it uses the pre-downloaded model in offline mode
             # lang_code ensures we load the correct phonemizer/vocabulary
             try:
                 self.model = KPipeline(lang_code=lang_code)

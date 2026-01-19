@@ -45,5 +45,8 @@ rebuild:
 ssh:
 	docker exec -it videos.izdrail.com /bin/bash
 
+shell:
+	docker exec -it videos.izdrail.com /bin/bash
+
 publish:
 	docker push $(IMAGE_PROD)
