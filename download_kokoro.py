@@ -1,9 +1,4 @@
-#!/usr/bin/env python3
-"""
-Script to pre-download TTS models during Docker build
-- Kokoro-82M (EN)
-- MMS-TTS Romanian (RO)
-"""
+import time
 import sys
 from huggingface_hub import snapshot_download
 
@@ -12,16 +7,27 @@ MODELS = {
     "MMS-TTS Romanian": "facebook/mms-tts-ron",
 }
 
-def download_model(name: str, repo_id: str) -> None:
+def download_model(name: str, repo_id: str, max_retries: int = 5) -> None:
     print(f"\n▶ Pre-downloading {name}...")
-
-    path = snapshot_download(
-        repo_id=repo_id,
-        allow_patterns=["*.bin", "*.pt", "*.pth", "*.json", "*.onnx", "*.model"],
-    )
-
-    print(f"✔ {name} downloaded successfully")
-    print(f"  Location: {path}")
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            path = snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=["*.bin", "*.pt", "*.pth", "*.json", "*.onnx", "*.model"],
+                resume_download=True,
+            )
+            print(f"✔ {name} downloaded successfully after {attempt} attempt(s)")
+            print(f"  Location: {path}")
+            return
+        except Exception as e:
+            print(f"⚠️  Attempt {attempt} failed for {name}: {e}")
+            if attempt < max_retries:
+                wait_time = attempt * 5
+                print(f"🔄 Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise e
 
 def main():
     try:
@@ -31,7 +37,7 @@ def main():
         print("\n✅ All TTS models downloaded and cached")
 
     except Exception as e:
-        print(f"\n❌ Model download failed: {e}")
+        print(f"\n❌ Model download failed after multiple attempts: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":

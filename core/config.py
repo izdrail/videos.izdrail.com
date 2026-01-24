@@ -150,6 +150,9 @@ class Config:
         # AI/NLP Configuration
         self.AI_MODEL = os.getenv("AI_MODEL", "mistral:7b")
         self.OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate")
+        
+        # YouTube Free Audio Library API
+        self.YOUTUBE_AUDIO_API_URL = "https://thibaultjanbeyer.github.io/YouTube-Free-Audio-Library-API/api.json"
     
     def get_temp_audio_file(self, prefix: str = "audio") -> Path:
         """Generate a temporary audio file path"""

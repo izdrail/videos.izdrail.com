@@ -117,6 +117,29 @@ class OllamaKeywordExtractor:
         except Exception as e:
             print(f"Error generating descriptions: {e}")
             return f"Error: {str(e)}"
+    def extract_mood_keyword(self, text: str) -> str:
+        """Extract a single musical mood or genre keyword from the text (e.g. 'Epic', 'Chill')"""
+        prompt = (
+            f"Analyze the emotional tone of the text below and return ONLY ONE word "
+            f"representing a musical mood or genre that fits as background music. "
+            f"Examples: Epic, Relaxing, Cinematic, Happy, Dark, Energetic, Lo-fi.\n\n"
+            f"Text: \"{text[:500]}\"\n"
+            f"Mood:"
+        )
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.4, "num_predict": 10}
+        }
+        try:
+            response = requests.post(self.url, json=payload, timeout=30)
+            if response.status_code == 200:
+                mood = response.json().get("response", "").strip().split()[0]
+                return re.sub(r'[^a-zA-Z]', '', mood).capitalize()
+        except:
+            pass
+        return "Epic"
 
     def generate_script_from_text(self, text: str) -> str:
         """
@@ -473,4 +496,23 @@ class KeywordExtractor:
 
     def generate_script_from_text(self, text: str) -> str:
         return self.ollama_extractor.generate_script_from_text(text)
+    def extract_mood_keyword(self, text: str) -> str:
+        """Get the emotional mood for music selection"""
+        # 1. Try Ollama (AI analysis is best for mood)
+        mood = self.ollama_extractor.extract_mood_keyword(text)
+        if mood:
+            return mood
+            
+        # 2. Simple fallback based on keyword counts if AI fails
+        text_lower = text.lower()
+        if any(w in text_lower for w in ['war', 'battle', 'fight', 'epic', 'victory', 'strong']):
+            return "Epic"
+        if any(w in text_lower for w in ['peace', 'relax', 'ocean', 'sleep', 'calm']):
+            return "Relaxing"
+        if any(w in text_lower for w in ['happy', 'fun', 'upbeat', 'party']):
+            return "Happy"
+        if any(w in text_lower for w in ['sad', 'dark', 'alone', 'scary']):
+            return "Dark"
+            
+        return "Cinematic"
 

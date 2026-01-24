@@ -29,6 +29,7 @@ from core.database import GenerationDB, DB
 from core.nlp.keyword_extractor import KeywordExtractor
 from core.ai.stable_diffusion import StableDiffusionManager, SD_AVAILABLE
 from core.media.manager import MediaManager
+from core.media.youtube_audio import YouTubeAudioLibraryAPI
 from core.tts.manager import TTSManager
 from core.utils.audio import improve_audio_quality, remove_metallic_artifacts
 from core.utils.video import get_video_duration, has_audio_stream, is_video_file, get_random_middle_frame, get_smart_thumbnail_frame
@@ -932,6 +933,7 @@ class TextToVideoGenerator:
         self.keyword_extractor = KeywordExtractor()
         self.tts_manager = TTSManager(self.config)
         self.video_generator = FFmpegVideoGenerator(self.config, keyword_extractor=self.keyword_extractor)
+        self.yt_audio_library = YouTubeAudioLibraryAPI(self.config)
         self.available_voices = self._get_available_voices()
         self.available_music = self._get_available_music()
         self.available_circles = self._get_available_circles()
@@ -984,7 +986,7 @@ class TextToVideoGenerator:
 
     def _get_available_music(self) -> List[str]:
         music_files = self.video_generator.get_available_music_files()
-        return ["Random"] + [m['name'] for m in music_files]
+        return ["Random", "Auto (YouTube Library)"] + [m['name'] for m in music_files]
 
     def _get_available_circles(self) -> List[str]:
         circles = []
@@ -999,6 +1001,36 @@ class TextToVideoGenerator:
             if self.config.BACKGROUND_VIDEOS_DIR.exists():
                 videos.extend(list(self.config.BACKGROUND_VIDEOS_DIR.glob(ext)))
         return ["Auto-select (Pexels/Giphy/Local)", "Branded Gradient"] + [v.name for v in sorted(videos)]
+
+    def search_audio_library(self, query: str) -> List[Tuple[str, str]]:
+        """Search the library and return (display_name, track_id) tuples"""
+        results = self.yt_audio_library.search(query)
+        # Format for Gradio dropdown: list of (label, value)
+        return [(t.get('name', 'Unknown'), t.get('id', '')) for t in results]
+
+    def download_library_track(self, track_id: str, track_name: str) -> Optional[str]:
+        """Download a track from the library and return its local name"""
+        if not track_id:
+            return None
+        
+        # Clean track name for filename
+        safe_name = "".join([c if c.isalnum() or c in " ._-" else "_" for c in track_name])
+        if not safe_name.lower().endswith(".mp3"):
+            safe_name += ".mp3"
+            
+        output_path = self.config.MUSIC_DIR / safe_name
+        
+        if output_path.exists():
+            print(f"[YouTubeAudio] Track already exists locally: {safe_name}")
+            return safe_name
+
+        print(f"[YouTubeAudio] Downloading track '{track_name}'...")
+        if self.yt_audio_library.download_track(track_id, output_path):
+            # Refresh available music
+            self.available_music = self._get_available_music()
+            return safe_name
+        
+        return None
 
     def generate_video(self, text: str, speaker_id: str = "Standard Voice (Non-Cloned)",
                           language: str = 'en',
@@ -1133,7 +1165,41 @@ class TextToVideoGenerator:
 
         try:
             if enable_background_music:
-                music_path = self.video_generator.get_music_by_name(music_selection)
+                if music_selection == "Auto (YouTube Library)":
+                    print(f"🎵 [Music] Auto-selection mode active. Analyzing mood for '{text[:40]}...'")
+                    mood_kw = self.keyword_extractor.extract_mood_keyword(text)
+                    print(f"🎵 [Music] AI detected mood: '{mood_kw}'")
+                    
+                    yt_results = self.search_audio_library(mood_kw)
+                    if not yt_results:
+                         backup_kw = next((k for k in sentence_keywords if k), "Cinematic")
+                         print(f"⚠️ [Music] No track found for mood '{mood_kw}', trying visual keyword: '{backup_kw}'")
+                         yt_results = self.search_audio_library(backup_kw)
+                    
+                    if yt_results:
+                        # Pick a random one from top 3 to avoid same track over and over
+                        picked_idx = random.randint(0, min(2, len(yt_results) - 1))
+                        track_label, track_id = yt_results[picked_idx]
+                        print(f"🎵 [Music] Auto-selected YouTube Library track: {track_label} (ID: {track_id})")
+                        
+                        local_name = self.download_library_track(track_id, track_label)
+                        if local_name:
+                            music_path = self.config.MUSIC_DIR / local_name
+                            print(f"✅ [Music] Track ready at: {music_path.name}")
+                        else:
+                            print(f"❌ [Music] Download failed for '{track_label}'")
+                    
+                    if not music_path:
+                        print(f"⚠️ [Music] Fully failed to find automatic track. Falling back to Random local music.")
+                        music_path = self.video_generator.get_music_by_name("Random")
+                else:
+                    print(f"🎵 [Music] Manual selection: {music_selection}")
+                    music_path = self.video_generator.get_music_by_name(music_selection)
+
+                if music_path and music_path.exists():
+                    print(f"🎶 [Music] Using background track: {music_path.name}")
+                else:
+                    print(f"🔇 [Music] No background track available / track not found.")
 
             voices_for_sentences = [random.choice(self.available_voices) for _ in sentences] if use_random_voices else [speaker_id] * len(sentences)
 
@@ -1288,7 +1354,8 @@ class TextToVideoGenerator:
                 # Add background music if enabled
                 if enable_background_music and music_path and music_path.exists():
                     if progress_callback:
-                        progress_callback(len(sentences) + 2, len(sentences) * 2, "Adding background music...")
+                        progress_callback(len(sentences) + 2, len(sentences) * 2, f"Adding background music: {music_path.name}...")
+                    print(f"🔊 [Mixing] Overlaying background music (Audio-Only): {music_path.name}")
                     
                     bg_music = AudioSegment.from_file(str(music_path)) + music_volume_db
                     if len(bg_music) < len(final_audio_segments):
@@ -1351,7 +1418,8 @@ class TextToVideoGenerator:
 
                 if enable_background_music and music_path and music_path.exists():
                     if progress_callback:
-                        progress_callback(len(sentences) * 2 - 1, len(sentences) * 2, "Adding background music...")
+                        progress_callback(len(sentences) * 2 - 1, len(sentences) * 2, f"Adding background music: {music_path.name}...")
+                    print(f"🔊 [Mixing] Overlaying background music: {music_path.name}")
                     audio_extract = self.config.TEMP_DIR / f"extracted_{uuid.uuid4().hex[:8]}.wav"
                     subprocess.run(['ffmpeg', '-y', '-i', str(video_temp_path), '-vn', '-acodec', 'pcm_s16le', str(audio_extract)],
                                  check=True, capture_output=True)
@@ -1528,6 +1596,14 @@ def setup_ui(generator: TextToVideoGenerator):
                                 choices=generator.available_music,
                                 value="Random"
                             )
+                        
+                        with gr.Accordion("🔎 Search YouTube Free Audio Library", open=False):
+                            with gr.Row():
+                                yt_audio_query = gr.Textbox(label="Search Tracks", placeholder="e.g. 'Epic', 'Chill'...")
+                                yt_audio_search_btn = gr.Button("🔍 Search")
+                            yt_audio_results = gr.Dropdown(label="Library Results", choices=[], info="Search for tracks and select one to use.")
+                            yt_audio_download_info = gr.Markdown("*Search and select a track to download it to your local 'background_music' folder.*")
+
                         music_volume = gr.Slider(-40, -5, -22, 1, label="Music Volume (dB)")
 
                     with gr.TabItem("⭕ Overlays"):
@@ -1708,6 +1784,46 @@ def setup_ui(generator: TextToVideoGenerator):
             fn=generator.preview_voice,
             inputs=[speaker_dropdown, language_dropdown, stress_level],
             outputs=[preview_audio]
+        )
+
+        # State to store search results for unpacking
+        yt_search_results_state = gr.State([])
+
+        def yt_audio_search_action(query):
+            if not query:
+                return gr.update(choices=[]), []
+            results = generator.search_audio_library(query)
+            # results is a list of (label, value) tuples
+            return gr.update(choices=results, value=None), results
+
+        yt_audio_search_btn.click(
+            fn=yt_audio_search_action,
+            inputs=[yt_audio_query],
+            outputs=[yt_audio_results, yt_search_results_state]
+        )
+
+        def yt_audio_download_action(track_id, all_results):
+            if not track_id or not all_results:
+                return gr.update(), gr.update()
+            
+            # Find the track name from the results list in state
+            track_name = "Library Track"
+            for label, val in all_results:
+                if val == track_id:
+                    track_name = label
+                    break
+            
+            local_name = generator.download_library_track(track_id, track_name)
+            if local_name:
+                # Update main music dropdown choices and select the new track
+                new_choices = generator.available_music
+                return gr.update(choices=new_choices, value=local_name), f"✅ Downloaded: {local_name}"
+            return gr.update(), "❌ Download failed."
+
+        yt_audio_results.change(
+            fn=yt_audio_download_action,
+            inputs=[yt_audio_results, yt_search_results_state],
+            outputs=[music_dropdown, yt_audio_download_info]
         )
         
         generate_button.click(

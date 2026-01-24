@@ -1,9 +1,6 @@
-#!/usr/bin/env python3
-"""
-Script to pre-download the XTTS model during Docker build
-"""
 import os
 import sys
+import time
 from TTS.api import TTS
 import torch
 import traceback
@@ -27,6 +24,21 @@ import torchaudio
 if not hasattr(torchaudio, "list_audio_backends"):
     torchaudio.list_audio_backends = lambda: []
 
+def download_with_retry(func, name, max_retries=5):
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"\n▶ Attempting to download {name} (Attempt {attempt})...")
+            func()
+            print(f"✔ {name} downloaded successfully")
+            return
+        except Exception as e:
+            print(f"⚠️  Attempt {attempt} failed for {name}: {e}")
+            if attempt < max_retries:
+                wait_time = attempt * 10
+                print(f"🔄 Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise e
 
 def main():
     print("Pre-downloading XTTS model...")
@@ -35,40 +47,37 @@ def main():
         # Set environment variable for license agreement
         os.environ['COQUI_TOS_AGREED'] = '1'
         
-        # Initialize TTS with the same model used in your app
-        # This will download the model files if they don't exist
-        print("Downloading XTTS v2 model...")
-        tts = TTS('tts_models/multilingual/multi-dataset/xtts_v2')
-        print("XTTS model downloaded successfully!")
-        
-        # Clear some memory
-        del tts
+        def download_xtts():
+            tts = TTS('tts_models/multilingual/multi-dataset/xtts_v2')
+            del tts
+
+        download_with_retry(download_xtts, "XTTS v2")
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             
     except Exception as e:
         print(f"FAILED to download XTTS model!")
         traceback.print_exc()
-        sys.exit(1) # CRITICAL: Build must fail if model is not present
+        sys.exit(1)
 
-    print("Pre-downloading SpeechBrain models...")
+    print("\nPre-downloading SpeechBrain models...")
     try:
         from speechbrain.pretrained import HIFIGAN, Tacotron2
-        
-        # Use persistent cache directory for SpeechBrain
         sb_cache = os.environ.get('SPEECHBRAIN_CACHE', '/opt/speechbrain_models')
         
-        # Tacotron2
-        Tacotron2.from_hparams(
-            source="speechbrain/tts-tacotron2-ljspeech", 
-            savedir=f"{sb_cache}/tts-tacotron2-ljspeech"
-        )
-        # HIFIGAN
-        HIFIGAN.from_hparams(
-            source="speechbrain/tts-hifigan-ljspeech", 
-            savedir=f"{sb_cache}/tts-hifigan-ljspeech"
-        )
-        print("SpeechBrain models downloaded successfully!")
+        def download_sb():
+            Tacotron2.from_hparams(
+                source="speechbrain/tts-tacotron2-ljspeech", 
+                savedir=f"{sb_cache}/tts-tacotron2-ljspeech"
+            )
+            HIFIGAN.from_hparams(
+                source="speechbrain/tts-hifigan-ljspeech", 
+                savedir=f"{sb_cache}/tts-hifigan-ljspeech"
+            )
+
+        download_with_retry(download_sb, "SpeechBrain models")
+
     except Exception as e:
         print(f"Error downloading SpeechBrain models: {e}")
         sys.exit(1)
