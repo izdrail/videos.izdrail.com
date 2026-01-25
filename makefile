@@ -50,3 +50,6 @@ shell:
 
 publish:
 	docker push $(IMAGE_PROD)
+
+test-brain:
+	docker-compose exec videos.izdrail.com bash -c "PYTHONPATH=/app /opt/venv/bin/python3 tests/test_brain_simulator_v2.py"

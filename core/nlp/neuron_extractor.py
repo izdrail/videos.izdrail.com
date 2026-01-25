@@ -69,7 +69,9 @@ class NeuronExtractor:
         # Calculate final decision scores (SNN or static)
         for res in results:
             if use_snn and self.brain_simulator:
-                res['decision_score'] = self.brain_simulator.evaluate_keyword_snn(text, res.get('keyword', ''), res)
+                score, details = self.brain_simulator.evaluate_keyword_snn(text, res.get('keyword', ''), res)
+                res['decision_score'] = score
+                res['snn_details'] = details
             else:
                 res['decision_score'] = self._calculate_decision_score(res)
                 
@@ -100,7 +102,9 @@ class NeuronExtractor:
         # Calculate final decision scores
         for res in results:
             if use_snn and self.brain_simulator:
-                res['decision_score'] = self.brain_simulator.evaluate_keyword_snn(text, res.get('media', {}).get('title', ''), res)
+                score, details = self.brain_simulator.evaluate_keyword_snn(text, res.get('media', {}).get('title', ''), res)
+                res['decision_score'] = score
+                res['snn_details'] = details
             else:
                 res['decision_score'] = self._calculate_decision_score(res)
                 
