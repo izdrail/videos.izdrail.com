@@ -35,7 +35,7 @@ While dealing with infringement claims, ByteDance also holds patents, including 
             text=text,
             language='en',
             speaker_id="american-man", # Or another available voice
-            preferred_media_source="Random",
+            preferred_media_source="YouTube",
             enable_background_music=True,
             music_selection="Random",
             add_intro_slide=True,

@@ -60,11 +60,6 @@ class TTSManager:
     def _load_kokoro(self, lang_code: str = 'a'):
         global KOKORO_AVAILABLE
         try:
-            # Defensively set offline environment variables
-            import os
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"
-            
             from kokoro import KPipeline
             # lang_code ensures we load the correct phonemizer/vocabulary
             try:
@@ -111,11 +106,6 @@ class TTSManager:
     def _load_mms(self, repo_id: str = "facebook/mms-tts-ron"):
         global MMS_AVAILABLE
         try:
-            # Defensively set offline environment variables
-            import os
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"
-            
             from transformers import VitsModel, AutoTokenizer
             import torch
             
@@ -343,7 +333,6 @@ class TTSManager:
         import scipy.io.wavfile as wavfile
         import numpy as np
         
-        # Voice mapping: translates descriptive names to Kokoro IDs
         # Voice mapping: translates descriptive names to Kokoro IDs
         # Standard Kokoro v1.0 voices
         VOICE_MAPPING = {

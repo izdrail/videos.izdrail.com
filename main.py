@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import random
 import shutil
 import traceback
@@ -7,6 +8,7 @@ import platform
 import subprocess
 import uuid
 import abc
+import argparse
 import yt_dlp
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
@@ -99,6 +101,10 @@ def create_gradient_image(size: Tuple[int, int], colors: Tuple[str, str], direct
 class FFmpegVideoGenerator:
     def __init__(self, config: Config, keyword_extractor: Optional[KeywordExtractor] = None):
         self.config = config
+        self.video_width = config.VIDEO_WIDTH
+        self.video_height = config.VIDEO_HEIGHT
+        self.video_preset = config.VIDEO_PRESET
+        self.video_crf = config.VIDEO_CRF
         self.font_path = self._discover_fonts()
         self.media_manager = MediaManager(self.config)
         self.keyword_extractor = keyword_extractor or KeywordExtractor()
@@ -228,12 +234,11 @@ class FFmpegVideoGenerator:
                 videos.extend(self.config.CIRCLE_OVERLAYS_DIR.glob(ext))
         return random.choice(videos) if videos else None
 
-    def _create_text_overlay_png(self, text: str, output_path: Path) -> Path:
-        # Clean text for display
+    def _create_text_overlay_png(self, text: str, output_path: Path, vw: Optional[int] = None, vh: Optional[int] = None) -> Path:
         text = self._clean_text(text)
-        
-        # 1. Setup dimensions and fonts
-        img_size = self.config.VIDEO_SIZE
+        vw = vw or self.video_width
+        vh = vh or self.video_height
+        img_size = (vw, vh)
         base_font_size = self.config.TEXT_SIZE_CONFIG['font_size']
         if len(text) > 60:
             font_size = max(30, int(base_font_size * (1.0 - (len(text) - 60) / 200)))
@@ -267,8 +272,8 @@ class FFmpegVideoGenerator:
         # 5. Composite text onto final frame
         final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
         shadow_draw = ImageDraw.Draw(final_frame)
-        x = (self.config.VIDEO_WIDTH - text_width) // 2
-        y = self.config.VIDEO_HEIGHT - text_height - self.config.TEXT_SIZE_CONFIG['bottom_margin']
+        x = (vw - text_width) // 2
+        y = vh - text_height - self.config.TEXT_SIZE_CONFIG['bottom_margin']
         
         stroke_width = 3
         for adj_x in range(-stroke_width, stroke_width + 1):
@@ -284,8 +289,10 @@ class FFmpegVideoGenerator:
         final_frame.save(str(output_path), "PNG")
         return output_path
 
-    def _create_intro_text_png(self, output_path: Path, language: str = 'en') -> Path:
-        img_size = self.config.VIDEO_SIZE
+    def _create_intro_text_png(self, output_path: Path, language: str = 'en', vw: Optional[int] = None, vh: Optional[int] = None) -> Path:
+        vw = vw or self.video_width
+        vh = vh or self.video_height
+        img_size = (vw, vh)
         final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(final_frame)
         
@@ -315,8 +322,8 @@ class FFmpegVideoGenerator:
         grad_img = create_gradient_image(mask_size, LARAVEL_ACCENT_GRADIENT, "to_right")
         
         # Position
-        x = (self.config.VIDEO_WIDTH - text_width) // 2
-        y = (self.config.VIDEO_HEIGHT - text_height) // 2 - 150
+        x = (vw - text_width) // 2
+        y = (vh - text_height) // 2 - 150
         
         # Draw shadow
         for adj in range(-4, 5):
@@ -334,7 +341,7 @@ class FFmpegVideoGenerator:
             sec_text = " ".join(lines[2:]).upper()
             bbox2 = temp_draw.textbbox((0, 0), sec_text, font=font_small)
             text_width2 = bbox2[2] - bbox2[0]
-            x2 = (self.config.VIDEO_WIDTH - text_width2) // 2
+            x2 = (vw - text_width2) // 2
             y2 = y + text_height + 100
             for adj in range(-2, 3):
                 if adj != 0:
@@ -353,8 +360,10 @@ class FFmpegVideoGenerator:
         final_frame.save(str(output_path), "PNG")
         return output_path
 
-    def _create_cta_text_png(self, output_path: Path, language: str = 'en') -> Path:
-        img_size = self.config.VIDEO_SIZE
+    def _create_cta_text_png(self, output_path: Path, language: str = 'en', vw: Optional[int] = None, vh: Optional[int] = None) -> Path:
+        vw = vw or self.video_width
+        vh = vh or self.video_height
+        img_size = (vw, vh)
         final_frame = Image.new('RGBA', img_size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(final_frame)
         
@@ -386,8 +395,8 @@ class FFmpegVideoGenerator:
         grad_img = create_gradient_image(mask_size, LARAVEL_ACCENT_GRADIENT, "to_right")
         
         # Position
-        x = (self.config.VIDEO_WIDTH - text_width) // 2
-        y = (self.config.VIDEO_HEIGHT - text_height) // 2
+        x = (vw - text_width) // 2
+        y = (vh - text_height) // 2
         
         # Draw shadow
         for adj in range(-4, 5):
@@ -473,14 +482,21 @@ class FFmpegVideoGenerator:
         image.save(str(mask_path))
         return mask_path
 
+    # Intro video path - permanent asset that should never be deleted
+    INTRO_VIDEO_PATH = Path(__file__).resolve().parent / "intro" / "intro-tv-noise.mp4"
+
     def _create_slide_with_ffmpeg(self, sentence: str, audio_path: Path, video_path: Optional[Path],
                                   output_path: Path, slide_num: int, is_intro: bool = False,
                                   is_cta: bool = False, circle_video: Optional[Path] = None,
                                   circle_config: Optional[Dict] = None, language: str = 'en',
                                   hide_text: bool = False,
                                   export_fps: int = 30,
-                                  overlay_shape: str = "Circle") -> Optional[Path]:
+                                  overlay_shape: str = "Circle",
+                                  video_width: Optional[int] = None,
+                                  video_height: Optional[int] = None) -> Optional[Path]:
         try:
+            vw = video_width or self.video_width
+            vh = video_height or self.video_height
             if audio_path is None:
                 print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None. Check TTS logs for generation failures.")
                 return None
@@ -488,6 +504,14 @@ class FFmpegVideoGenerator:
             if not Path(audio_path).exists():
                 print(f"❌ [FFmpeg] Slide {slide_num} error: audio_path does not exist: {audio_path}")
                 return None
+            
+            # Force intro video for intro slides
+            if is_intro:
+                if self.INTRO_VIDEO_PATH.exists():
+                    video_path = self.INTRO_VIDEO_PATH
+                    print(f"🎬 [Intro] Using fixed background: {self.INTRO_VIDEO_PATH}")
+                else:
+                    print(f"⚠️ [Intro] Fixed background not found: {self.INTRO_VIDEO_PATH}. Falling back to default.")
             
             source_info = f"Video: {video_path.name}" if video_path else "Background: Image/Color"
             # Get audio duration
@@ -515,16 +539,16 @@ class FFmpegVideoGenerator:
                 # Top part: Background video or gradient fallback
                 if video_path and video_path.exists():
                     inputs.extend(['-stream_loop', '-1', '-i', str(video_path)]) # Input 0
-                    filter_parts.append(f"[0:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1[top]")
+                    filter_parts.append(f"[0:v]scale={vw}:{vh//2}:force_original_aspect_ratio=increase,crop={vw}:{vh//2},setsar=1[top]")
                 else:
                     grad_path = self.config.TEMP_DIR / f"grad_top_{slide_num}_{uuid.uuid4().hex[:8]}.png"
-                    create_gradient_image((1080, 960), LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
+                    create_gradient_image((vw, vh // 2), LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
                     inputs.extend(['-loop', '1', '-i', str(grad_path)]) # Input 0
-                    filter_parts.append(f"[0:v]scale=1080:960,setsar=1[top]")
+                    filter_parts.append(f"[0:v]scale={vw}:{vh // 2},setsar=1[top]")
                 
                 # Bottom part: Video Overlay
                 inputs.extend(['-stream_loop', '-1', '-i', str(circle_video)]) # Input 1
-                filter_parts.append(f"[1:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1[bottom]")
+                filter_parts.append(f"[1:v]scale={vw}:{vh//2}:force_original_aspect_ratio=increase,crop={vw}:{vh//2},setsar=1[bottom]")
                 
                 # Combine
                 filter_parts.append(
@@ -534,7 +558,6 @@ class FFmpegVideoGenerator:
                     f"setpts=PTS-STARTPTS[bg_scaled]"
                 )
                 input_count = 2
-                input_count = 2
             elif video_path and video_path.exists():
                 is_image = video_path.suffix.lower() in ['.jpg', '.jpeg', '.png']
                 if is_image:
@@ -543,8 +566,8 @@ class FFmpegVideoGenerator:
                     inputs.extend(['-stream_loop', '-1', '-i', str(video_path)])
                 
                 filter_parts.append(
-                    f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
-                    f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+                    f"[0:v]scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
+                    f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,"
                     f"setsar=1,"
                     f"fps={export_fps},"
                     f"trim=duration={duration},"
@@ -558,8 +581,8 @@ class FFmpegVideoGenerator:
                     print(f"🔁 [FFmpeg] Slide {slide_num}: Using circle overlay video as full background")
                     inputs.extend(['-stream_loop', '-1', '-i', str(circle_bg)])
                     filter_parts.append(
-                        f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
-                        f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+                        f"[0:v]scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
+                        f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,"
                         f"setsar=1,"
                         f"fps={export_fps},"
                         f"trim=duration={duration},"
@@ -569,7 +592,7 @@ class FFmpegVideoGenerator:
                 else:
                     print(f"🎨 [FFmpeg] Slide {slide_num}: Using branded gradient background (fallback)")
                     grad_path = self.config.TEMP_DIR / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
-                    create_gradient_image(self.config.VIDEO_SIZE, LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
+                    create_gradient_image((vw, vh), LARAVEL_BG_GRADIENT, "135deg").save(str(grad_path))
                     inputs.extend(['-loop', '1', '-i', str(grad_path)])
                     filter_parts.append(f"[0:v]fps={export_fps},trim=duration={duration}[bg_scaled]")
                     input_count = 1
@@ -650,8 +673,8 @@ class FFmpegVideoGenerator:
                 '-map', f'[{logo_label}]',
                 '-map', f'{audio_idx}:a',
                 '-c:v', 'libx264',
-                '-preset', self.config.VIDEO_PRESET,
-                '-crf', str(self.config.VIDEO_CRF),
+                '-preset', self.video_preset,
+                '-crf', str(self.video_crf),
                 '-pix_fmt', 'yuv420p',
                 '-c:a', 'aac',
                 '-b:a', '192k',
@@ -698,7 +721,13 @@ class FFmpegVideoGenerator:
                           overlay_shape: str = "Circle",
                           intro_text: Optional[str] = None,
                           use_snn: bool = False,
+                          enable_crossfade: bool = False,
+                          crossfade_duration: float = 0.3,
                           progress_callback=None) -> Path:
+
+        # Apply aspect ratio and quality from instance vars (set before calling)
+        vw = self.video_width
+        vh = self.video_height
         
         # Setup temp directory
         temp_dir = self.config.TEMP_DIR / f"final_{uuid.uuid4().hex[:8]}"
@@ -784,7 +813,11 @@ class FFmpegVideoGenerator:
                 # Skip if already assigned
                 if slide['slide_num'] in slide_videos:
                     continue
-                    
+                
+                # Skip intro and CTA slides - they use fixed backgrounds
+                if slide.get('is_intro') or slide.get('is_cta'):
+                    continue
+                
                 future = fetch_executor.submit(
                     self.get_background_video,
                     slide['keyword'],
@@ -846,7 +879,9 @@ class FFmpegVideoGenerator:
                     language,
                     hide_text,
                     export_fps,
-                    overlay_shape
+                    overlay_shape,
+                    vw,
+                    vh
                 )
                 future_to_slide_idx[future] = idx_in_list
                 
@@ -875,33 +910,81 @@ class FFmpegVideoGenerator:
         if not slide_paths:
             raise ValueError("No slides created")
 
-        # --- Stage 4: Concatenation ---
+        # --- Stage 4: Concatenation (with optional crossfade) ---
         if progress_callback:
             progress_callback(total_slides * 2, total_slides * 2, "Concatenating final video...")
 
-        concat_file = self.config.TEMP_DIR / f"concat_{uuid.uuid4().hex[:8]}.txt"
-        with open(concat_file, 'w') as f:
-            for slide_path in slide_paths:
-                f.write(f"file '{slide_path.absolute()}'\n")
-
         output_path = self.config.TEMP_DIR / f"final_{uuid.uuid4().hex[:8]}.mp4"
-        concat_cmd = [
-            'ffmpeg', '-y',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', str(concat_file),
-            '-c', 'copy',
-            str(output_path)
-        ]
-        print("[FFmpeg] Concatenating slides...")
-        try:
-            subprocess.run(concat_cmd, check=True, capture_output=True)
-            print(f"✅ [Pipeline] Final video created: {output_path}")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ [FFmpeg] Cleanup failed: {e}")
-            pass
-            
-        concat_file.unlink(missing_ok=True)
+
+        if enable_crossfade and len(slide_paths) > 1:
+            print(f"[FFmpeg] Concatenating {len(slide_paths)} slides with crossfade ({crossfade_duration}s)...")
+            inputs = []
+            filter_parts = []
+            prev_label = None
+            for i, sp in enumerate(slide_paths):
+                inputs.extend(['-i', str(sp)])
+                label = f"s{i}"
+                filter_parts.append(f"[{i}:v]settb=1/AVTB,setpts=PTS-STARTPTS[{label}_v]")
+                filter_parts.append(f"[{i}:a]aresample=async=1[{label}_a]")
+                if i == 0:
+                    prev_label = label
+                else:
+                    dur = get_video_duration(slide_paths[i - 1])
+                    offset = dur - crossfade_duration
+                    filter_parts.append(
+                        f"[{prev_label}_v][{label}_v]xfade=transition=fade:duration={crossfade_duration}:offset={offset}[v{i}]"
+                    )
+                    filter_parts.append(
+                        f"[{prev_label}_a][{label}_a]acrossfade=d={crossfade_duration}[a{i}]"
+                    )
+                    prev_label = f"v{i}"
+
+            last_suffix = len(slide_paths) - 1
+            filter_complex = ";".join(filter_parts)
+            cmd = [
+                'ffmpeg', '-y',
+                *inputs,
+                '-filter_complex', filter_complex,
+                '-map', f'[v{last_suffix}]',
+                '-map', f'[a{last_suffix}]',
+                '-c:v', 'libx264',
+                '-preset', self.video_preset,
+                '-crf', str(self.video_crf),
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-r', str(export_fps),
+                '-movflags', '+faststart',
+                str(output_path)
+            ]
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+                print(f"✅ [Pipeline] Final video created (with crossfade): {output_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"❌ [FFmpeg] Crossfade failed: {e.stderr[:500]}. Falling back to simple concat.")
+                enable_crossfade = False
+        if not enable_crossfade:
+            concat_file = self.config.TEMP_DIR / f"concat_{uuid.uuid4().hex[:8]}.txt"
+            with open(concat_file, 'w') as f:
+                for slide_path in slide_paths:
+                    f.write(f"file '{slide_path.absolute()}'\n")
+
+            concat_cmd = [
+                'ffmpeg', '-y',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', str(concat_file),
+                '-c', 'copy',
+                str(output_path)
+            ]
+            print("[FFmpeg] Concatenating slides...")
+            try:
+                subprocess.run(concat_cmd, check=True, capture_output=True)
+                print(f"✅ [Pipeline] Final video created: {output_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"❌ [FFmpeg] Concat failed: {e}")
+                pass
+            concat_file.unlink(missing_ok=True)
         
         # Cleanup rendered slides
         for slide_path in slide_paths:
@@ -1036,7 +1119,7 @@ class TextToVideoGenerator:
                           language: str = 'en',
                           pexels_keyword: Optional[str] = None,
                           preferred_media_source: Optional[str] = None,
-                          selected_background_video_name: Optional[str] = None,  # New parameter
+                          selected_background_video_name: Optional[str] = None,
                           enable_background_music: bool = True,
                           music_selection: str = "Random",
                           music_volume_db: int = -15,
@@ -1057,6 +1140,10 @@ class TextToVideoGenerator:
                            stress_level: float = 1.0,
                            use_snn: bool = False,
                            audio_only: bool = False,
+                           normalize_audio: bool = True,
+                           aspect_ratio: str = "9:16 Portrait (TikTok/Shorts)",
+                           quality: str = "Medium (Balanced)",
+                           enable_crossfade: bool = False,
                            progress_callback=None) -> Dict:
         # Language Detection
         if language == 'auto':
@@ -1091,7 +1178,11 @@ class TextToVideoGenerator:
             'ai_api_url': ai_api_url,
             'stress_level': stress_level,
             'use_snn': use_snn,
-            'audio_only': audio_only
+            'audio_only': audio_only,
+            'normalize_audio': normalize_audio,
+            'aspect_ratio': aspect_ratio,
+            'quality': quality,
+            'enable_crossfade': enable_crossfade
         }
 
         # Update API URL if changed
@@ -1366,6 +1457,9 @@ class TextToVideoGenerator:
                     final_audio_segments = final_audio_segments.overlay(bg_music)
                 
                 audio_final = session_dir / f"audio_only_{timestamp}_{language}.mp3"
+                if normalize_audio:
+                    from pydub.effects import normalize
+                    final_audio_segments = normalize(final_audio_segments, headroom=0.1)
                 final_audio_segments.export(str(audio_final), format="mp3", bitrate="192k")
                 
                 video_final = None
@@ -1394,6 +1488,16 @@ class TextToVideoGenerator:
                     else:
                         circle_video_path = self.video_generator.get_circle_overlay_video()
 
+                # Apply aspect ratio and quality to generator
+                ar_config = self.config.get_aspect_ratio(aspect_ratio)
+                q_config = self.config.get_quality(quality)
+                self.video_generator.video_width = ar_config["width"]
+                self.video_generator.video_height = ar_config["height"]
+                self.video_generator.video_preset = q_config["preset"]
+                self.video_generator.video_crf = q_config["crf"]
+                effective_fps = export_fps or q_config["fps"]
+                print(f"📐 [Pipeline] Aspect: {ar_config['label']} ({ar_config['width']}x{ar_config['height']}), Quality: {q_config['label']} ({q_config['preset']}, CRF {q_config['crf']}, {effective_fps}fps)")
+
                 # Final Video Generation
                 video_temp_path = self.video_generator.create_final_video(
                     sentences=sentences,
@@ -1409,10 +1513,12 @@ class TextToVideoGenerator:
                     preferred_media_source=preferred_media_source,
                     selected_background_video=selected_bg_video_path,
                     hide_text=hide_text,
-                    export_fps=export_fps,
+                    export_fps=effective_fps,
                     overlay_shape=overlay_shape,
                     intro_text=intro_msg if add_intro_slide else None,
                     use_snn=use_snn,
+                    enable_crossfade=enable_crossfade,
+                    crossfade_duration=0.3,
                     progress_callback=video_progress
                 )
 
@@ -1431,6 +1537,9 @@ class TextToVideoGenerator:
                     music = music[:len(voice_seg)]
                     music = music.fade_in(1000).fade_out(1000)
                     mixed = voice_seg.overlay(music)
+                    if normalize_audio:
+                        from pydub.effects import normalize
+                        mixed = normalize(mixed, headroom=0.1)
                     mixed_audio = self.config.TEMP_DIR / f"mixed_{uuid.uuid4().hex[:8]}.wav"
                     mixed.export(str(mixed_audio), format="wav")
                     video_with_music = self.config.TEMP_DIR / f"with_music_{uuid.uuid4().hex[:8]}.mp4"
@@ -1574,9 +1683,9 @@ def setup_ui(generator: TextToVideoGenerator):
                     with gr.TabItem("🎥 Media"):
                         media_source_dropdown = gr.Dropdown(
                             label="🎞️ Preferred Media Source",
-                            choices=["Random", "Pexels", "Pixabay", "YouTube", "Giphy", "Dailymotion", "Vimeo", "Twitch", "PeerTube", "api.video", "Cloudflare Stream", "Mux", "Kaltura", "JSON2Video"],
-                            value="Random",
-                            info="Select your primary source for background videos (Random shuffles available APIs)"
+                            choices=["Random", "Pexels", "Pixabay", "YouTube", "Giphy", "SearXNG", "Dailymotion", "Vimeo", "Twitch", "PeerTube", "api.video", "Cloudflare Stream", "Mux", "Kaltura", "JSON2Video"],
+                             value="YouTube",
+                             info="Select your primary source for background videos (Random shuffles available APIs)"
                         )
                         pexels_keyword = gr.Textbox(
                             label="🔍 Custom Search Keyword",
@@ -1634,6 +1743,19 @@ def setup_ui(generator: TextToVideoGenerator):
                             )
 
                     with gr.TabItem("⚙️ Advanced"):
+                        with gr.Row():
+                            aspect_ratio_dropdown = gr.Dropdown(
+                                label="📐 Aspect Ratio",
+                                choices=list(generator.config.ASPECT_RATIOS.keys()),
+                                value="9:16 Portrait (TikTok/Shorts)",
+                                info="Output video dimensions"
+                            )
+                            quality_dropdown = gr.Dropdown(
+                                label="🎯 Quality",
+                                choices=list(generator.config.QUALITY_PRESETS.keys()),
+                                value="Medium (Balanced)",
+                                info="Encoding quality vs speed tradeoff"
+                            )
                         preset_dropdown = gr.Dropdown(
                             label="📋 Quick Presets",
                             choices=["Default", "TikTok Viral", "YouTube Shorts High-Energy", "Instagram Reels Aesthetic"],
@@ -1643,22 +1765,31 @@ def setup_ui(generator: TextToVideoGenerator):
                         with gr.Row():
                             enable_intro = gr.Checkbox(label="📢 Add Intro Slide", value=True)
                             enable_cta = gr.Checkbox(label="📣 Add CTA Outro", value=True)
+                            enable_crossfade_checkbox = gr.Checkbox(label="✨ Crossfade Slides", value=False)
                         hide_text = gr.Checkbox(label="🛑 Hide Text Overlay", value=False)
-                        export_fps = gr.Slider(10, 60, 30, 1, label="🎞️ Export FPS", info="Target frame rate for the final video (default: 30)")
+                        export_fps = gr.Slider(10, 60, 30, 1, label="🎞️ Export FPS", info="0 = auto based on quality preset (default: 30)")
                         stress_level = gr.Slider(0.8, 1.5, 1.0, 0.1, label="🗣️ Voice Speed / Stress", info="1.0 is normal, higher is faster/more energetic")
                         use_snn_checkbox = gr.Checkbox(label="🧠 Use SNN Biological Evaluation (Slow but Realistic)", value=False)
                         audio_only_checkbox = gr.Checkbox(label="🔊 Only generate audio (skip video rendering)", value=False)
-
+                        normalize_audio_checkbox = gr.Checkbox(label="🔊 Normalize Audio (LUFS)", value=True)
+                        with gr.Row():
+                            clear_cache_btn = gr.Button("🗑️ Clear Cache", variant="secondary", size="sm")
+                            cache_status = gr.Textbox(label="Cache", value="", interactive=False, visible=False)
 
                 generate_button = gr.Button("🚀 Generate Video", variant="primary", size="lg")
                 engine_status_output = gr.Textbox(label="TTS Engine Status", value="Idle", interactive=False)
                 progress_bar = gr.Textbox(label="⚡ Status", value="Ready", interactive=False)
 
             with gr.Column(scale=1):
-                video_output = gr.Video(label="Generated Video", height=600)
-                thumbnail_output = gr.Image(label="Last Frame Thumbnail", type="filepath")
-                audio_output = gr.Audio(label="Extracted Voiceover")
-                social_output = gr.Textbox(label="📢 Social Media Descriptions", lines=15)
+                with gr.Tabs():
+                    with gr.TabItem("🎬 Video"):
+                        video_output = gr.Video(label="Generated Video", height=600)
+                    with gr.TabItem("🖼️ Thumbnail"):
+                        thumbnail_output = gr.Image(label="Last Frame Thumbnail", type="filepath")
+                    with gr.TabItem("🎵 Audio"):
+                        audio_output = gr.Audio(label="Extracted Voiceover")
+                    with gr.TabItem("📢 Social"):
+                        social_output = gr.Textbox(label="Social Media Descriptions", lines=15)
                 char_count_display = gr.Markdown(value="**Characters:** 0 | **TikTok:** ✅ | **Shorts:** ✅")
                 status_output = gr.Markdown(value="*Your video will appear here after generation.*")
 
@@ -1667,7 +1798,8 @@ def setup_ui(generator: TextToVideoGenerator):
                             selected_background_video_name,
                             enable_music, music_select, music_vol,
                             enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val,
-                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, audio_only_val, progress=gr.Progress()):
+                            enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, audio_only_val, normalize_audio_val,
+                            aspect_ratio_val, quality_val, enable_crossfade_val, progress=gr.Progress()):
             
             if not text or not text.strip():
                 return None, None, None, None, "Idle", "❌ **Error:** Please enter some text.", "Ready"
@@ -1716,6 +1848,10 @@ def setup_ui(generator: TextToVideoGenerator):
                 stress_level=stress_level_val,
                 use_snn=use_snn_val,
                 audio_only=audio_only_val,
+                normalize_audio=normalize_audio_val,
+                aspect_ratio=aspect_ratio_val,
+                quality=quality_val,
+                enable_crossfade=enable_crossfade_val,
                 progress_callback=update_progress
             )
 
@@ -1833,9 +1969,32 @@ def setup_ui(generator: TextToVideoGenerator):
                 media_source_dropdown, pexels_keyword, background_video_dropdown,
                 enable_music, music_dropdown, music_volume,
                 enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape,
-                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level, use_snn_checkbox, audio_only_checkbox
+                enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level, use_snn_checkbox, audio_only_checkbox, normalize_audio_checkbox,
+                aspect_ratio_dropdown, quality_dropdown, enable_crossfade_checkbox
             ],
             outputs=[video_output, thumbnail_output, audio_output, social_output, engine_status_output, status_output, progress_bar]
+        )
+
+        def clear_cache_action():
+            from core.database import DB
+            try:
+                import sqlite3
+                with sqlite3.connect(str(DB.db_path)) as conn:
+                    conn.execute("DELETE FROM tts_cache")
+                    conn.execute("DELETE FROM video_logs")
+                    conn.commit()
+                return "✅ Cache cleared"
+            except Exception as e:
+                return f"❌ Failed: {e}"
+
+        clear_cache_btn.click(
+            fn=clear_cache_action,
+            inputs=[],
+            outputs=[cache_status]
+        ).then(
+            fn=lambda: gr.update(visible=True),
+            inputs=[],
+            outputs=[cache_status]
         )
 
         def update_char_counts(text):
@@ -1845,6 +2004,12 @@ def setup_ui(generator: TextToVideoGenerator):
             shorts_limit = 5000
             reels_limit = 2200
             return f"**Characters:** {count} | **TikTok:** {'✅' if count <= tiktok_limit else '❌'} | **Shorts:** {'✅' if count <= shorts_limit else '❌'} | **Reels:** {'✅' if count <= reels_limit else '❌'}"
+
+        text_input.change(
+            fn=update_char_counts,
+            inputs=[text_input],
+            outputs=[char_count_display]
+        )
 
         social_output.change(
             fn=update_char_counts,
@@ -1868,8 +2033,65 @@ def setup_ui(generator: TextToVideoGenerator):
         )
     return demo
 
+# =============== CLI MODE ===============
+def run_cli(args: argparse.Namespace):
+    """Run video generation from command line without Gradio UI."""
+    generator = TextToVideoGenerator()
+    text = args.text
+    if not text and args.file:
+        text = Path(args.file).read_text(encoding="utf-8")
+    if not text:
+        print("❌ No text provided. Use --text or --file")
+        return
+    print(f"🚀 CLI Generation: {len(text)} chars, language={args.language}")
+    result = generator.generate_video(
+        text=text,
+        language=args.language,
+        speaker_id=args.voice,
+        preferred_media_source=args.media_source or "YouTube",
+        enable_background_music=not args.no_music,
+        music_selection=args.music or "Random",
+        add_intro_slide=not args.no_intro,
+        add_call_to_action=not args.no_cta,
+        hide_text=args.hide_text,
+        aspect_ratio=args.aspect_ratio,
+        quality=args.quality,
+        enable_crossfade=args.crossfade,
+        progress_callback=lambda c, t, m: print(f"[{c}/{t}] {m}")
+    )
+    if result.get("success"):
+        print(f"\n✅ Video: {result['video_path']}")
+        print(f"🎵 Audio: {result['audio_path']}")
+    else:
+        print(f"\n❌ Error: {result.get('error', 'Unknown')}")
+        sys.exit(1)
+
+
 # =============== MAIN ===============
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Multi-Language Video Generator")
+    parser.add_argument("--cli", action="store_true", help="Run in CLI mode (no Gradio UI)")
+    parser.add_argument("--text", type=str, default=None, help="Text to convert to video")
+    parser.add_argument("--file", type=str, default=None, help="Read text from file")
+    parser.add_argument("--language", type=str, default="en", help="Language code")
+    parser.add_argument("--voice", type=str, default="Standard Voice (Non-Cloned)", help="Voice ID")
+    parser.add_argument("--media-source", type=str, default=None, help="Preferred media source")
+    parser.add_argument("--music", type=str, default=None, help="Music track name")
+    parser.add_argument("--no-music", action="store_true", help="Disable background music")
+    parser.add_argument("--no-intro", action="store_true", help="Skip intro slide")
+    parser.add_argument("--no-cta", action="store_true", help="Skip CTA slide")
+    parser.add_argument("--hide-text", action="store_true", help="Hide text overlay")
+    parser.add_argument("--aspect-ratio", type=str, default="9:16 Portrait (TikTok/Shorts)", help="Aspect ratio preset")
+    parser.add_argument("--quality", type=str, default="Medium (Balanced)", help="Quality preset")
+    parser.add_argument("--crossfade", action="store_true", help="Enable crossfade transitions")
+    args, _ = parser.parse_known_args()
+
+    if args.cli:
+        run_cli(args)
+        sys.exit(0)
+
     try:
         from dotenv import load_dotenv
     except ImportError:
@@ -1883,9 +2105,23 @@ if __name__ == "__main__":
     print("\n" + "="*80)
     print("🌍 MULTI-LANGUAGE VIDEO GENERATOR")
     print("="*80)
+
+    # Run config validation
+    cfg = Config()
+    cfg_warnings = cfg.validate()
+    if cfg_warnings:
+        print("\n⚠️  CONFIGURATION WARNINGS:")
+        for w in cfg_warnings:
+            print(f"  ⚠️  {w}")
+    else:
+        print("\n✅ Configuration OK")
+
     print("\n✅ FEATURES:")
     print("  ✓ Multi-language TTS (English, Chinese, Spanish, Hindi, Arabic, Romanian)")
-    print("  ✓ Video backgrounds (Pexels, Pixabay, Giphy, Local)")
+    print("  ✓ Video backgrounds (Pexels, Pixabay, Giphy, SearXNG, Local)")
+    print("  ✓ Aspect ratio: 9:16, 16:9, 1:1, 4:5")
+    print("  ✓ Quality presets: Low/Medium/High/Ultra")
+    print("  ✓ Crossfade transitions between slides")
     print("  ✓ Circle overlay videos (PIP style)")
     print("  ✓ FFmpeg native processing (5-10x faster)")
     print("  ✓ SQLite caching (TTS + videos)")
@@ -1909,6 +2145,16 @@ if __name__ == "__main__":
     for code, info in SUPPORTED_LANGUAGES.items():
         print(f"  • {info['name']} ({code})")
 
+    # Show cache stats
+    try:
+        import sqlite3
+        with sqlite3.connect("generation_cache.db") as conn:
+            tts_count = conn.execute("SELECT COUNT(*) FROM tts_cache").fetchone()[0]
+            video_count = conn.execute("SELECT COUNT(*) FROM video_logs").fetchone()[0]
+            print(f"\n📊 CACHE: {tts_count} TTS entries, {video_count} video logs")
+    except Exception:
+        pass
+
     try:
         generator = TextToVideoGenerator()
         print("\n📊 RESOURCES:")
@@ -1927,6 +2173,7 @@ if __name__ == "__main__":
 
         print("\n🚀 STARTING SERVER...")
         print("   Access at: http://localhost:1603")
+        print("   CLI mode: python main.py --cli --text 'Your script here'")
         print("="*80 + "\n")
 
         demo = setup_ui(generator)

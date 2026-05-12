@@ -12,6 +12,7 @@ from .giphy import GiphyAPI
 from .youtube import YouTubeAPI
 from .pixabay import PixabayAPI
 from .unsplash import UnsplashAPI
+from .searxng import SearXNGAPI
 from core.nlp.neuron_extractor import NeuronExtractor
 
 class MediaManager:
@@ -24,10 +25,11 @@ class MediaManager:
             "Pixabay": PixabayAPI(),
             "Giphy": GiphyAPI(),
             "YouTube": YouTubeAPI(),
-            "Unsplash": UnsplashAPI(config.UNSPLASH_ACCESS_KEY if config else None)
+            "Unsplash": UnsplashAPI(config.UNSPLASH_ACCESS_KEY if config else None),
+            "SearXNG": SearXNGAPI(),
         }
         self.neuron_extractor = NeuronExtractor(model=config.AI_MODEL if config else "mistral:7b")
-        self.preferred_order = ["Pexels", "Unsplash", "Pixabay", "Giphy", "YouTube"]
+        self.preferred_order = ["YouTube", "Pexels", "Unsplash", "SearXNG", "Pixabay", "Giphy"]
         self.search_cache = {}
         # Track successful fetches per source for dynamic prioritization
         self.source_success_counts = defaultdict(int)
@@ -129,7 +131,7 @@ class MediaManager:
             try:
                 # Basic validation
                 api = self.apis[source_name]
-                if hasattr(api, 'api_key') and source_name != "YouTube" and not api.api_key:
+                if hasattr(api, 'api_key') and source_name not in ("YouTube", "SearXNG") and not api.api_key:
                     continue
                 
                 # Build output path
@@ -139,28 +141,26 @@ class MediaManager:
                 if self.config:
                     keyword_folder = self.config.VIDEOS_DIR / safe_q
                     keyword_folder.mkdir(parents=True, exist_ok=True)
-                    
-                    existing_videos = list(keyword_folder.glob("*.mp4")) + list(keyword_folder.glob("*.mov"))
-                    
-                    # Caching: Check if we already have a video in this keyword folder
-                    if existing_videos:
-                        selected_existing = random.choice(existing_videos)
-                        print(f"🔁 [MediaManager] Reusing existing local video for '{query}': {selected_existing.name}")
-                        self.source_success_counts[source_name] += 1
-                        cache_key = (query, preferred_source)
-                        self.search_cache[cache_key] = str(selected_existing)
-                        return selected_existing
-                    
-                    # Also check for images if source is Unsplash or we want to support images generally
-                    if source_name == "Unsplash":
-                        existing_images = list(keyword_folder.glob("*.jpg")) + list(keyword_folder.glob("*.png"))
-                        if existing_images:
-                            selected_existing = random.choice(existing_images)
-                            print(f"🔁 [MediaManager] Reusing existing local image for '{query}': {selected_existing.name}")
-                            self.source_success_counts[source_name] += 1
+
+                    skip_cache = preferred_source and preferred_source in self.apis and preferred_source == source_name
+
+                    if not skip_cache:
+                        existing_videos = list(keyword_folder.glob("*.mp4")) + list(keyword_folder.glob("*.mov"))
+                        if existing_videos:
+                            selected_existing = random.choice(existing_videos)
+                            print(f"🔁 [MediaManager] Reusing existing local video for '{query}': {selected_existing.name}")
                             cache_key = (query, preferred_source)
                             self.search_cache[cache_key] = str(selected_existing)
                             return selected_existing
+
+                        if source_name == "Unsplash":
+                            existing_images = list(keyword_folder.glob("*.jpg")) + list(keyword_folder.glob("*.png"))
+                            if existing_images:
+                                selected_existing = random.choice(existing_images)
+                                print(f"🔁 [MediaManager] Reusing existing local image for '{query}': {selected_existing.name}")
+                                cache_key = (query, preferred_source)
+                                self.search_cache[cache_key] = str(selected_existing)
+                                return selected_existing
                 
                 # Optimization: Evaluation is now LOCAL and INSTANT (spaCy vectors).
                 # We can fetch multiple candidates and filter them without LLM latency.
@@ -209,16 +209,24 @@ class MediaManager:
                     selected = filtered_results[0]
                 
                 if self.config:
-                    # Determine extension based on source or URL
-                    ext = ".mp4"
-                    if source_name == "Unsplash" or (selected.get('url') and '.jpg' in selected.get('url')):
-                        ext = ".jpg"
-                        
+                    ext = selected.get('ext', ".mp4")
+                    if ext == ".mp4" and (source_name == "Unsplash" or source_name == "SearXNG"):
+                        if selected.get('url') and '.jpg' in selected.get('url'):
+                            ext = ".jpg"
+                        elif selected.get('url') and '.png' in selected.get('url'):
+                            ext = ".png"
+                        else:
+                            ext = ".jpg"
                     output_path = keyword_folder / f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}{ext}"
                 else:
-                    ext = ".mp4"
-                    if source_name == "Unsplash" or (selected.get('url') and '.jpg' in selected.get('url')):
-                        ext = ".jpg"
+                    ext = selected.get('ext', ".mp4")
+                    if ext == ".mp4" and (source_name == "Unsplash" or source_name == "SearXNG"):
+                        if selected.get('url') and '.jpg' in selected.get('url'):
+                            ext = ".jpg"
+                        elif selected.get('url') and '.png' in selected.get('url'):
+                            ext = ".png"
+                        else:
+                            ext = ".jpg"
                     output_path = Path(f"{safe_q}_{source_name.lower()}_{random.randint(1000, 9999)}{ext}")
                     
                 # Download
@@ -241,8 +249,8 @@ class MediaManager:
         """Reduce query complexity to improve search hit rate."""
         words = query.split()
         if len(words) > 1:
-            # Try taking just the first word
-            return words[0]
+            simplified = " ".join(words[:2])
+            return simplified
         return query
 
     def _get_ordered_sources(self, preferred: Optional[str] = None) -> List[str]:
@@ -250,6 +258,11 @@ class MediaManager:
         if preferred and preferred in sources:
             sources.remove(preferred)
             ordered = [preferred]
+        elif self.preferred_order:
+            # When no specific source selected, use preferred_order as the base
+            available = self.preferred_order if len(self.preferred_order) > 1 else sources
+            ordered = [s for s in available if s in sources]
+            sources = [s for s in sources if s not in ordered]
         else:
             ordered = []
         # Sort remaining by success count

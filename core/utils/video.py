@@ -1,6 +1,7 @@
 """
 Video utilities for processing, metadata extraction and formatting
 """
+import random
 import subprocess
 import hashlib
 import mimetypes
@@ -109,48 +110,6 @@ def get_smart_thumbnail_frame(video_path: Path, output_path: Path) -> Path:
         raise RuntimeError(f"Failed to extract smart thumbnail frame: {e}")
     return output_path
 
-import random
-
-def get_random_middle_frame(video_path: Path, output_path: Path, middle_start: float = 0.4, middle_end: float = 0.6) -> Path:
-    """Extract a random frame from the middle portion of a video.
-
-    Args:
-        video_path (Path): Path to the source video file.
-        output_path (Path): Destination path for the extracted frame image.
-        middle_start (float): Fraction of duration where the middle section starts (default 0.4).
-        middle_end (float): Fraction of duration where the middle section ends (default 0.6).
-
-    Returns:
-        Path: The path to the extracted frame image.
-    """
-    if not (0 <= middle_start < middle_end <= 1):
-        raise ValueError("middle_start must be < middle_end and both within [0,1]")
-    duration = get_video_duration(video_path)
-    if duration <= 0:
-        raise RuntimeError(f"Unable to determine duration for video {video_path}")
-    start_sec = duration * middle_start
-    end_sec = duration * middle_end
-    timestamp = random.uniform(start_sec, end_sec)
-    cmd = [
-        "ffmpeg",
-        "-ss",
-        str(timestamp),
-        "-i",
-        str(video_path),
-        "-frames:v",
-        "1",
-        "-q:v",
-        "2",
-        str(output_path),
-        "-y",
-    ]
-    try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
-    except Exception as e:
-        raise RuntimeError(f"Failed to extract frame: {e}")
-    return output_path
-
-# New helper: extract frame at (duration - 1 second) (or last frame if video shorter)
 def get_last_minus_one_second_frame(video_path: Path, output_path: Path) -> Path:
     """Extract a frame from the video at (duration - 1 second).
 
@@ -179,36 +138,15 @@ def get_last_minus_one_second_frame(video_path: Path, output_path: Path) -> Path
         raise RuntimeError(f"Failed to extract last-minus-1s frame: {e}")
     return output_path
 
-import random
-
 def get_random_middle_frame(video_path: Path, output_path: Path, middle_start: float = 0.4, middle_end: float = 0.6) -> Path:
-    """Extract a random frame from the middle portion of a video.
-
-    Args:
-        video_path (Path): Path to the source video file.
-        output_path (Path): Destination path for the extracted frame image.
-        middle_start (float): Fraction of duration where the middle section starts (default 0.4).
-        middle_end (float): Fraction of duration where the middle section ends (default 0.6).
-
-    Returns:
-        Path: The path to the extracted frame image.
-    """
-    # Ensure fractions are valid
     if not (0 <= middle_start < middle_end <= 1):
         raise ValueError("middle_start must be < middle_end and both within [0,1]")
-
     duration = get_video_duration(video_path)
     if duration <= 0:
         raise RuntimeError(f"Unable to determine duration for video {video_path}")
-
-    # Compute the time window for the middle section
     start_sec = duration * middle_start
     end_sec = duration * middle_end
-    # Choose a random timestamp within this window
     timestamp = random.uniform(start_sec, end_sec)
-
-    # Build ffmpeg command to extract a single frame at the timestamp
-    # -ss before -i for fast seeking
     cmd = [
         "ffmpeg",
         "-ss",

@@ -19,12 +19,14 @@ except ImportError:
 class StableDiffusionManager:
     """Manages Stable Diffusion image generation (optimized for CPU)"""
     
-    def __init__(self, model_path: str = "/models/stable-diffusion-v1-5", device: str = "cpu"):
-        self.model_path = model_path
-        self.device = "cpu"  # Always enforce CPU
+    def __init__(self, model_path: Optional[str] = None, device: str = "cpu"):
+        from ..config import Config
+        cfg = Config()
+        self.model_path = model_path or str(cfg.SD_MODEL_DIR)
+        self.device = "cpu"
         self.pipe = None
         self.generation_cache = {}
-        self.cache_dir = Path("background_images")
+        self.cache_dir = cfg.IMAGES_DIR
         self.cache_dir.mkdir(exist_ok=True)
     
     def _load_pipeline(self):

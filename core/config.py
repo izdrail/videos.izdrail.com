@@ -153,7 +153,63 @@ class Config:
         
         # YouTube Free Audio Library API
         self.YOUTUBE_AUDIO_API_URL = "https://thibaultjanbeyer.github.io/YouTube-Free-Audio-Library-API/api.json"
-    
+
+        # Aspect ratio profiles
+        self.ASPECT_RATIOS = {
+            "9:16 Portrait (TikTok/Shorts)": {"width": 1080, "height": 1920, "label": "9:16"},
+            "16:9 Landscape (YouTube)": {"width": 1920, "height": 1080, "label": "16:9"},
+            "1:1 Square (Instagram)": {"width": 1080, "height": 1080, "label": "1:1"},
+            "4:5 Vertical (Instagram)": {"width": 1080, "height": 1350, "label": "4:5"},
+        }
+
+        # Quality presets
+        self.QUALITY_PRESETS = {
+            "Low (Fastest)": {"preset": "ultrafast", "crf": 35, "fps": 24, "label": "Low"},
+            "Medium (Balanced)": {"preset": "veryfast", "crf": 28, "fps": 30, "label": "Medium"},
+            "High (Quality)": {"preset": "medium", "crf": 22, "fps": 30, "label": "High"},
+            "Ultra (Best)": {"preset": "slow", "crf": 18, "fps": 60, "label": "Ultra"},
+        }
+
+    def validate(self) -> list:
+        """Validate system configuration and return list of warnings/errors."""
+        import shutil
+        warnings = []
+
+        # Check FFmpeg
+        if not shutil.which("ffmpeg"):
+            warnings.append("FFmpeg not found in PATH — video generation will fail")
+        if not shutil.which("ffprobe"):
+            warnings.append("FFprobe not found in PATH — duration detection will fail")
+
+        # Check critical directories
+        for name, d in [
+            ("TEMP_DIR", self.TEMP_DIR),
+            ("OUTPUT_DIR", self.OUTPUT_DIR),
+            ("MUSIC_DIR", self.MUSIC_DIR),
+            ("VOICE_SAMPLES_DIR", self.VOICE_SAMPLES_DIR),
+        ]:
+            if not d.exists():
+                try:
+                    d.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    warnings.append(f"Cannot create {name}: {d}")
+
+        # Check API keys
+        if not os.getenv("PEXELS_API_KEY"):
+            warnings.append("PEXELS_API_KEY not set — Pexels video search disabled")
+        if not os.getenv("UNSPLASH_ACCESS_KEY"):
+            warnings.append("UNSPLASH_ACCESS_KEY not set — Unsplash image search disabled")
+
+        return warnings
+
+    def get_aspect_ratio(self, name: str = "9:16 Portrait (TikTok/Shorts)") -> dict:
+        """Get aspect ratio dimensions by preset name."""
+        return self.ASPECT_RATIOS.get(name, self.ASPECT_RATIOS["9:16 Portrait (TikTok/Shorts)"])
+
+    def get_quality(self, name: str = "Medium (Balanced)") -> dict:
+        """Get quality preset by name."""
+        return self.QUALITY_PRESETS.get(name, self.QUALITY_PRESETS["Medium (Balanced)"])
+
     def get_temp_audio_file(self, prefix: str = "audio") -> Path:
         """Generate a temporary audio file path"""
         return self.TEMP_AUDIO_DIR / f"{prefix}_{uuid.uuid4().hex}.wav"

@@ -6,9 +6,9 @@ import os
 import re
 import requests
 from typing import List, Optional
+from urllib.parse import urlparse
 from collections import Counter
 import spacy
-from collections import Counter
 from .neuron_extractor import NeuronExtractor
 
 class OllamaKeywordExtractor:
@@ -117,6 +117,7 @@ class OllamaKeywordExtractor:
         except Exception as e:
             print(f"Error generating descriptions: {e}")
             return f"Error: {str(e)}"
+
     def extract_mood_keyword(self, text: str) -> str:
         """Extract a single musical mood or genre keyword from the text (e.g. 'Epic', 'Chill')"""
         prompt = (
@@ -147,7 +148,7 @@ class OllamaKeywordExtractor:
         Removes [pause] and other non-spoken instructions.
         """
         try:
-            prompt = f"Generate a tts readys script no [pause] or anything like that from the following text: {text}"
+            prompt = f"Generate a TTS-ready script from the following text. Remove [pause] tags, stage directions, and any non-spoken instructions. Return only the spoken content:\n\n{text}"
 
             payload = {
                 "model": self.model,
@@ -176,19 +177,10 @@ class OllamaKeywordExtractor:
     @staticmethod
     def fetch_models_static(base_url: str) -> List[str]:
         """Fetches available models from the current instance's API URL."""
-         # Re-implementing fetch_models_static logic since I seemingly overwrote/messed up get_available_models and the static method below it might be affected?
-         # Wait, looking at lines 92-100 in the view, it seems I cut into `get_available_models` docstring or similar?
-         # "Fetches available models from the current instance's API URL." is the docstring for `fetch_models_static` usually.
-         # Let me check what was there before or just fix it to be correct code.
-         # lines 92+ look like the start of `fetch_models_static` but the def line is missing.
-         
         if "/generate" in base_url:
             url = base_url.replace("/generate", "/tags")
         else:
-            # Try to append /tags if not present
-            from urllib.parse import urlparse
             p = urlparse(base_url)
-            # If path ends with /api/generate or similar, fix it
             url = f"{p.scheme}://{p.netloc}/api/tags"
 
         try:
@@ -496,6 +488,7 @@ class KeywordExtractor:
 
     def generate_script_from_text(self, text: str) -> str:
         return self.ollama_extractor.generate_script_from_text(text)
+
     def extract_mood_keyword(self, text: str) -> str:
         """Get the emotional mood for music selection"""
         # 1. Try Ollama (AI analysis is best for mood)
