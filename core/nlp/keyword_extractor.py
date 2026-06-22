@@ -2,6 +2,7 @@
 Keyword Extraction
 Uses AI and NLP to extract visual keywords from text
 """
+
 import os
 import re
 import requests
@@ -11,35 +12,40 @@ from collections import Counter
 import spacy
 from .neuron_extractor import NeuronExtractor
 
+
 class OllamaKeywordExtractor:
     """Uses Ollama API to extract keywords from text"""
-    
+
     def __init__(self, model: str = "mistral:7b", url: Optional[str] = None):
         self.model = model
-        self.url = url or os.getenv("OLLAMA_API_URL", "https://ai.izdrail.com/api/generate")
+        self.url = url or os.getenv(
+            "OLLAMA_API_URL", "https://ai.izdrail.com/api/generate"
+        )
         self.cache = {}
-    
-    def extract_keywords(self, text: str, top_n: int = 5, language: str = 'en') -> List[str]:
+
+    def extract_keywords(
+        self, text: str, top_n: int = 5, language: str = "en"
+    ) -> List[str]:
         cache_key = f"{text[:100]}_{top_n}_{language}"
         if cache_key in self.cache:
             return self.cache[cache_key]
-            
+
         prompt = (
-    f"You are a stock footage search expert. Extract {top_n} visual keywords from the text below. "
-    f"Rules:\n"
-    f"- Each keyword must be 1-2 words maximum\n"
-    f"- Prioritize: physical objects, locations, actions, nature, technology, people activities\n"
-    f"- Use common stock footage terms (e.g., 'city skyline', 'ocean waves', 'forest', 'office')\n"
-    f"- Avoid abstract concepts unless they have clear visual representations\n"
-    f"- Return ONLY a comma-separated list in {language}\n\n"
-    f"Text: \"{text}\"\n"
-    f"Keywords:"
-)
+            f"You are a stock footage search expert. Extract {top_n} visual keywords from the text below. "
+            f"Rules:\n"
+            f"- Each keyword must be 1-2 words maximum\n"
+            f"- Prioritize: physical objects, locations, actions, nature, technology, people activities\n"
+            f"- Use common stock footage terms (e.g., 'city skyline', 'ocean waves', 'forest', 'office')\n"
+            f"- Avoid abstract concepts unless they have clear visual representations\n"
+            f"- Return ONLY a comma-separated list in {language}\n\n"
+            f'Text: "{text}"\n'
+            f"Keywords:"
+        )
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.3, "num_predict": 64}
+            "options": {"temperature": 0.3, "num_predict": 64},
         }
         try:
             response = requests.post(self.url, json=payload, timeout=180)
@@ -47,9 +53,11 @@ class OllamaKeywordExtractor:
                 raw = response.json().get("response", "").strip()
                 print(f"[Ollama] Raw output: {raw}")
                 # Clean and parse
-                raw_keywords = [kw.strip().lower() for kw in raw.split(",") if kw.strip()]
+                raw_keywords = [
+                    kw.strip().lower() for kw in raw.split(",") if kw.strip()
+                ]
                 # Further cleaning: remove non-alphanumeric (except spaces)
-                keywords = [re.sub(r'[^a-zA-Z0-9\s]', '', kw) for kw in raw_keywords]
+                keywords = [re.sub(r"[^a-zA-Z0-9\s]", "", kw) for kw in raw_keywords]
                 # Allow 1-2 word keywords
                 filtered_keywords = []
                 for kw in keywords:
@@ -62,7 +70,7 @@ class OllamaKeywordExtractor:
                     elif len(words) > 2:
                         # Take first 2 words if longer
                         filtered_keywords.append(f"{words[0]} {words[1]}")
-                
+
                 # Filter out empty and limit to top_n
                 result = filtered_keywords[:top_n]
                 self.cache[cache_key] = result
@@ -71,7 +79,9 @@ class OllamaKeywordExtractor:
             print(f"[Ollama] Error extracting keywords: {e}")
         return []
 
-    def generate_social_media_descriptions(self, text: str, keywords: List[str], language: str = 'en') -> str:
+    def generate_social_media_descriptions(
+        self, text: str, keywords: List[str], language: str = "en"
+    ) -> str:
         """
         Generates social media descriptions (YouTube Title, Description, Hashtags)
         using Ollama based on the video script and keywords.
@@ -86,7 +96,7 @@ class OllamaKeywordExtractor:
             4. A short TikTok/Reels caption (max 100 chars)
 
             Script: "{text[:1000]}..."
-            Keywords: {', '.join(keywords)}
+            Keywords: {", ".join(keywords)}
             Language: {language}
 
             Output format:
@@ -97,23 +107,21 @@ class OllamaKeywordExtractor:
             """
 
             response = requests.post(
-                self.url, # Changed from f"{self.base_url}/api/generate" to self.url
+                self.url,  # Changed from f"{self.base_url}/api/generate" to self.url
                 json={
                     "model": self.model,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {
-                        "temperature": 0.7
-                    }
+                    "options": {"temperature": 0.7},
                 },
-                timeout=30
+                timeout=30,
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
-                return result.get('response', '').strip()
+                return result.get("response", "").strip()
             return "Failed to generate descriptions."
-            
+
         except Exception as e:
             print(f"Error generating descriptions: {e}")
             return f"Error: {str(e)}"
@@ -124,20 +132,20 @@ class OllamaKeywordExtractor:
             f"Analyze the emotional tone of the text below and return ONLY ONE word "
             f"representing a musical mood or genre that fits as background music. "
             f"Examples: Epic, Relaxing, Cinematic, Happy, Dark, Energetic, Lo-fi.\n\n"
-            f"Text: \"{text[:500]}\"\n"
+            f'Text: "{text[:500]}"\n'
             f"Mood:"
         )
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.4, "num_predict": 10}
+            "options": {"temperature": 0.4, "num_predict": 10},
         }
         try:
             response = requests.post(self.url, json=payload, timeout=30)
             if response.status_code == 200:
                 mood = response.json().get("response", "").strip().split()[0]
-                return re.sub(r'[^a-zA-Z]', '', mood).capitalize()
+                return re.sub(r"[^a-zA-Z]", "", mood).capitalize()
         except:
             pass
         return "Epic"
@@ -154,25 +162,60 @@ class OllamaKeywordExtractor:
                 "model": self.model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {
-                    "temperature": 0.7
-                }
+                "options": {"temperature": 0.7},
             }
 
             response = requests.post(
-                self.url, # Changed from f"{self.base_url}/api/generate" to self.url
+                self.url,  # Changed from f"{self.base_url}/api/generate" to self.url
                 json=payload,
-                timeout=60
+                timeout=60,
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
-                return result.get('response', '').strip()
-            return text # Return original text on failure
-            
+                return result.get("response", "").strip()
+            return text  # Return original text on failure
+
         except Exception as e:
             print(f"Error generating script: {e}")
             return text
+
+    def generate_topic_script(self, topic: str, language: str = "en") -> str:
+        """Generate a full script about a topic using the Ollama API.
+        Returns a TTS-ready multi-paragraph script similar to the default patent text.
+        """
+        prompt = (
+            f"You are a news reporter creating a video script. "
+            f"Write a concise, informative script (3-5 short paragraphs) about: {topic}\n\n"
+            f"Rules:\n"
+            f"- Write in {language}\n"
+            f"- Keep paragraphs short (1-3 sentences each)\n"
+            f"- Use clear, conversational language suitable for text-to-speech\n"
+            f"- Include specific facts, numbers, and key details\n"
+            f"- Do NOT use [pause] or stage directions\n"
+            f"- Do NOT use markdown or bullet points\n"
+            f"- Separate paragraphs with blank lines\n"
+            f"- End each sentence with a period\n\n"
+            f"Script:"
+        )
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.7, "num_predict": 1024},
+        }
+        try:
+            response = requests.post(self.url, json=payload, timeout=120)
+            if response.status_code == 200:
+                script = response.json().get("response", "").strip()
+                if script:
+                    print(
+                        f"[Ollama] Generated {len(script)}-char script for topic: '{topic}'"
+                    )
+                    return script
+        except Exception as e:
+            print(f"[Ollama] Topic script generation error: {e}")
+        return ""
 
     @staticmethod
     def fetch_models_static(base_url: str) -> List[str]:
@@ -187,7 +230,7 @@ class OllamaKeywordExtractor:
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
-                models = [m['name'] for m in data.get('models', [])]
+                models = [m["name"] for m in data.get("models", [])]
                 return models
         except:
             pass
@@ -206,11 +249,11 @@ class OllamaKeywordExtractor:
 
 class KeywordExtractor:
     """Orchestrates keyword extraction using Ollama and Spacy fallback"""
-    
+
     def __init__(self, ollama_model: str = "mistral:7b"):
         self.ollama_extractor = OllamaKeywordExtractor(model=ollama_model)
         self.neuron_extractor = NeuronExtractor(model=ollama_model)
-        
+
         # Initialize local spaCy for instant extraction
         try:
             self.nlp = spacy.load("en_core_web_md")
@@ -220,110 +263,153 @@ class KeywordExtractor:
                 self.nlp = spacy.load("en_core_web_sm")
             except:
                 self.nlp = None
-                print("[NLP] Warning: Local spaCy model not found. Using fallback methods.")
+                print(
+                    "[NLP] Warning: Local spaCy model not found. Using fallback methods."
+                )
 
-        self.relevant_pos = {'NOUN', 'PROPN', 'ADJ'}
+        self.relevant_pos = {"NOUN", "PROPN", "ADJ"}
         self.exclude_words = {
-            'thing', 'things', 'something', 'someone', 'way', 'time', 'day',
-            'year', 'week', 'month', 'people', 'person', 'place', 'lot',
-            'intro', 'outro', 'welcome', 'thanks', 'watching', 'subscribe'
+            "thing",
+            "things",
+            "something",
+            "someone",
+            "way",
+            "time",
+            "day",
+            "year",
+            "week",
+            "month",
+            "people",
+            "person",
+            "place",
+            "lot",
+            "intro",
+            "outro",
+            "welcome",
+            "thanks",
+            "watching",
+            "subscribe",
         }
         self.used_keywords = set()
-    
-    def extract_keywords(self, text: str, top_n: int = 5, language: str = 'en', use_neuron_ai: bool = True, use_snn: bool = False) -> List[str]:
+
+    def extract_keywords(
+        self,
+        text: str,
+        top_n: int = 5,
+        language: str = "en",
+        use_neuron_ai: bool = True,
+        use_snn: bool = False,
+    ) -> List[str]:
         """Main entry point for keyword extraction. Prioritizes local spaCy for speed."""
         if not text.strip():
             return []
-            
+
         # 1. Try local spaCy extraction (INSTANT)
         candidates = self._extract_spacy_local(text, top_n * 2)
-        
+
         # 2. If spaCy fails or returns too few, fallback to Ollama (SLOW)
-        if len(candidates) < 2 and language == 'en':
-            ollama_keywords = self.ollama_extractor.extract_keywords(text, min(4, top_n * 2), language)
+        if len(candidates) < 2 and language == "en":
+            ollama_keywords = self.ollama_extractor.extract_keywords(
+                text, min(4, top_n * 2), language
+            )
             candidates.extend([k for k in ollama_keywords if k not in candidates])
 
         if candidates:
             if use_neuron_ai:
                 # Use local vector evaluation for max speed
-                neuron_results = self.neuron_extractor.evaluate_keywords(text, candidates, language, use_snn=use_snn)
+                neuron_results = self.neuron_extractor.evaluate_keywords(
+                    text, candidates, language, use_snn=use_snn
+                )
                 if neuron_results:
-                    return [res['keyword'] for res in neuron_results[:top_n]]
-            
+                    return [res["keyword"] for res in neuron_results[:top_n]]
+
             # Rank and return top_n
             ranked = self.rank_keywords(candidates)
             return ranked[:top_n]
-        
+
         return []
 
     def _extract_spacy_local(self, text: str, top_n: int = 5) -> List[str]:
         """Extract keywords using local Spacy model"""
         if not self.nlp:
             return []
-            
+
         doc = self.nlp(text.lower())
         candidates = []
-        
+
         # 1. Prioritize Entities (Locations, Orgs, Products)
         for ent in doc.ents:
             if ent.label_ in {"GPE", "LOC", "ORG", "PRODUCT", "EVENT", "PERSON"}:
                 candidates.append(ent.text)
-        
+
         # 2. Extract Noun Phrases (2-3 words) - EXTREMELY HIGH VALUE for search
         # We skip chunks that are just stop words or too long.
         for chunk in doc.noun_chunks:
             # Clean the chunk text (remove front/back articles/stop words)
-            clean_chunk = " ".join([t.text for t in chunk if not t.is_stop and t.pos_ in {"NOUN", "PROPN", "ADJ"}])
+            clean_chunk = " ".join(
+                [
+                    t.text
+                    for t in chunk
+                    if not t.is_stop and t.pos_ in {"NOUN", "PROPN", "ADJ"}
+                ]
+            )
             if clean_chunk and len(clean_chunk.split()) >= 1:
                 # Prioritize multi-word phrases by adding them first
                 candidates.append(clean_chunk)
-                
+
         # 3. Add high-value individual tokens
         for token in doc:
-            if (token.pos_ in self.relevant_pos and 
-                not token.is_stop and 
-                len(token.text) > 2 and 
-                token.text.isalpha() and 
-                token.text not in self.exclude_words):
+            if (
+                token.pos_ in self.relevant_pos
+                and not token.is_stop
+                and len(token.text) > 2
+                and token.text.isalpha()
+                and token.text not in self.exclude_words
+            ):
                 candidates.append(token.text)
-        
+
         if not candidates:
             return []
-            
+
         # Count and get most common, preserving order for entities
         counts = Counter(candidates)
         return [word for word, count in counts.most_common(top_n)]
 
-    
     def _extract_spacy_fallback(self, text: str, top_n: int = 5) -> List[str]:
         """Fallback to external Spacy API if Ollama fails"""
         spacy_url = os.getenv("SPACY_API_URL", "https://spacy.izdrail.com")
         try:
-            pos_resp = requests.post(f"{spacy_url}/pos", json={"text": text.lower()}, timeout=10)
+            pos_resp = requests.post(
+                f"{spacy_url}/pos", json={"text": text.lower()}, timeout=10
+            )
             candidates = []
             if pos_resp.status_code == 200:
                 tokens = pos_resp.json()
                 for token in tokens:
-                    pos = token.get('pos')
-                    word = token.get('text')
-                    is_stop = token.get('is_stop', False)
-                    if (pos in self.relevant_pos and 
-                        not is_stop and 
-                        len(word) > 2 and 
-                        word.isalpha() and 
-                        word not in self.exclude_words):
+                    pos = token.get("pos")
+                    word = token.get("text")
+                    is_stop = token.get("is_stop", False)
+                    if (
+                        pos in self.relevant_pos
+                        and not is_stop
+                        and len(word) > 2
+                        and word.isalpha()
+                        and word not in self.exclude_words
+                    ):
                         candidates.append(word)
-            
+
             if not candidates:
                 return []
-                
+
             freq = Counter(candidates)
             return [word for word, count in freq.most_common(top_n)]
         except Exception as e:
             print(f"[NLP] Spacy fallback error: {e}")
             return []
 
-    def get_best_unique_keyword(self, text: str, language: Optional[str] = None) -> Optional[str]:
+    def get_best_unique_keyword(
+        self, text: str, language: Optional[str] = None
+    ) -> Optional[str]:
         """Get a keyword that hasn't been used yet in this generation session"""
         keywords = self.extract_keywords(text, top_n=10)
         for kw in keywords:
@@ -336,7 +422,7 @@ class KeywordExtractor:
         """Reset used keywords tracker and biological memory"""
         self.used_keywords.clear()
         self.neuron_extractor.clear_memory()
-    
+
     def rank_keywords(self, keywords: List[str]) -> List[str]:
         """
         Rank keywords by quality/searchability.
@@ -347,49 +433,95 @@ class KeywordExtractor:
         """
         # Common stock footage categories (high priority)
         stock_categories = {
-            'nature', 'forest', 'ocean', 'mountain', 'sky', 'sunset', 'sunrise',
-            'city', 'cityscape', 'building', 'office', 'street', 'traffic',
-            'people', 'business', 'meeting', 'technology', 'computer', 'phone',
-            'food', 'cooking', 'restaurant', 'travel', 'beach', 'landscape',
-            'water', 'fire', 'clouds', 'rain', 'snow', 'night', 'day',
-            'abstract', 'motion', 'light', 'color', 'texture', 'pattern',
-            'hands', 'work', 'team', 'collaboration', 'innovation', 'growth'
+            "nature",
+            "forest",
+            "ocean",
+            "mountain",
+            "sky",
+            "sunset",
+            "sunrise",
+            "city",
+            "cityscape",
+            "building",
+            "office",
+            "street",
+            "traffic",
+            "people",
+            "business",
+            "meeting",
+            "technology",
+            "computer",
+            "phone",
+            "food",
+            "cooking",
+            "restaurant",
+            "travel",
+            "beach",
+            "landscape",
+            "water",
+            "fire",
+            "clouds",
+            "rain",
+            "snow",
+            "night",
+            "day",
+            "abstract",
+            "motion",
+            "light",
+            "color",
+            "texture",
+            "pattern",
+            "hands",
+            "work",
+            "team",
+            "collaboration",
+            "innovation",
+            "growth",
         }
-        
+
         def score_keyword(kw: str) -> float:
             score = 0.0
             kw_lower = kw.lower()
-            
+
             # Bonus for unused keywords
             if kw not in self.used_keywords:
                 score += 10.0
-            
+
             # Bonus for stock footage categories
             for category in stock_categories:
                 if category in kw_lower:
                     score += 5.0
                     break
-            
+
             # Bonus for 2-word phrases (more specific)
             if len(kw.split()) == 2:
                 score += 3.0
-            
+
             # Penalty for very generic terms
-            generic_terms = {'thing', 'stuff', 'item', 'object', 'concept', 'idea'}
+            generic_terms = {"thing", "stuff", "item", "object", "concept", "idea"}
             if kw_lower in generic_terms:
                 score -= 5.0
-            
+
             # Bonus for visual action words
-            visual_actions = {'moving', 'flowing', 'growing', 'building', 'working', 'walking', 'running', 'flying'}
+            visual_actions = {
+                "moving",
+                "flowing",
+                "growing",
+                "building",
+                "working",
+                "walking",
+                "running",
+                "flying",
+            }
             if any(action in kw_lower for action in visual_actions):
                 score += 2.0
-            
+
             return score
-        
+
         # Sort by score (descending)
         ranked = sorted(keywords, key=score_keyword, reverse=True)
         return ranked
-    
+
     def generate_fallback_keywords(self, keyword: str) -> List[str]:
         """
         Generate fallback keywords for when primary search fails.
@@ -397,68 +529,73 @@ class KeywordExtractor:
         """
         fallbacks = []
         kw_lower = keyword.lower()
-        
+
         # Category mappings for common terms
         category_map = {
             # Nature
-            'tree': ['forest', 'nature', 'woods'],
-            'flower': ['garden', 'nature', 'plants'],
-            'garden': ['nature', 'plants', 'outdoor'],
-            'ocean': ['water', 'sea', 'waves'],
-            'mountain': ['landscape', 'nature', 'outdoor'],
-            'river': ['water', 'nature', 'stream'],
-            
+            "tree": ["forest", "nature", "woods"],
+            "flower": ["garden", "nature", "plants"],
+            "garden": ["nature", "plants", "outdoor"],
+            "ocean": ["water", "sea", "waves"],
+            "mountain": ["landscape", "nature", "outdoor"],
+            "river": ["water", "nature", "stream"],
             # Urban
-            'building': ['city', 'architecture', 'urban'],
-            'office': ['business', 'workplace', 'indoor'],
-            'street': ['city', 'urban', 'traffic'],
-            'car': ['traffic', 'transportation', 'vehicle'],
-            
+            "building": ["city", "architecture", "urban"],
+            "office": ["business", "workplace", "indoor"],
+            "street": ["city", "urban", "traffic"],
+            "car": ["traffic", "transportation", "vehicle"],
             # Technology
-            'computer': ['technology', 'office', 'digital'],
-            'phone': ['technology', 'communication', 'mobile'],
-            'code': ['technology', 'programming', 'digital'],
-            'data': ['technology', 'digital', 'abstract'],
-            
+            "computer": ["technology", "office", "digital"],
+            "phone": ["technology", "communication", "mobile"],
+            "code": ["technology", "programming", "digital"],
+            "data": ["technology", "digital", "abstract"],
             # People/Activities
-            'meeting': ['business', 'people', 'office'],
-            'team': ['business', 'people', 'collaboration'],
-            'work': ['business', 'office', 'people'],
-            'cooking': ['food', 'kitchen', 'chef'],
+            "meeting": ["business", "people", "office"],
+            "team": ["business", "people", "collaboration"],
+            "work": ["business", "office", "people"],
+            "cooking": ["food", "kitchen", "chef"],
         }
-        
+
         # Check if keyword or its parts are in category map
         for key, values in category_map.items():
             if key in kw_lower:
                 fallbacks.extend(values)
                 break
-        
+
         # If multi-word, try first word only
         words = keyword.split()
         if len(words) > 1:
             fallbacks.append(words[0])
-        
+
         # Generic safe fallbacks
-        generic_fallbacks = ['abstract', 'motion', 'light', 'texture', 'landscape', 'cityscape']
-        
+        generic_fallbacks = [
+            "abstract",
+            "motion",
+            "light",
+            "texture",
+            "landscape",
+            "cityscape",
+        ]
+
         # Return unique fallbacks
         unique_fallbacks = []
         seen = set([kw_lower])
-        
+
         for fb in fallbacks + generic_fallbacks:
             if fb not in seen:
                 unique_fallbacks.append(fb)
                 seen.add(fb)
                 if len(unique_fallbacks) >= 5:
                     break
-        
+
         return unique_fallbacks
-        
+
     def sanitize_keyword(self, keyword: str) -> str:
         """Clean a keyword for API search"""
-        if not keyword: return ""
-        kw = re.sub(r'[\*\-•\n]+', '', keyword)
-        return re.sub(r'\s+', ' ', kw).strip().lower()
+        if not keyword:
+            return ""
+        kw = re.sub(r"[\*\-•\n]+", "", keyword)
+        return re.sub(r"\s+", " ", kw).strip().lower()
 
     def get_available_models(self) -> List[str]:
         """Proxy to Ollama extractor"""
@@ -473,7 +610,7 @@ class KeywordExtractor:
         if value and value != self.ollama_extractor.url:
             print(f"[Ollama] Updating API URL to: {value}")
             self.ollama_extractor.url = value
-            self.ollama_extractor.cache.clear() # Clear cache on URL change
+            self.ollama_extractor.cache.clear()  # Clear cache on URL change
 
     @property
     def model(self) -> str:
@@ -483,11 +620,18 @@ class KeywordExtractor:
     def model(self, value: str):
         self.ollama_extractor.model = value
 
-    def generate_social_media_descriptions(self, text: str, keywords: List[str], language: str = 'en') -> str:
-        return self.ollama_extractor.generate_social_media_descriptions(text, keywords, language)
+    def generate_social_media_descriptions(
+        self, text: str, keywords: List[str], language: str = "en"
+    ) -> str:
+        return self.ollama_extractor.generate_social_media_descriptions(
+            text, keywords, language
+        )
 
     def generate_script_from_text(self, text: str) -> str:
         return self.ollama_extractor.generate_script_from_text(text)
+
+    def generate_topic_script(self, topic: str, language: str = "en") -> str:
+        return self.ollama_extractor.generate_topic_script(topic, language)
 
     def extract_mood_keyword(self, text: str) -> str:
         """Get the emotional mood for music selection"""
@@ -495,17 +639,19 @@ class KeywordExtractor:
         mood = self.ollama_extractor.extract_mood_keyword(text)
         if mood:
             return mood
-            
+
         # 2. Simple fallback based on keyword counts if AI fails
         text_lower = text.lower()
-        if any(w in text_lower for w in ['war', 'battle', 'fight', 'epic', 'victory', 'strong']):
+        if any(
+            w in text_lower
+            for w in ["war", "battle", "fight", "epic", "victory", "strong"]
+        ):
             return "Epic"
-        if any(w in text_lower for w in ['peace', 'relax', 'ocean', 'sleep', 'calm']):
+        if any(w in text_lower for w in ["peace", "relax", "ocean", "sleep", "calm"]):
             return "Relaxing"
-        if any(w in text_lower for w in ['happy', 'fun', 'upbeat', 'party']):
+        if any(w in text_lower for w in ["happy", "fun", "upbeat", "party"]):
             return "Happy"
-        if any(w in text_lower for w in ['sad', 'dark', 'alone', 'scary']):
+        if any(w in text_lower for w in ["sad", "dark", "alone", "scary"]):
             return "Dark"
-            
-        return "Cinematic"
 
+        return "Cinematic"
