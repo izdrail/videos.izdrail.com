@@ -33,8 +33,14 @@ Each sentence can have its **own AI-generated voice**, keyword-matched backgroun
 
 * 🚀 **Lightning Fast ⚡ (Parallel & Cached)**
     * **Persistent Caching**: Audio and Background Videos are cached (`temp/audio_cache` & `temp/video_cache`)
+    * **AI Response Caching**: Ollama responses are cached in-memory (SHA-256 keyed) to avoid redundant calls
     * Reuses existing assets to skip downloads and TTS generation
     * **Parallel Resource Fetching**: Multi-threaded keyword extraction and media downloads
+
+* 🛡️ **Ollama Resilience**
+    * **Exponential Backoff**: Automatic retries (3 attempts, 1s→2s→4s) on connection errors, timeouts, and 5xx
+    * **Graceful Fallback**: If all retries fail, uses configurable default keywords/mood/script
+    * **Video never stops**: Pipeline continues rendering with fallback content when AI is unavailable
 
 * 📢 **Social Media Optimization**
     * Automatically generates viral-ready descriptions/captions for TikTok, Shorts, and Reels
@@ -47,6 +53,8 @@ Each sentence can have its **own AI-generated voice**, keyword-matched backgroun
 * 🎧 **Audio Perfection**
 
     * Loudness normalization, low/high-pass filtering
+    * **Silence trimming** for cleaner speech output
+    * Dynamic range compression for consistent volume
     * Automatic fade-in/out & compression
     * Background music mixing with volume control
 
@@ -101,6 +109,24 @@ Add it in the UI or via environment:
 export PEXELS_API_KEY="your_api_key_here"
 ```
 
+### 4️⃣ Ollama / AI Configuration (Optional)
+
+The pipeline works **without Ollama** — fallback keywords, mood, and script content are used automatically when the AI service is unreachable. Configure via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OLLAMA_API_URL` | `https://ai.izdrail.com/api/generate` | Ollama API endpoint |
+| `AI_MODEL` | `mistral:7b` | LLM model name |
+| `OLLAMA_MAX_RETRIES` | `3` | Retry attempts before fallback |
+| `OLLAMA_RETRY_BASE_DELAY` | `1.0` | Base delay (seconds) for exponential backoff |
+| `OLLAMA_TIMEOUT` | `180` | Request timeout in seconds |
+| `OLLAMA_CACHE_MAX_SIZE` | `512` | Max cached API responses (in-memory LRU) |
+| `OLLAMA_FALLBACK_KEYWORDS` | `abstract,motion,light,texture,landscape,cityscape` | Fallback keywords when AI unavailable |
+| `OLLAMA_FALLBACK_MOOD` | `Cinematic` | Fallback mood for music selection |
+| `OLLAMA_FALLBACK_SCRIPT` | *(static message)* | Fallback script text when generation fails |
+
+**Fallback behavior**: When Ollama is unavailable, the pipeline logs a WARNING and continues with fallback content. No video generation is interrupted.
+
 ---
 
 ## 🎤 Directory Structure
@@ -116,6 +142,9 @@ project_root/
 │   │   └── video.py         # Shared video processing utilities
 │   ├── media/                # Media API clients (Pexels, Giphy, YouTube)
 │   ├── nlp/                  # Keyword extraction (Mistral:7b / Spacy)
+│   │   ├── ollama_client.py  # Robust Ollama API client (retry, cache, fallback)
+│   │   ├── keyword_extractor.py
+│   │   └── neuron_extractor.py
 │   ├── ai/                   # AI components (Stable Diffusion)
 │   └── tts/                  # TTS management (Kokoro, XTTS v2)
 ├── background_images/        # Local fallback images (optional)
@@ -213,7 +242,7 @@ The codebase has been refactored following SOLID principles to improve maintaina
 
 | Layer      | Technology                       |
 | ---------- | -------------------------------- |
-| NLP        | Mistral:7b / spaCy `en_core_web_md` |
+| NLP        | Mistral:7b / spaCy `en_core_web_md` (via OllamaClient with retry/cache/fallback) |
 | TTS        | Kokoro-82M, Coqui XTTS v2           |
 | Video      | MoviePy, FFmpeg, PIL, NumPy         |
 | Audio      | PyDub                               |
