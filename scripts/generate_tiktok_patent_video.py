@@ -6,7 +6,7 @@ Usage:
   python scripts/generate_tiktok_patent_video.py --text "Your custom script..."
   python scripts/generate_tiktok_patent_video.py --file script.txt --language ro --voice american-man
   python scripts/generate_tiktok_patent_video.py --topic "TikTok patent disputes"
-  python scripts/generate_tiktok_patent_video.py --topic "AI regulation" --model "mistral:7b" --language en
+  python scripts/generate_tiktok_patent_video.py --topic "AI regulation" --model "gemma4:e2b" --language en
   python scripts/generate_tiktok_patent_video.py --list-voices
 """
 
@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  %(prog)s\n"
             "  %(prog)s --text 'Your script here...' --language ro\n"
             "  %(prog)s --file script.txt --voice american-man --no-intro\n"
-            "  %(prog)s --topic 'AI regulation news' --model 'mistral:7b'\n"
+            "  %(prog)s --topic 'AI regulation news' --model 'gemma4:e2b'\n"
             "  %(prog)s --topic 'TikTok patents' --language en --stress 1.2\n"
             "  %(prog)s --list-voices\n"
         ),
@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         type=str,
         default=None,
-        help="Ollama model for topic script generation (default: mistral:7b)",
+        help="Ollama model for topic script generation (default: gemma4:e2b)",
     )
 
     audio = parser.add_argument_group("Audio / Voice")

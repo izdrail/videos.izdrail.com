@@ -16,7 +16,12 @@ from .youtube import YouTubeAPI
 from .pixabay import PixabayAPI
 from .unsplash import UnsplashAPI
 from .searxng import SearXNGAPI
+from .openverse import OpenverseProvider
+from .wikimedia import WikimediaProvider
+from .internet_archive import InternetArchiveProvider
+from .base import MediaType, Media
 from core.nlp.neuron_extractor import NeuronExtractor
+from core.nlp.entity import EntityHandler
 
 
 class MediaManager:
@@ -31,16 +36,25 @@ class MediaManager:
             "YouTube": YouTubeAPI(),
             "Unsplash": UnsplashAPI(config.UNSPLASH_ACCESS_KEY if config else None),
             "SearXNG": SearXNGAPI(),
+            "Openverse": OpenverseProvider(),
+            "Wikimedia": WikimediaProvider(),
+            "InternetArchive": InternetArchiveProvider(),
         }
         self.neuron_extractor = NeuronExtractor(
-            model=config.AI_MODEL if config else "mistral:7b"
+            model=config.AI_MODEL if config else "gemma4:e2b"
         )
+        self.entity_handler = EntityHandler()
+        # Open, key-less providers are tried first so the system prefers freely
+        # licensed media and only falls back to commercial APIs when needed.
         self.preferred_order = [
+            "Openverse",
+            "Wikimedia",
+            "SearXNG",
+            "InternetArchive",
             "YouTube",
             "Pexels",
-            "Unsplash",
-            "SearXNG",
             "Pixabay",
+            "Unsplash",
             "Giphy",
         ]
         self.search_cache = {}
@@ -54,6 +68,9 @@ class MediaManager:
         # Bandit tracking
         self._source_usage_count = defaultdict(int)
         self._source_last_used = {}
+        # Last source actually chosen, used to force source rotation so a single
+        # high-scoring source does not win every query.
+        self._last_used_source = None
 
     def get_random_media(
         self,
@@ -62,13 +79,21 @@ class MediaManager:
         context: Optional[str] = None,
         use_snn: bool = False,
         return_keyword: bool = False,
+        theme: Optional[str] = None,
+        entity: Optional[str] = None,
     ):
         """Fetch a background video for a list of *queries*.
         Tries each query in the list across all sources.
         When return_keyword=True, returns (path, keyword_that_worked).
+        If ``entity`` is supplied, searches are enriched with that entity.
         """
         if isinstance(queries, str):
             queries = [queries]
+
+        # Append theme-based broad queries to the search list as an extra
+        # chance of finding relevant footage before falling back to local files.
+        if theme and isinstance(theme, str) and theme.strip():
+            queries = list(queries) + [theme.strip()]
 
         unique_queries = []
         seen = set()
@@ -76,7 +101,7 @@ class MediaManager:
             if q and q not in seen:
                 unique_queries.append(q)
                 seen.add(q)
-        queries = unique_queries[:3]
+        queries = unique_queries[:4]
 
         def _find_cached(q):
             ck = (q, preferred_source)
@@ -95,7 +120,12 @@ class MediaManager:
 
             print(f"🔍 [MediaManager] Searching for '{query}'...")
             result = self._search_and_download(
-                query, preferred_source, context=context, use_snn=use_snn
+                query,
+                preferred_source,
+                context=context,
+                use_snn=use_snn,
+                theme=theme,
+                entity=entity,
             )
             if result:
                 return (result, query) if return_keyword else result
@@ -108,7 +138,11 @@ class MediaManager:
                 if cached:
                     return (cached, simplified) if return_keyword else cached
                 result = self._search_and_download(
-                    simplified, preferred_source, context=context
+                    simplified,
+                    preferred_source,
+                    context=context,
+                    theme=theme,
+                    entity=entity,
                 )
                 if result:
                     return (result, simplified) if return_keyword else result
@@ -132,12 +166,22 @@ class MediaManager:
         context: Optional[str] = None,
         use_snn: bool = False,
         source_timeout: int = 60,
+        theme: Optional[str] = None,
+        entity: Optional[str] = None,
     ) -> Optional[Path]:
         """Semantic Multi-Armed Bandit: search all sources in parallel,
         score each by semantic_match, quality, freshness & diversity,
         then download from the highest-scoring source.
         """
         ordered_sources = self._get_ordered_sources(preferred_source)
+
+        # Enrich the search query with any supplied entity context so results
+        # are more targeted. Done before safe_q/cache_key so entity searches
+        # are cached independently.
+        entity_dict = self.entity_handler.parse_entity(entity) if entity else None
+        if entity_dict:
+            query = self.entity_handler.enrich_query(query, entity_dict)
+
         safe_q = "".join([c if c.isalnum() else "_" for c in query.lower()])
 
         if self.config:
@@ -177,11 +221,16 @@ class MediaManager:
             api = self.apis.get(source_name)
             if not api or not hasattr(api, "search_videos"):
                 return None
-            if (
-                hasattr(api, "api_key")
-                and source_name not in ("YouTube", "SearXNG")
-                and not api.api_key
-            ):
+            # Skip a source only if it genuinely requires a key that is missing.
+            # Key-less open providers (Openverse, Wikimedia, Internet Archive,
+            # YouTube, SearXNG) must never be filtered out here.
+            try:
+                requires_key = api.capabilities().get(
+                    "requires_key", bool(getattr(api, "api_key", None))
+                )
+            except Exception:
+                requires_key = bool(getattr(api, "api_key", None))
+            if requires_key and not getattr(api, "api_key", None):
                 return None
             try:
                 raw = api.search_videos(query, per_page=10)
@@ -210,8 +259,31 @@ class MediaManager:
                 except Exception:
                     pass
 
+        if entity_dict:
+            print(
+                f"🔎 [Search] query='{query}' entity='{entity_dict['raw']}' "
+                f"({entity_dict['type']}) results/source="
+                f"{ {s: len(v) for s, v in source_results.items()} }"
+            )
+
         if not source_results:
             print(f"💡 [Bandit] No results found for '{query}' from any source.")
+            # Theme-based fallback: broaden to the script's theme and generic
+            # terms so we still get on-theme (or at least neutral) footage.
+            if theme and theme.strip() and theme.strip().lower() not in query.lower():
+                print(f"🎯 [Bandit] Trying theme-based query: '{theme.strip()}'")
+                try:
+                    theme_result = self._search_and_download(
+                        theme.strip(),
+                        preferred_source,
+                        context=context,
+                        use_snn=use_snn,
+                        source_timeout=source_timeout,
+                    )
+                    if theme_result:
+                        return theme_result
+                except Exception:
+                    pass
             return None
 
         # ── Stage 3: score every source with the bandit formula ──
@@ -253,7 +325,24 @@ class MediaManager:
                 + boost
             )
 
-        best_src = max(scores, key=scores.get)
+        # Sort sources by score descending
+        sorted_sources = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        best_src = sorted_sources[0][0]
+
+        # Force source rotation: avoid using the same source on consecutive
+        # queries when an alternative actually returned results.
+        if best_src == self._last_used_source and len(sorted_sources) > 1:
+            for alt_src, _ in sorted_sources[1:]:
+                if alt_src in source_results and source_results[alt_src]:
+                    print(
+                        f"🔄 [Bandit] Rotating away from {self._last_used_source}; "
+                        f"using {alt_src} (score={scores[alt_src]:.3f}) instead of "
+                        f"{best_src} (score={scores[best_src]:.3f}) for '{query}'"
+                    )
+                    best_src = alt_src
+                    break
+
+        self._last_used_source = best_src
         best_media = best_media_per_source[best_src]
         print(
             f"🎰 [Bandit] {best_src} wins (score={scores[best_src]:.3f}) "
@@ -309,6 +398,38 @@ class MediaManager:
             return simplified
         return query
 
+    def is_keyword_available(
+        self, keyword: str, preferred_source: Optional[str] = None
+    ) -> bool:
+        """Quick availability dry-run for a single keyword.
+
+        Returns True if at least one eligible source returns ≥1 result for a
+        minimal (``per_page=1``) search. Used by the availability fallback so we
+        only commit to keyword candidates that can actually yield footage.
+        """
+        if not keyword:
+            return False
+        ordered = self._get_ordered_sources(preferred_source)
+        for src in ordered:
+            api = self.apis.get(src)
+            if not api or not hasattr(api, "search_videos"):
+                continue
+            try:
+                requires_key = api.capabilities().get(
+                    "requires_key", bool(getattr(api, "api_key", None))
+                )
+            except Exception:
+                requires_key = bool(getattr(api, "api_key", None))
+            if requires_key and not getattr(api, "api_key", None):
+                continue
+            try:
+                res = api.search_videos(keyword, per_page=1)
+                if res:
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _get_ordered_sources(self, preferred: Optional[str] = None) -> List[str]:
         sources = list(self.apis.keys())
         if preferred and preferred in sources:
@@ -329,3 +450,79 @@ class MediaManager:
         )
         ordered.extend(remaining)
         return ordered
+
+    # ------------------------------------------------------------------
+    # Unified, de-duplicated discovery across all providers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _canonical_key(media: "Media") -> str:
+        """Stable de-duplication key: normalized URL, else title+source."""
+        url = (media.url or "").strip()
+        if url:
+            from urllib.parse import urlparse
+
+            p = urlparse(url)
+            path = p.path.split("?")[0].rstrip("/").lower()
+            return f"{p.netloc}{path}"
+        return f"{(media.title or '').lower()}|{media.source or ''}"
+
+    def search(
+        self,
+        query: str,
+        media_type: MediaType = MediaType.ANY,
+        limit: int = 50,
+        min_results: int = 50,
+    ) -> List["Media"]:
+        """Aggregate results from every provider (open sources first).
+
+        Walks the priority list querying each provider (skipping those that don't
+        support the requested ``media_type`` or require a missing key) until at
+        least ``min_results`` items are collected or all providers are exhausted.
+        Results are de-duplicated by canonical URL so the same file surfacing on
+        multiple providers appears only once.
+
+        Returns:
+            A list of unified :class:`Media` objects.
+        """
+        collected: List[Media] = []
+        seen = set()
+        discovery_order = [s for s in self.preferred_order if s in self.apis]
+
+        for src in discovery_order:
+            api = self.apis.get(src)
+            if not api:
+                continue
+            try:
+                caps = api.capabilities()
+            except Exception:
+                caps = {}
+            supports = caps.get("supports_media_types", [MediaType.ANY])
+            if media_type != MediaType.ANY and media_type not in supports:
+                continue
+            if caps.get("requires_key") and not getattr(api, "api_key", None):
+                continue
+
+            try:
+                if hasattr(api, "search"):
+                    items = api.search(query, media_type=media_type, limit=limit)
+                else:
+                    items = [
+                        Media.from_dict(d, src)
+                        for d in api.search_videos(query, "portrait", limit)
+                    ]
+            except Exception as e:
+                print(f"⚠️ [Search] {src} failed: {e}")
+                items = []
+
+            for m in items:
+                key = self._canonical_key(m)
+                if key in seen:
+                    continue
+                seen.add(key)
+                collected.append(m)
+                if len(collected) >= min_results:
+                    break
+            if len(collected) >= min_results:
+                break
+
+        return collected[:limit]

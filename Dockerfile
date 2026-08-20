@@ -72,7 +72,7 @@ ENV HF_HUB_OFFLINE=1 \
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY . .
 
-EXPOSE 1603 1604 11434
+EXPOSE 1603 1604
 
 ENTRYPOINT []
 

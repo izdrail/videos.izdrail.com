@@ -33,6 +33,7 @@ import torchaudio
 from core.config import Config
 from core.database import GenerationDB, DB
 from core.nlp.keyword_extractor import KeywordExtractor
+from core.nlp.ollama_client import DEFAULT_FALLBACK_KEYWORDS
 from core.ai.stable_diffusion import StableDiffusionManager, SD_AVAILABLE
 from core.media.manager import MediaManager
 from core.media.youtube_audio import YouTubeAudioLibraryAPI
@@ -202,20 +203,33 @@ class FFmpegVideoGenerator:
         language: str = "en",
         preferred_source: Optional[str] = None,
         use_snn: bool = False,
+        theme: Optional[str] = None,
+        entity: Optional[str] = None,
+        script_id: Optional[str] = None,
+        sentence_idx: Optional[int] = None,
+        candidate_keywords: Optional[List[str]] = None,
     ) -> Optional[Path]:
         """Return a background video Path.
         Preference order:
         1. Video from keyword/media API (checking provided keyword only).
-        2. Random local video file.
-        3. Circle overlay video as full-screen fallback.
+        2. Availability fallback: next-ranked candidate keyword that actually has
+           stock results, then the generic ``generate_fallback_keywords`` map.
+        3. Random local video file.
+        4. Circle overlay video as full-screen fallback.
 
-        Uses the already-computed keyword rather than re-extracting from sentence.
+        The search query is disambiguated with sentence context (polysemy) and,
+        if ``entity`` is supplied, enriched with that entity. Every finalized
+        decision is written to the keyword-selection audit (``DB.log_keyword_selection``)
+        keyed by ``script_id`` / ``sentence_idx`` for later calibration.
         """
         search_keywords = []
         if keyword:
             sanitized = self.keyword_extractor.sanitize_keyword(keyword)
             if sanitized:
-                search_keywords.append(sanitized)
+                enriched = self.keyword_extractor.enrich_keyword_context(
+                    sanitized, sentence
+                )
+                search_keywords.append(enriched)
         else:
             sanitized = self.keyword_extractor.sanitize_keyword(sentence or "")
             if sanitized:
@@ -223,6 +237,13 @@ class FFmpegVideoGenerator:
 
         if not search_keywords:
             print("💡 [Fallback] No keyword available; gradient will be used.")
+            DB.log_keyword_selection(
+                script_id,
+                sentence_idx,
+                keyword,
+                context_preview=sentence or "",
+                was_used=False,
+            )
             return None
 
         video, used_kw = self.media_manager.get_random_media(
@@ -231,10 +252,64 @@ class FFmpegVideoGenerator:
             context=sentence,
             use_snn=use_snn,
             return_keyword=True,
+            theme=theme,
+            entity=entity,
         )
+
+        # Availability fallback: if the chosen keyword yields no footage, try the
+        # next-ranked candidate(s) that actually have stock results before falling
+        # back to a generic query. Only the first *available* candidate is fetched.
+        if not video and candidate_keywords:
+            remaining = [c for c in candidate_keywords if c and c != keyword][:3]
+            for cand in remaining:
+                if self.media_manager.is_keyword_available(cand, preferred_source):
+                    cand_q = [
+                        self.keyword_extractor.enrich_keyword_context(cand, sentence)
+                    ]
+                    v, uk = self.media_manager.get_random_media(
+                        cand_q,
+                        preferred_source,
+                        context=sentence,
+                        use_snn=use_snn,
+                        return_keyword=True,
+                        theme=theme,
+                        entity=entity,
+                    )
+                    if v:
+                        video, used_kw = v, uk
+                        print(
+                            f"♻️ [Fallback] Keyword '{keyword}' unavailable; "
+                            f"used candidate '{cand}' instead."
+                        )
+                        break
+            # If every candidate is unavailable, broaden to the fallback map.
+            if not video:
+                fb = self.keyword_extractor.generate_fallback_keywords(
+                    keyword or (sentence or "")[:20]
+                )
+                if fb:
+                    v, uk = self.media_manager.get_random_media(
+                        fb[:4],
+                        preferred_source,
+                        context=sentence,
+                        use_snn=use_snn,
+                        return_keyword=True,
+                        theme=theme,
+                        entity=entity,
+                    )
+                    if v:
+                        video, used_kw = v, uk
+
         if video:
             if used_kw:
-                self.keyword_extractor.used_keywords.add(used_kw)
+                self.keyword_extractor.add_used_keyword(used_kw)
+            DB.log_keyword_selection(
+                script_id,
+                sentence_idx,
+                used_kw,
+                context_preview=sentence or "",
+                was_used=True,
+            )
             return video
 
         circle_video = self.get_circle_overlay_video()
@@ -242,8 +317,23 @@ class FFmpegVideoGenerator:
             print(
                 f"🎨 [Fallback] Using circle overlay video as background: {circle_video.name}"
             )
+            # Circle overlay is a generic fallback, not a keyword-based match.
+            DB.log_keyword_selection(
+                script_id,
+                sentence_idx,
+                keyword,
+                context_preview=sentence or "",
+                was_used=False,
+            )
             return circle_video
         print("💡 [Fallback] No video found; gradient will be used.")
+        DB.log_keyword_selection(
+            script_id,
+            sentence_idx,
+            keyword,
+            context_preview=sentence or "",
+            was_used=False,
+        )
         return None
 
     def get_circle_overlay_video(self) -> Optional[Path]:
@@ -898,6 +988,10 @@ class FFmpegVideoGenerator:
         enable_crossfade: bool = False,
         crossfade_duration: float = 0.3,
         progress_callback=None,
+        theme: Optional[str] = None,
+        entity: Optional[str] = None,
+        script_id: Optional[str] = None,
+        candidate_map: Optional[Dict[int, List[str]]] = None,
     ) -> Path:
 
         # Apply aspect ratio and quality from instance vars (set before calling)
@@ -1035,6 +1129,13 @@ class FFmpegVideoGenerator:
                     language,
                     preferred_media_source,
                     use_snn=use_snn,
+                    theme=theme,
+                    entity=entity,
+                    script_id=script_id,
+                    sentence_idx=slide["slide_num"],
+                    candidate_keywords=(
+                        candidate_map.get(slide["slide_num"]) if candidate_map else None
+                    ),
                 )
                 fetch_futures[future] = slide["slide_num"]
 
@@ -1292,6 +1393,44 @@ class TextToVideoGenerator:
         self.available_models = self.keyword_extractor.get_available_models()
         self.available_background_videos = self._get_available_background_videos()
 
+    def _audit_keyword_decision(
+        self,
+        script_id: Optional[str],
+        sentence_idx: int,
+        keyword: Optional[str],
+        sentence: Optional[str],
+        was_used: bool = True,
+    ) -> None:
+        """Log a finalized keyword decision with its raw neuron signals + score.
+
+        Captures the neural evaluation at the exact point a keyword is committed
+        for a slide, so weights can later be calibrated by regression. Best-effort
+        and non-blocking (failures are swallowed by ``DB.log_keyword_selection``).
+        """
+        signals = None
+        decision_score = None
+        if keyword and sentence:
+            try:
+                sig = self.keyword_extractor.neuron_extractor._local_evaluate_signals(
+                    sentence, keyword
+                )
+                if sig:
+                    signals = sig
+                    decision_score = self.keyword_extractor.neuron_extractor._calculate_decision_score(
+                        sig
+                    )
+            except Exception as e:  # pragma: no cover - best-effort audit
+                print(f"⚠️ [Audit] signal eval failed: {e}")
+        DB.log_keyword_selection(
+            script_id,
+            sentence_idx,
+            keyword,
+            context_preview=sentence or "",
+            signals=signals,
+            decision_score=decision_score,
+            was_used=was_used,
+        )
+
     def detect_language(self, text: str) -> str:
         """Detect language of the input text"""
         if not detect_lang or not text or len(text.strip()) < 5:
@@ -1418,7 +1557,7 @@ class TextToVideoGenerator:
         hide_text: bool = False,
         export_fps: int = 30,
         overlay_shape: str = "Circle",
-        ai_model: str = "mistral:7b",
+        ai_model: str = "gemma4:e2b",
         ai_api_url: Optional[str] = None,
         stress_level: float = 1.0,
         use_snn: bool = False,
@@ -1427,6 +1566,7 @@ class TextToVideoGenerator:
         aspect_ratio: str = "9:16 Portrait (TikTok/Shorts)",
         quality: str = "Medium (Balanced)",
         enable_crossfade: bool = False,
+        entity: Optional[str] = None,
         progress_callback=None,
     ) -> Dict:
         # Language Detection
@@ -1495,10 +1635,22 @@ class TextToVideoGenerator:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_dir = self.config.OUTPUT_DIR / f"video_{timestamp}_{language}"
         session_dir.mkdir(exist_ok=True)
+        # Stable id grouping all audit rows (selection + fetch) for this run.
+        run_script_id = uuid.uuid4().hex[:12]
 
         # Parallel Keyword Extraction
         sentence_keywords = []
+        theme = None
         if not audio_only:
+            # Extract a global theme to bias keyword selection + media fallback
+            try:
+                theme = self.keyword_extractor.extract_theme(text, language)
+                if theme:
+                    print(f"🎯 [NLP] Detected global theme: '{theme}'")
+            except Exception as e:
+                print(f"⚠️ [NLP] Theme extraction failed: {e}")
+                theme = None
+
             print(
                 f"🧠 [NLP] Extracting keywords for {len(sentences)} sentences in parallel..."
             )
@@ -1509,9 +1661,17 @@ class TextToVideoGenerator:
                 max_workers=self.config.WORKER_POOL_NLP
             ) as executor:
                 for i, sent in enumerate(sentences):
-                    # Request multiple candidates to ensure we can pick a unique one
+                    # Request multiple candidates to ensure we can pick a unique one.
+                    # theme biases the LLM prompt and neural scoring context.
                     future = executor.submit(
-                        self.keyword_extractor.extract_keywords, sent, 10, language
+                        self.keyword_extractor.extract_keywords,
+                        sent,
+                        10,
+                        language,
+                        True,
+                        False,
+                        theme,
+                        entity,
                     )
                     extraction_futures[future] = i
 
@@ -1526,22 +1686,95 @@ class TextToVideoGenerator:
                         )
                         sentence_keywords_map[idx] = []
 
-            # Assign unique keywords sequentially to ensure no duplicates
-            for i in range(len(sentences)):
-                candidates = sentence_keywords_map.get(i, [])
-                selected_kw = None
-                for kw in candidates:
-                    if kw not in self.keyword_extractor.used_keywords:
-                        selected_kw = kw
-                        self.keyword_extractor.used_keywords.add(kw)
-                        break
+            if use_snn:
+                # Use the spiking-neural-network coherence optimizer to select a
+                # globally coherent keyword sequence (balances engagement + flow).
+                try:
+                    print(
+                        "🧠 [SNN] Optimizing keyword sequence for global coherence..."
+                    )
+                    chosen = self.keyword_extractor.optimize_keyword_sequence(
+                        sentences, sentence_keywords_map, theme=theme, use_snn=use_snn
+                    )
+                    sentence_keywords = []
+                    for i in range(len(sentences)):
+                        kw = chosen.get(i)
+                        if not kw:
+                            # LLM/neuron selection failed for this sentence — fall
+                            # back to a generic keyword so the render is never blocked.
+                            kw = random.choice(DEFAULT_FALLBACK_KEYWORDS)
+                            print(
+                                f"  - Sentence {i}: no SNN keyword; using fallback '{kw}'"
+                            )
+                        sentence_keywords.append(kw)
+                    try:
+                        coherence, _ = (
+                            self.keyword_extractor.evaluate_keyword_sequence_coherence(
+                                sentences, sentence_keywords, use_snn=use_snn
+                            )
+                        )
+                        print(f"🧠 [SNN] Selected sequence coherence: {coherence:.3f}")
+                    except Exception as e:
+                        print(f"⚠️ [SNN] Coherence scoring skipped: {e}")
+                    for i in range(len(sentences)):
+                        print(f"  - Sentence {i}: '{sentence_keywords[i]}'")
+                        try:
+                            self._audit_keyword_decision(
+                                run_script_id,
+                                i,
+                                sentence_keywords[i],
+                                sentences[i],
+                                was_used=True,
+                            )
+                        except Exception as audit_err:
+                            print(
+                                f"⚠️ [Audit] Keyword decision logging skipped: {audit_err}"
+                            )
+                except Exception as e:
+                    print(f"⚠️ [SNN] Sequence optimization failed, falling back: {e}")
+                    use_snn = False  # fall through to standard selection below
 
-                # If all used or empty, fallback to first candidate or None (will fallback to auto in pipeline)
-                if not selected_kw and candidates:
-                    selected_kw = candidates[0]
+            if not use_snn:
+                # Assign unique keywords sequentially, using *semantic* similarity
+                # (not just exact match) to avoid visually redundant footage.
+                for i in range(len(sentences)):
+                    candidates = sentence_keywords_map.get(i, [])
+                    selected_kw = None
+                    for kw in candidates:
+                        if self.keyword_extractor.is_semantically_unique(kw):
+                            selected_kw = kw
+                            self.keyword_extractor.add_used_keyword(kw)
+                            break
 
-                sentence_keywords.append(selected_kw)
-                print(f"  - Sentence {i}: '{selected_kw}'")
+                    # If all candidates are too similar to earlier ones, fall back
+                    # to the first candidate (will still fallback in pipeline).
+                    if not selected_kw and candidates:
+                        selected_kw = candidates[0]
+                        self.keyword_extractor.add_used_keyword(selected_kw)
+
+                    # LLM/keyword-extraction can fail outright (e.g. Ollama down).
+                    # Never let that abort the render — fall back to a generic
+                    # keyword so the background finder still produces footage.
+                    if not selected_kw:
+                        selected_kw = random.choice(DEFAULT_FALLBACK_KEYWORDS)
+                        print(
+                            f"  - Sentence {i}: no keyword extracted; using fallback '{selected_kw}'"
+                        )
+
+                    sentence_keywords.append(selected_kw)
+                    print(f"  - Sentence {i}: '{selected_kw}'")
+                    try:
+                        self._audit_keyword_decision(
+                            run_script_id,
+                            i,
+                            selected_kw,
+                            sentences[i],
+                            was_used=True,
+                        )
+                    except Exception as audit_err:
+                        print(
+                            f"⚠️ [Audit] Keyword decision logging skipped: {audit_err}"
+                        )
         else:
             # Placeholder for audio-only
             sentence_keywords = [None] * len(sentences)
@@ -1557,8 +1790,14 @@ class TextToVideoGenerator:
                     print(
                         f"🎵 [Music] Auto-selection mode active. Analyzing mood for '{text[:40]}...'"
                     )
-                    mood_kw = self.keyword_extractor.extract_mood_keyword(text)
-                    print(f"🎵 [Music] AI detected mood: '{mood_kw}'")
+                    try:
+                        mood_kw = self.keyword_extractor.extract_mood_keyword(text)
+                        print(f"🎵 [Music] AI detected mood: '{mood_kw}'")
+                    except Exception as mood_err:
+                        print(
+                            f"⚠️ [Music] Mood detection failed, using fallback: {mood_err}"
+                        )
+                        mood_kw = os.getenv("OLLAMA_FALLBACK_MOOD", "Cinematic")
 
                     yt_results = self.search_audio_library(mood_kw)
                     if not yt_results:
@@ -1900,6 +2139,10 @@ class TextToVideoGenerator:
                     enable_crossfade=enable_crossfade,
                     crossfade_duration=0.3,
                     progress_callback=video_progress,
+                    theme=theme,
+                    entity=entity,
+                    script_id=run_script_id,
+                    candidate_map=sentence_keywords_map,
                 )
 
                 if enable_background_music and music_path and music_path.exists():
@@ -2122,7 +2365,7 @@ def setup_ui(generator: TextToVideoGenerator):
                             ai_model_dropdown = gr.Dropdown(
                                 label="🤖 AI Model",
                                 choices=generator.available_models,
-                                value="mistral:7b",
+                                value="gemma4:e2b",
                                 info="Select LLM for keyword extraction",
                             )
                             btn_refresh_models = gr.Button(
@@ -2179,6 +2422,11 @@ def setup_ui(generator: TextToVideoGenerator):
                             label="🔍 Custom Search Keyword",
                             placeholder="e.g., 'cyberpunk city', 'peaceful forest'",
                             info="Leave empty for auto-extraction",
+                        )
+                        entity_input = gr.Textbox(
+                            label="🏷️ Entity (optional)",
+                            placeholder="e.g., 'Tesla', 'Paris', 'NASA'",
+                            info="Person, brand, location or concept to bias keywords & searches",
                         )
                         background_video_dropdown = gr.Dropdown(
                             label="🏞️ Select Background Video",
@@ -2353,12 +2601,12 @@ def setup_ui(generator: TextToVideoGenerator):
 
                         preview_js = gr.HTML(
                             value="""<style>
-.hidden-textbox { display: none !important; }
+ .hidden-textbox { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
 </style>
 <script>
 document.addEventListener('click',function(e){var c=e.target.closest('.vid-card');if(c){c.classList.toggle('selected');var cb=c.querySelector('input[type=checkbox]');if(cb)cb.checked=c.classList.contains('selected');b();}});
 document.addEventListener('change',function(e){if(e.target.matches('.vid-card input[type=checkbox]')){var c=e.target.closest('.vid-card');if(c){c.classList.toggle('selected');b();}}});
-function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(function(c){var i=c.getAttribute('data-slide');var r=c.getAttribute('data-source');if(!s[i])s[i]=[];s[i].push(r);});var x=document.getElementById('js-selections-storage');if(!x)return;var t=x.tagName==='INPUT'||x.tagName==='TEXTAREA'?x:x.querySelector('input,textarea');if(!t)return;t.value=JSON.stringify(s);t.dispatchEvent(new Event('input',{bubbles:true}));}
+function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(function(c){var i=c.getAttribute('data-slide');var r=c.getAttribute('data-source');if(!s[i])s[i]=[];s[i].push(r);});var x=document.getElementById('js-selections-storage');if(!x)return;var t=x.tagName==='INPUT'||x.tagName==='TEXTAREA'?x:x.querySelector('input,textarea');if(!t)return;t.value=JSON.stringify(s);t.dispatchEvent(new Event('input',{bubbles:true}));t.dispatchEvent(new Event('change',{bubbles:true}));}
 </script>"""
                         )
 
@@ -2455,6 +2703,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
             js_json,
             override_text,
             slide_data,
+            entity,
             progress=gr.Progress(),
         ):
 
@@ -2614,6 +2863,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                 quality=quality_val,
                 enable_crossfade=enable_crossfade_val,
                 pre_selected_videos=final_pre_selected,
+                entity=entity,
                 progress_callback=update_progress,
             )
 
@@ -2664,11 +2914,11 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
             try:
                 models = OllamaKeywordExtractor.fetch_models_static(url)
                 return gr.Dropdown(
-                    choices=models, value=models[0] if models else "mistral:7b"
+                    choices=models, value=models[0] if models else "gemma4:e2b"
                 )
             except Exception as e:
                 print(f"Error refreshing models: {e}")
-                return gr.Dropdown(choices=["mistral:7b"], value="mistral:7b")
+                return gr.Dropdown(choices=["gemma4:e2b"], value="gemma4:e2b")
 
         btn_refresh_models.click(
             fn=refresh_models_action, inputs=[ai_api_url], outputs=[ai_model_dropdown]
@@ -2779,6 +3029,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                 js_selections,
                 custom_selections_input,
                 preview_data_state,
+                entity_input,
             ],
             outputs=[
                 video_output,
@@ -2791,7 +3042,9 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
             ],
         )
 
-        def preview_backgrounds_action(text, language, media_source, pexels_keyword):
+        def preview_backgrounds_action(
+            text, language, media_source, pexels_keyword, entity=None
+        ):
             if not text or not text.strip():
                 return (
                     "<p style='color:red'>Please enter text first.</p>",
@@ -2813,21 +3066,27 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
 
             for i, sentence in enumerate(sentences[:20]):
                 candidates = kw_extractor.extract_keywords(
-                    sentence, top_n=5, language=kw_lang
+                    sentence, top_n=5, language=kw_lang, entity=entity
                 )
                 kw = None
                 for c in candidates:
-                    if c not in kw_extractor.used_keywords:
+                    if kw_extractor.is_semantically_unique(c):
                         kw = c
-                        kw_extractor.used_keywords.add(c)
+                        kw_extractor.add_used_keyword(c)
                         break
                 if not kw and candidates:
                     kw = candidates[0]
+                    kw_extractor.add_used_keyword(kw)
 
                 source_cards = ""
                 available_sources = []
 
                 if kw:
+                    # Enrich the preview search with the entity for sharper,
+                    # on-topic thumbnails when an entity is supplied.
+                    search_kw = kw
+                    if entity and entity.strip():
+                        search_kw = f"{kw} {entity.strip()}"
                     for src in ordered_sources:
                         api = media_mgr.apis.get(src)
                         if not api or not hasattr(api, "search_videos"):
@@ -2839,7 +3098,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                         ):
                             continue
                         try:
-                            results = api.search_videos(kw, per_page=3)
+                            results = api.search_videos(search_kw, per_page=3)
                             if results:
                                 available_sources.append(src)
                                 r = results[0]
@@ -2934,6 +3193,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                 language_dropdown,
                 media_source_dropdown,
                 pexels_keyword,
+                entity_input,
             ],
             outputs=[
                 preview_html,
@@ -2959,6 +3219,76 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                 pre_selected_videos_state,
                 selection_status,
             ],
+        )
+
+        # ── Debug panel: keyword selection audit ──
+        def _format_selection_history(limit: int = 50) -> str:
+            try:
+                history = generator.keyword_extractor.get_selection_history(limit)
+            except Exception as e:
+                return f"⚠️ Could not read selection history: {e}"
+            if not history:
+                return (
+                    "*No keyword selections recorded yet. Run a preview or "
+                    "generation first.*"
+                )
+            lines = []
+            for h in history[-limit:]:
+                ctx = h.get("context", {})
+                text = ctx.get("text", "")
+                lines.append(
+                    f"[{h.get('timestamp', '?')}] text='{text}' "
+                    f"entity={h.get('entity')!r} ({h.get('entity_type')})"
+                )
+                lines.append(
+                    f"  source={h.get('source')} fallback={h.get('fallback_used')}"
+                )
+                lines.append(f"  candidates={h.get('candidates')}")
+                lines.append(f"  selected={h.get('selected')}")
+                for r in h.get("reasoning", []):
+                    lines.append(f"  ↳ {r}")
+            return "\n".join(lines)
+
+        def refresh_debug_action():
+            return _format_selection_history(50)
+
+        def set_debug_action(enabled: bool):
+            try:
+                generator.keyword_extractor.set_debug_mode(bool(enabled))
+            except Exception:
+                pass
+            return (
+                f"🔍 Debug mode {'ON' if enabled else 'OFF'}. "
+                "Keyword selection audit logging "
+                f"{'enabled' if enabled else 'disabled'}."
+            )
+
+        with gr.Accordion("🔍 Debug: Keyword Selection", open=False):
+            with gr.Row():
+                refresh_debug_btn = gr.Button("🔄 Refresh Debug")
+                debug_toggle = gr.Checkbox(label="Debug Mode", value=False)
+            debug_status = gr.Markdown(
+                "*Toggle debug mode to log every keyword decision.*"
+            )
+            debug_output = gr.Textbox(
+                label="Selection History",
+                lines=20,
+                interactive=False,
+                placeholder=(
+                    "Keyword selection history will appear here after you "
+                    "preview or generate..."
+                ),
+            )
+
+        refresh_debug_btn.click(
+            fn=refresh_debug_action,
+            inputs=[],
+            outputs=[debug_output],
+        )
+        debug_toggle.change(
+            fn=set_debug_action,
+            inputs=[debug_toggle],
+            outputs=[debug_status],
         )
 
         def apply_overrides_action(override_text, slide_data, js_json):

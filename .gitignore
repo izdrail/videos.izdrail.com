@@ -17,6 +17,9 @@ voice_samples/
 # Logs and caches
 *.log
 generation_cache.db
+neural_cache.db
+*.db-wal
+*.db-shm
 __pycache__/
 venv/
 .venv/

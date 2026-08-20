@@ -41,6 +41,14 @@ class Config:
         # Standard voice for default selection
         self.STANDARD_VOICE_NAME = "sexy"
 
+        # Keyword selection / entity search configuration
+        self.KEYWORD_DEBUG_MODE = (
+            os.getenv("KEYWORD_DEBUG_MODE", "False").lower() == "true"
+        )
+        self.ENTITY_ENABLED = True
+        self.ENTITY_WEIGHT_BOOST = 1.5
+        self.KEYWORD_HISTORY_LIMIT = int(os.getenv("KEYWORD_HISTORY_LIMIT", "200"))
+
         # Additional directory paths
         self.VIDEO_OVERLAYS_DIR = self.ROOT_DIR / "video-overlays"
         self.CIRCLE_OVERLAYS_DIR = self.ROOT_DIR / "circle_overlays"
@@ -206,7 +214,7 @@ class Config:
         self.UNSPLASH_SECRET_KEY = os.getenv("UNSPLASH_SECRET_KEY")
 
         # AI/NLP Configuration
-        self.AI_MODEL = os.getenv("AI_MODEL", "mistral:7b")
+        self.AI_MODEL = os.getenv("AI_MODEL", "gemma4:e2b")
         self.OLLAMA_API_URL = os.getenv(
             "OLLAMA_API_URL", "https://ai.izdrail.com/api/generate"
         )

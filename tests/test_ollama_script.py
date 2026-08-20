@@ -34,7 +34,7 @@ def test_generate_script():
         args, kwargs = mock_post.call_args
         payload = kwargs['json']
         
-        assert payload['model'] == "mistral:7b"
+        assert payload['model'] == "gemma4:e2b"
         assert "Generate a tts readys script no [pause]" in payload['prompt']
         assert result == "Here is the clean script without pauses."
         print("✅ Test passed!")

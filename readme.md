@@ -116,7 +116,7 @@ The pipeline works **without Ollama** — fallback keywords, mood, and script co
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_API_URL` | `https://ai.izdrail.com/api/generate` | Ollama API endpoint |
-| `AI_MODEL` | `mistral:7b` | LLM model name |
+| `AI_MODEL` | `gemma4:e2b` | LLM model name |
 | `OLLAMA_MAX_RETRIES` | `3` | Retry attempts before fallback |
 | `OLLAMA_RETRY_BASE_DELAY` | `1.0` | Base delay (seconds) for exponential backoff |
 | `OLLAMA_TIMEOUT` | `180` | Request timeout in seconds |

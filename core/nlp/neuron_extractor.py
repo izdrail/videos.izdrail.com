@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import re
+import sqlite3
+import hashlib
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -26,7 +28,7 @@ class NeuronExtractor:
     Maps brain regions to specific AI evaluation roles.
     """
 
-    def __init__(self, model: str = "mistral:7b", url: Optional[str] = None):
+    def __init__(self, model: str = "gemma4:e2b", url: Optional[str] = None):
         self.model = model
         self.url = url or os.getenv(
             "OLLAMA_API_URL", "https://ai.izdrail.com/api/generate"
@@ -65,6 +67,63 @@ class NeuronExtractor:
         self._anchor_docs = None
         if self.nlp:
             self._anchor_docs = {k: self.nlp(v) for k, v in self.anchors.items()}
+
+        # ── Neural evaluation cache (in-memory + optional SQLite) ──
+        self._eval_cache: Dict[str, Any] = {}
+        self._eval_cache_max = int(os.getenv("NEURON_CACHE_MAX", "2000"))
+        # Defaults to a local SQLite file so neural evaluations persist across
+        # runs (set NEURON_CACHE_DB= (empty) or a path to override/disable).
+        self._cache_db_path = os.getenv("NEURON_CACHE_DB", "neural_cache.db") or None
+        self._cache_db = None
+        if self._cache_db_path:
+            try:
+                self._cache_db = sqlite3.connect(
+                    self._cache_db_path, check_same_thread=False
+                )
+                self._cache_db.execute(
+                    "CREATE TABLE IF NOT EXISTS neuron_signals ("
+                    "key TEXT PRIMARY KEY, value TEXT)"
+                )
+                self._cache_db.commit()
+            except Exception as e:
+                logger.warning("[NeuronAI] Neural cache DB unavailable: %s", e)
+                self._cache_db = None
+
+    def _signal_cache_key(self, context: str, target: str) -> str:
+        payload = f"{self.model}|{context[:300]}|{target}"
+        return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+    def _signal_cache_get(self, key: str) -> Optional[Dict[str, Any]]:
+        if key in self._eval_cache:
+            return self._eval_cache[key]
+        if self._cache_db is not None:
+            try:
+                row = self._cache_db.execute(
+                    "SELECT value FROM neuron_signals WHERE key=?", (key,)
+                ).fetchone()
+                if row:
+                    return json.loads(row[0])
+            except Exception:
+                pass
+        return None
+
+    def _signal_cache_set(self, key: str, value: Dict[str, Any]) -> None:
+        self._eval_cache[key] = value
+        if len(self._eval_cache) > self._eval_cache_max:
+            # Simple FIFO eviction
+            try:
+                self._eval_cache.pop(next(iter(self._eval_cache)))
+            except Exception:
+                pass
+        if self._cache_db is not None:
+            try:
+                self._cache_db.execute(
+                    "INSERT OR REPLACE INTO neuron_signals (key, value) VALUES (?, ?)",
+                    (key, json.dumps(value)),
+                )
+                self._cache_db.commit()
+            except Exception:
+                pass
 
     def _sync_client(self) -> None:
         self._client.set_model(self.model)
@@ -145,6 +204,17 @@ class NeuronExtractor:
     def _local_evaluate_signals(
         self, context: str, target: str
     ) -> Optional[Dict[str, Any]]:
+        cache_key = self._signal_cache_key(context, target)
+        cached = self._signal_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        signals = self._compute_signals(context, target)
+        if signals is not None:
+            self._signal_cache_set(cache_key, signals)
+        return signals
+
+    def _compute_signals(self, context: str, target: str) -> Optional[Dict[str, Any]]:
         if not self.nlp or not self._anchor_docs:
             return None
 

@@ -36,7 +36,7 @@ class OllamaClient:
 
     def __init__(
         self,
-        model: str = "mistral:7b",
+        model: str = "gemma4:e2b",
         url: Optional[str] = None,
         max_retries: int = 3,
         base_delay: float = 1.0,
