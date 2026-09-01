@@ -1187,9 +1187,10 @@ class FFmpegVideoGenerator:
             future_to_slide_idx = {}
 
             for idx_in_list, slide in enumerate(slides_data):
+                slide_display_index = idx_in_list + 1
                 video_bg = slide_videos.get(slide["slide_num"])
                 output_path = (
-                    temp_dir / f"slide_{slide['type']}_{slide['slide_num']}.mp4"
+                    temp_dir / f"slide_{slide['type']}_{slide_display_index}.mp4"
                 )
 
                 future = render_executor.submit(
@@ -1198,7 +1199,7 @@ class FFmpegVideoGenerator:
                     slide["audio_path"],
                     video_bg,
                     output_path,
-                    slide["slide_num"],
+                    slide_display_index,
                     slide["is_intro"],
                     slide["is_cta"],
                     circle_video,
@@ -1230,16 +1231,27 @@ class FFmpegVideoGenerator:
                 except Exception as e:
                     print(f"❌ [Pipeline] Render failed for slide index {idx}: {e}")
 
-        # Assemble paths in the correct order based on slides_data list
+        # Assemble and validate paths in the correct order based on slides_data list
         slide_paths = []
+        valid_slide_paths = []
         for i in range(len(slides_data)):
             if i in render_results:
-                slide_paths.append(render_results[i])
+                sp = render_results[i]
+                slide_paths.append(sp)
+                valid, reason = validate_slide(sp)
+                if valid:
+                    valid_slide_paths.append(sp)
+                    print(f"[Pipeline] Slide {i+1} validation: OK ({sp.name})")
+                else:
+                    print(f"❌ [Pipeline] Slide {i+1} validation failed ({sp.name}): {reason}")
 
-        # (Removed old sort_key logic)
+        if len(valid_slide_paths) != len(slides_data):
+            print(f"⚠️ [Pipeline] Validation warning: {len(valid_slide_paths)} of {len(slides_data)} slides passed pre-concatenation validation.")
+
+        slide_paths = valid_slide_paths
 
         if not slide_paths:
-            raise ValueError("No slides created")
+            raise ValueError("No valid slides available for final composition")
 
         # --- Stage 4: Concatenation (with optional crossfade) ---
         if progress_callback:
