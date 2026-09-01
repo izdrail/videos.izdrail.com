@@ -935,7 +935,7 @@ class FFmpegVideoGenerator:
                 "+faststart",
                 str(output_path),
             ]
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
             print(f"✅ [FFmpeg] Slide {slide_num}: Successfully composed.")
             if not output_path.exists():
                 print(f"[FFmpeg] ERROR: Output not created for slide {slide_num}")
@@ -1152,7 +1152,7 @@ class FFmpegVideoGenerator:
                     if progress_callback:
                         progress_callback(
                             completed_fetches,
-                            total_slides * 2 + 1,
+                            total_slides * 2,
                             f"Fetching background videos ({completed_fetches}/{total_slides})...",
                         )
                 except Exception as e:
@@ -1225,8 +1225,8 @@ class FFmpegVideoGenerator:
                     if progress_callback:
                         progress_callback(
                             total_slides + completed_renders,
-                            total_slides * 2 + 1,
-                            "Rendering slides...",
+                            total_slides * 2,
+                            f"Rendering slides ({completed_renders}/{total_slides})...",
                         )
                 except Exception as e:
                     print(f"❌ [Pipeline] Render failed for slide index {idx}: {e}")
@@ -1252,6 +1252,13 @@ class FFmpegVideoGenerator:
 
         if not slide_paths:
             raise ValueError("No valid slides available for final composition")
+
+        # Log slide file details before concatenation
+        print(f"🔍 [Pipeline] Verifying {len(slide_paths)} slide files before concatenation:")
+        for idx, sp in enumerate(slide_paths, 1):
+            exists = sp.exists()
+            size_mb = (sp.stat().st_size / 1024 / 1024) if exists else 0
+            print(f"   Slide {idx}: {sp.name} | Exists: {exists} | Size: {size_mb:.2f} MB | Path: {sp.absolute()}")
 
         # --- Stage 4: Concatenation (with optional crossfade) ---
         if progress_callback:
@@ -1349,11 +1356,15 @@ class FFmpegVideoGenerator:
             ]
             print("[FFmpeg] Concatenating slides...")
             try:
-                subprocess.run(concat_cmd, check=True, capture_output=True)
+                res = subprocess.run(concat_cmd, check=True, capture_output=True, text=True, timeout=300)
                 print(f"✅ [Pipeline] Final video created: {output_path}")
             except subprocess.CalledProcessError as e:
-                print(f"❌ [FFmpeg] Concat failed: {e}")
-                pass
+                err_msg = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
+                print(f"❌ [FFmpeg] Concat failed with returncode {e.returncode}: {err_msg[:500]}")
+                raise RuntimeError(f"FFmpeg concat failed: {err_msg[:500]}") from e
+            except subprocess.TimeoutExpired as e:
+                print(f"❌ [FFmpeg] Concat timed out after 300s")
+                raise RuntimeError("FFmpeg concat process timed out") from e
             concat_file.unlink(missing_ok=True)
 
         # Cleanup rendered slides
@@ -1985,8 +1996,11 @@ class TextToVideoGenerator:
             # Define video_progress callback here, as it's used in the video generation path
             def video_progress(current, total, message):
                 if progress_callback:
+                    # Scale video phase (0..total) into the 2nd half of overall progress (audio_tasks_count..audio_tasks_count*2)
+                    audio_count = len(audio_tasks)
+                    scaled_current = audio_count + int((current / max(total, 1)) * audio_count)
                     progress_callback(
-                        len(sentences) + current, len(sentences) * 2, message
+                        min(scaled_current, audio_count * 2), audio_count * 2, message
                     )
 
             # Define selected_bg_video_path here, as it's used in the video generation path
@@ -2159,76 +2173,85 @@ class TextToVideoGenerator:
 
                 if enable_background_music and music_path and music_path.exists():
                     if progress_callback:
+                        audio_count = len(audio_tasks)
                         progress_callback(
-                            len(sentences) * 2 - 1,
-                            len(sentences) * 2,
+                            audio_count * 2 - 1,
+                            audio_count * 2,
                             f"Adding background music: {music_path.name}...",
                         )
                     print(f"🔊 [Mixing] Overlaying background music: {music_path.name}")
-                    audio_extract = (
-                        self.config.TEMP_DIR / f"extracted_{uuid.uuid4().hex[:8]}.wav"
-                    )
-                    subprocess.run(
-                        [
-                            "ffmpeg",
-                            "-y",
-                            "-i",
-                            str(video_temp_path),
-                            "-vn",
-                            "-acodec",
-                            "pcm_s16le",
-                            str(audio_extract),
-                        ],
-                        check=True,
-                        capture_output=True,
-                    )
-                    voice_seg = AudioSegment.from_file(str(audio_extract))
-                    music = AudioSegment.from_file(str(music_path)) + music_volume_db
-                    if len(music) < len(voice_seg):
-                        loops = (len(voice_seg) // len(music)) + 2
-                        music = music * loops
-                    music = music[: len(voice_seg)]
-                    music = music.fade_in(1000).fade_out(1000)
-                    mixed = voice_seg.overlay(music)
-                    if normalize_audio:
-                        from pydub.effects import normalize
+                    try:
+                        audio_extract = (
+                            self.config.TEMP_DIR / f"extracted_{uuid.uuid4().hex[:8]}.wav"
+                        )
+                        subprocess.run(
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-i",
+                                str(video_temp_path),
+                                "-vn",
+                                "-acodec",
+                                "pcm_s16le",
+                                str(audio_extract),
+                            ],
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                            timeout=300,
+                        )
+                        voice_seg = AudioSegment.from_file(str(audio_extract))
+                        music = AudioSegment.from_file(str(music_path)) + music_volume_db
+                        if len(music) < len(voice_seg):
+                            loops = (len(voice_seg) // len(music)) + 2
+                            music = music * loops
+                        music = music[: len(voice_seg)]
+                        music = music.fade_in(1000).fade_out(1000)
+                        mixed = voice_seg.overlay(music)
+                        if normalize_audio:
+                            from pydub.effects import normalize
 
-                        mixed = normalize(mixed, headroom=0.1)
-                    mixed_audio = (
-                        self.config.TEMP_DIR / f"mixed_{uuid.uuid4().hex[:8]}.wav"
-                    )
-                    mixed.export(str(mixed_audio), format="wav")
-                    video_with_music = (
-                        self.config.TEMP_DIR / f"with_music_{uuid.uuid4().hex[:8]}.mp4"
-                    )
-                    subprocess.run(
-                        [
-                            "ffmpeg",
-                            "-y",
-                            "-i",
-                            str(video_temp_path),
-                            "-i",
-                            str(mixed_audio),
-                            "-c:v",
-                            "copy",
-                            "-c:a",
-                            "aac",
-                            "-b:a",
-                            "192k",
-                            "-map",
-                            "0:v:0",
-                            "-map",
-                            "1:a:0",
-                            "-shortest",
-                            str(video_with_music),
-                        ],
-                        check=True,
-                        capture_output=True,
-                    )
-                    audio_extract.unlink(missing_ok=True)
-                    mixed_audio.unlink(missing_ok=True)
-                    video_temp_path.unlink(missing_ok=True)
-                    video_temp_path = video_with_music
+                            mixed = normalize(mixed, headroom=0.1)
+                        mixed_audio = (
+                            self.config.TEMP_DIR / f"mixed_{uuid.uuid4().hex[:8]}.wav"
+                        )
+                        mixed.export(str(mixed_audio), format="wav")
+                        video_with_music = (
+                            self.config.TEMP_DIR / f"with_music_{uuid.uuid4().hex[:8]}.mp4"
+                        )
+                        subprocess.run(
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-i",
+                                str(video_temp_path),
+                                "-i",
+                                str(mixed_audio),
+                                "-c:v",
+                                "copy",
+                                "-c:a",
+                                "aac",
+                                "-b:a",
+                                "192k",
+                                "-map",
+                                "0:v:0",
+                                "-map",
+                                "1:a:0",
+                                "-shortest",
+                                str(video_with_music),
+                            ],
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                            timeout=300,
+                        )
+                        audio_extract.unlink(missing_ok=True)
+                        mixed_audio.unlink(missing_ok=True)
+                        video_temp_path.unlink(missing_ok=True)
+                        video_temp_path = video_with_music
+                        print("✅ [Mixing] Background music successfully overlaid.")
+                    except Exception as eMix:
+                        print(f"⚠️ [Mixing] Failed to mix background music: {eMix}. Proceeding with original video.")
 
                 lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", language)
 
