@@ -46,6 +46,7 @@ from core.utils.video import (
     is_video_file,
     get_random_middle_frame,
     get_smart_thumbnail_frame,
+    validate_slide,
 )
 
 # Availability flags
