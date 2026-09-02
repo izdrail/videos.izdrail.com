@@ -10,7 +10,7 @@ import json
 
 import pytest
 import requests
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from core.media.base import Media, MediaType
 
@@ -284,9 +284,13 @@ def test_manager_search_skips_unsupported_type():
     pytest.importorskip("spacy")
     from core.media.manager import MediaManager
 
+    class ImageOnlyProvider(FakeProvider):
+        def capabilities(self):
+            return {"supports_media_types": [MediaType.IMAGE], "requires_key": False}
+
     mm = MediaManager(config=None)
     img = Media(url="https://x/i.jpg", source="Openverse", media_type=MediaType.IMAGE)
-    mm.apis = {"Openverse": FakeProvider([img])}
+    mm.apis = {"Openverse": ImageOnlyProvider([img])}
     mm.preferred_order = ["Openverse"]
     res = mm.search("cat", MediaType.VIDEO, limit=50, min_results=50)
     assert res == []  # Openverse only serves images here -> skipped for VIDEO

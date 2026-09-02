@@ -144,7 +144,7 @@ class WikimediaProvider(BaseMediaAPI):
                     width=info.get("width"),
                     height=info.get("height"),
                     duration=None,
-                    ext=self._ext(url),
+                    ext=self._ext(url) or ".mp4",
                     provider="Wikimedia Commons",
                     media_type=mt,
                     source="Wikimedia",

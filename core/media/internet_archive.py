@@ -212,7 +212,7 @@ class InternetArchiveProvider(BaseMediaAPI):
             width=None,
             height=None,
             duration=None,
-            ext=self._ext(name),
+            ext=self._ext(name) or ".mp4",
             provider="Internet Archive",
             media_type=mt,
             source="InternetArchive",

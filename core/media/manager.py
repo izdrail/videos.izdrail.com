@@ -350,7 +350,14 @@ class MediaManager:
         )
 
         # ── Stage 4: download from the winning source ──
-        ext = best_media.get("ext", ".mp4")
+        raw_ext = best_media.get("ext")
+        if not raw_ext or not isinstance(raw_ext, str) or raw_ext.strip().lower() in ("none", "null", ""):
+            ext = ".mp4"
+        else:
+            ext = raw_ext.strip().lower()
+            if not ext.startswith("."):
+                ext = f".{ext}"
+
         if ext == ".mp4" and (best_src in ("Unsplash", "SearXNG")):
             url = best_media.get("url", "")
             if ".jpg" in url:
