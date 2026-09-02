@@ -19,8 +19,21 @@ services:
       WWWGROUP: '${WWWGROUP}'
       LARAVEL_SAIL: 1
       IGNITION_LOCAL_SITES_PATH: '${PWD}'
+      IMAGE_GENERATION_ENABLED: 'true'
+      IMAGE_GENERATION_MODEL: 'stabilityai/sd-turbo'
+      IMAGE_GENERATION_DEVICE: 'auto'
+      VISUAL_SOURCE: 'stock'
+      HF_HOME: '/opt/huggingface_models'
     volumes:
       - '.:/app'
+      - './cache/images:/app/cache/images'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     networks:
       - sail
 
