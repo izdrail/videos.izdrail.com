@@ -1,10 +1,19 @@
-import os
+import sys
 import time
 import torch
-from diffusers import AutoPipelineForText2Image
+
+try:
+    from diffusers import AutoPipelineForText2Image
+except Exception as e:
+    print(f"❌ Error importing diffusers AutoPipelineForText2Image: {e}")
+    AutoPipelineForText2Image = None
 
 
 def download_sd_model(model_id="stabilityai/sd-turbo", max_retries=5):
+    if AutoPipelineForText2Image is None:
+        print("❌ Cannot download model: diffusers AutoPipelineForText2Image is not available.")
+        sys.exit(1)
+
     print(f"Downloading {model_id} model...")
     for attempt in range(1, max_retries + 1):
         try:

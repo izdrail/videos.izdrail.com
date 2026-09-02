@@ -5,8 +5,10 @@ numpy==1.26.4
 scipy>=1.11.0
 torch==2.3.1
 torchaudio==2.3.1
-transformers==4.40.0
-tokenizers==0.19.1
+# Pin transformers and diffusers to compatible versions to avoid GlmModel import error
+# and maintain torch 2.3.1 compatibility without requiring torch.nn.attention.flex_attention
+transformers>=4.45.0,<4.49.0
+tokenizers>=0.21.0,<0.22.0
  huggingface-hub>=0.33.5,<1
  spacy>=3.8,<4
  sentence-transformers>=2.3,<4
@@ -14,7 +16,7 @@ pandas==1.5.3
 gTTS>=2.5.0
 langdetect>=1.0.9
 kokoro==0.7.16
-diffusers>=0.25,<0.37
+diffusers==0.31.0
 accelerate>=0.25.0
 yt-dlp==2025.12.8
 pydub>=0.25.0

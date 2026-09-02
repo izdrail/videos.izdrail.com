@@ -23,10 +23,11 @@ try:
     from diffusers import AutoPipelineForText2Image
 
     SD_TURBO_AVAILABLE = True
-except ImportError:
+except Exception as e:
     logger.warning(
-        "[SD] diffusers library not found or AutoPipelineForText2Image unavailable."
+        f"[SD] diffusers library not found or AutoPipelineForText2Image unavailable: {e}"
     )
+    print(f"[SD] Warning: diffusers library not available: {e}")
     SD_TURBO_AVAILABLE = False
 
 SD_AVAILABLE = SD_TURBO_AVAILABLE
