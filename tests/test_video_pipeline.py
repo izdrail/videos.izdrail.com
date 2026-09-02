@@ -1,7 +1,6 @@
-import unittest
-import subprocess
-import shutil
-import tempfile
+"""
+Integration tests for video generation pipeline with visual provider selection.
+"""
 from pathlib import Path
 import torch
 

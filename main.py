@@ -34,7 +34,8 @@ from core.config import Config
 from core.database import GenerationDB, DB
 from core.nlp.keyword_extractor import KeywordExtractor
 from core.nlp.ollama_client import DEFAULT_FALLBACK_KEYWORDS
-from core.ai.stable_diffusion import StableDiffusionManager, SD_AVAILABLE
+from core.ai.stable_diffusion import SDTurboGenerator, StableDiffusionManager, SD_AVAILABLE
+from core.visual import VisualProviderFactory
 from core.media.manager import MediaManager
 from core.media.youtube_audio import YouTubeAudioLibraryAPI
 from core.tts.manager import TTSManager
@@ -65,9 +66,6 @@ from num2words import num2words
 import textwrap
 from dotenv import load_dotenv
 
-# Enforce CPU globally
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-torch.backends.cudnn.enabled = False
 torch.set_num_threads(4)
 load_dotenv()
 
@@ -130,10 +128,10 @@ class FFmpegVideoGenerator:
         self.sd_manager = None
         if SD_AVAILABLE:
             try:
-                self.sd_manager = StableDiffusionManager()
-                print("[SD] Enabled")
+                self.sd_manager = SDTurboGenerator(config=self.config)
+                print("[SD-Turbo] Enabled")
             except Exception as e:
-                print(f"[SD] Init error: {e}")
+                print(f"[SD-Turbo] Init error: {e}")
 
     def _find_logo(self) -> Optional[Path]:
         for ext in ["*.png", "*.jpg", "*.jpeg"]:
@@ -1109,6 +1107,31 @@ class FFmpegVideoGenerator:
                 ):
                     slide_videos[slide["slide_num"]] = selected_background_video
 
+        # Visual provider setup for background media
+        visual_provider = VisualProviderFactory.create(
+            source_type=getattr(self.config, "VISUAL_SOURCE", "stock"),
+            config=self.config,
+            sd_generator=self.sd_manager,
+            media_manager=self.media_manager,
+            background_video_fetcher=self.get_background_video,
+        )
+
+        def _fetch_slide_visual_task(slide):
+            ctx = {
+                "keyword": slide.get("keyword"),
+                "sentence": slide.get("sentence"),
+                "preferred_source": preferred_media_source,
+                "theme": theme,
+                "entity": entity,
+                "script_id": script_id,
+                "sentence_idx": slide["slide_num"],
+                "candidate_keywords": (
+                    candidate_map.get(slide["slide_num"]) if candidate_map else None
+                ),
+            }
+            asset = visual_provider.get_visual(ctx, target_size=(vw, vh))
+            return asset.get_path_obj()
+
         # Fetch remaining backgrounds
         with ThreadPoolExecutor(
             max_workers=self.config.WORKER_POOL_MEDIA
@@ -1124,19 +1147,8 @@ class FFmpegVideoGenerator:
                     continue
 
                 future = fetch_executor.submit(
-                    self.get_background_video,
-                    slide["keyword"],
-                    slide["sentence"],
-                    language,
-                    preferred_media_source,
-                    use_snn=use_snn,
-                    theme=theme,
-                    entity=entity,
-                    script_id=script_id,
-                    sentence_idx=slide["slide_num"],
-                    candidate_keywords=(
-                        candidate_map.get(slide["slide_num"]) if candidate_map else None
-                    ),
+                    _fetch_slide_visual_task,
+                    slide,
                 )
                 fetch_futures[future] = slide["slide_num"]
 
@@ -1564,6 +1576,7 @@ class TextToVideoGenerator:
         language: str = "en",
         pexels_keyword: Optional[str] = None,
         preferred_media_source: Optional[str] = None,
+        visual_source: str = "Stock Media",
         selected_background_video_name: Optional[str] = None,
         pre_selected_videos: Optional[Dict[int, str]] = None,
         enable_background_music: bool = True,
@@ -2432,6 +2445,12 @@ def setup_ui(generator: TextToVideoGenerator):
                             )
 
                     with gr.TabItem("🎥 Media"):
+                        visual_source_radio = gr.Radio(
+                            choices=["Stock Media", "AI Generated Images", "Mixed"],
+                            value="Stock Media",
+                            label="🖼️ Visual Source",
+                            info="Choose background source for scenes: Stock Media, AI Images (SD-Turbo), or Mixed",
+                        )
                         media_source_dropdown = gr.Dropdown(
                             label="🎞️ Preferred Media Source",
                             choices=[
@@ -2709,6 +2728,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
             language,
             speaker,
             use_random,
+            visual_source,
             media_source,
             keyword,
             selected_background_video_name,
@@ -2873,6 +2893,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                 speaker_id=speaker,
                 pexels_keyword=keyword.strip() if keyword else None,
                 preferred_media_source=media_source,
+                visual_source=visual_source,
                 selected_background_video_name=selected_background_video_name,
                 enable_background_music=enable_music,
                 music_selection=music_select,
@@ -3035,6 +3056,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                 language_dropdown,
                 speaker_dropdown,
                 use_random_voices,
+                visual_source_radio,
                 media_source_dropdown,
                 pexels_keyword,
                 background_video_dropdown,

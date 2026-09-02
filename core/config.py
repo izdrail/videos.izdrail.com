@@ -22,6 +22,9 @@ class Config:
         self.OUTPUT_DIR = self.ROOT_DIR / "output"
         self.BACKUP_OUTPUT_DIR = self.ROOT_DIR / "backup_output"
         self.BACKGROUND_VIDEOS_DIR = self.VIDEOS_DIR  # Alias for clearer usage
+        self.IMAGE_GENERATION_CACHE_DIR = (
+            self.ROOT_DIR / os.getenv("IMAGE_GENERATION_CACHE_DIR", "cache/images")
+        )
 
         # Create all directories
         for d in [
@@ -32,6 +35,7 @@ class Config:
             self.TEMP_DIR,
             self.OUTPUT_DIR,
             self.BACKUP_OUTPUT_DIR,
+            self.IMAGE_GENERATION_CACHE_DIR,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -49,10 +53,31 @@ class Config:
         self.ENTITY_WEIGHT_BOOST = 1.5
         self.KEYWORD_HISTORY_LIMIT = int(os.getenv("KEYWORD_HISTORY_LIMIT", "200"))
 
+        # Image Generation Settings (SD-Turbo)
+        self.IMAGE_GENERATION_ENABLED = (
+            os.getenv("IMAGE_GENERATION_ENABLED", "true").lower() == "true"
+        )
+        self.IMAGE_GENERATION_MODEL = os.getenv(
+            "IMAGE_GENERATION_MODEL", "stabilityai/sd-turbo"
+        )
+        self.IMAGE_GENERATION_DEVICE = os.getenv("IMAGE_GENERATION_DEVICE", "auto")
+        self.IMAGE_GENERATION_STEPS = int(os.getenv("IMAGE_GENERATION_STEPS", "1"))
+        self.IMAGE_GENERATION_GUIDANCE_SCALE = float(
+            os.getenv("IMAGE_GENERATION_GUIDANCE_SCALE", "0.0")
+        )
+        self.IMAGE_GENERATION_WIDTH = int(os.getenv("IMAGE_GENERATION_WIDTH", "512"))
+        self.IMAGE_GENERATION_HEIGHT = int(os.getenv("IMAGE_GENERATION_HEIGHT", "512"))
+
+        # Visual Source Settings
+        self.VISUAL_SOURCE = os.getenv("VISUAL_SOURCE", "stock")  # stock, ai, mixed
+        self.MIXED_MODE_IMAGE_RATIO = float(
+            os.getenv("MIXED_MODE_IMAGE_RATIO", "0.5")
+        )
+
         # Additional directory paths
         self.VIDEO_OVERLAYS_DIR = self.ROOT_DIR / "video-overlays"
         self.CIRCLE_OVERLAYS_DIR = self.ROOT_DIR / "circle_overlays"
-        self.SD_MODEL_DIR = self.ROOT_DIR / "models/stable-diffusion-v1-5"
+        self.SD_MODEL_DIR = self.ROOT_DIR / "models/sd-turbo"
 
         # Ensure additional directories exist
         for d in [self.VIDEO_OVERLAYS_DIR, self.CIRCLE_OVERLAYS_DIR]:
