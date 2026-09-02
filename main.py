@@ -46,6 +46,7 @@ from core.utils.video import (
     is_video_file,
     get_random_middle_frame,
     get_smart_thumbnail_frame,
+    validate_background_asset,
     validate_slide,
 )
 
@@ -677,27 +678,55 @@ class FFmpegVideoGenerator:
         try:
             vw = video_width or self.video_width
             vh = video_height or self.video_height
+
+            # --- Pre-flight input validation ---
             if audio_path is None:
                 print(
                     f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None. Check TTS logs for generation failures."
                 )
                 return None
 
-            if not Path(audio_path).exists():
+            audio_obj = Path(audio_path)
+            if not audio_obj.exists():
                 print(
                     f"❌ [FFmpeg] Slide {slide_num} error: audio_path does not exist: {audio_path}"
                 )
                 return None
 
+            if audio_obj.stat().st_size == 0:
+                print(
+                    f"❌ [FFmpeg] Slide {slide_num} error: audio_path is empty (0 bytes): {audio_path}"
+                )
+                return None
+
             # Force intro video for intro slides
             if is_intro:
-                if self.INTRO_VIDEO_PATH.exists():
+                if self.INTRO_VIDEO_PATH.exists() and self.INTRO_VIDEO_PATH.stat().st_size > 0:
                     video_path = self.INTRO_VIDEO_PATH
                     print(f"🎬 [Intro] Using fixed background: {self.INTRO_VIDEO_PATH}")
                 else:
                     print(
-                        f"⚠️ [Intro] Fixed background not found: {self.INTRO_VIDEO_PATH}. Falling back to default."
+                        f"⚠️ [Intro] Fixed background not found or empty: {self.INTRO_VIDEO_PATH}. Falling back to default."
                     )
+                    video_path = None
+
+            # Pre-flight check on video_path
+            if video_path:
+                valid_bg, bg_reason = validate_background_asset(video_path)
+                if not valid_bg:
+                    print(
+                        f"⚠️ [FFmpeg] Slide {slide_num}: Background video validation failed ({bg_reason}) for path: '{video_path}'. Falling back to gradient background."
+                    )
+                    video_path = None
+
+            # Pre-flight check on circle_video
+            if circle_video:
+                valid_circle, circle_reason = validate_background_asset(circle_video)
+                if not valid_circle:
+                    print(
+                        f"⚠️ [FFmpeg] Slide {slide_num}: Circle overlay video validation failed ({circle_reason}) for path: '{circle_video}'. Disabling circle overlay."
+                    )
+                    circle_video = None
 
             source_info = (
                 f"Video: {video_path.name}" if video_path else "Background: Image/Color"
@@ -934,23 +963,30 @@ class FFmpegVideoGenerator:
                 "+faststart",
                 str(output_path),
             ]
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+            print(f"🎬 [FFmpeg] Slide {slide_num} executing command:\n{' '.join(cmd)}")
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
             print(f"✅ [FFmpeg] Slide {slide_num}: Successfully composed.")
             if not output_path.exists():
-                print(f"[FFmpeg] ERROR: Output not created for slide {slide_num}")
+                print(f"❌ [FFmpeg] ERROR: Output not created for slide {slide_num}")
                 return None
             file_size = output_path.stat().st_size
             print(
-                f"[FFmpeg] Slide {slide_num} created: {file_size / 1024 / 1024:.2f} MB"
+                f"✅ [FFmpeg] Slide {slide_num} created: {file_size / 1024 / 1024:.2f} MB"
             )
             return output_path
+        except subprocess.TimeoutExpired as e:
+            print(f"❌ [FFmpeg] Slide {slide_num} TIMED OUT after {e.timeout}s.")
+            cmd_str = ' '.join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+            print(f"❌ [FFmpeg] Slide {slide_num} command that timed out: {cmd_str}")
+            return None
         except subprocess.CalledProcessError as e:
-            print(f"[FFmpeg] Slide {slide_num} failed with return code {e.returncode}")
-            print(f"[FFmpeg] Command: {' '.join(e.cmd)}")
-            print(f"[FFmpeg] Stderr: {e.stderr}")
+            print(f"❌ [FFmpeg] Slide {slide_num} failed with return code {e.returncode}")
+            cmd_str = ' '.join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+            print(f"❌ [FFmpeg] Slide {slide_num} command: {cmd_str}")
+            print(f"❌ [FFmpeg] Slide {slide_num} Stderr: {e.stderr}")
             return None
         except Exception as e:
-            print(f"[FFmpeg] Slide {slide_num} error: {e}")
+            print(f"❌ [FFmpeg] Slide {slide_num} error: {e}")
             import traceback
 
             traceback.print_exc()
@@ -1343,9 +1379,10 @@ class FFmpegVideoGenerator:
                 print(
                     f"✅ [Pipeline] Final video created (with crossfade): {output_path}"
                 )
-            except subprocess.CalledProcessError as e:
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                err_detail = getattr(e, 'stderr', str(e))
                 print(
-                    f"❌ [FFmpeg] Crossfade failed: {e.stderr[:500]}. Falling back to simple concat."
+                    f"❌ [FFmpeg] Crossfade failed or timed out ({err_detail[:500] if isinstance(err_detail, str) else err_detail}). Falling back to simple concat."
                 )
                 enable_crossfade = False
         if not enable_crossfade:

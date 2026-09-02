@@ -1,6 +1,9 @@
 """
 Integration tests for video generation pipeline with visual provider selection.
 """
+import unittest
+import tempfile
+import shutil
 from pathlib import Path
 import torch
 
