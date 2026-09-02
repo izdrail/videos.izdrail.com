@@ -119,5 +119,56 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertGreater(duration, 3.0)  # ~3.7s duration
 
 
+
+    def test_validate_slide_edge_cases(self):
+        """Test validate_slide with missing, invalid, empty, corrupt, and non-file paths."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+
+            # 1. None / missing path
+            valid, reason = validate_slide(None)
+            self.assertFalse(valid)
+            self.assertIn("missing", reason)
+
+            missing_file = tmp_path / "missing_slide.mp4"
+            valid, reason = validate_slide(missing_file)
+            self.assertFalse(valid)
+            self.assertIn("missing", reason)
+
+            # 2. Directory instead of regular file
+            dir_path = tmp_path / "slide_dir"
+            dir_path.mkdir()
+            valid, reason = validate_slide(dir_path)
+            self.assertFalse(valid)
+            self.assertIn("not a regular file", reason)
+
+            # 3. Empty file (0 bytes)
+            empty_file = tmp_path / "empty_slide.mp4"
+            empty_file.touch()
+            valid, reason = validate_slide(empty_file)
+            self.assertFalse(valid)
+            self.assertIn("empty", reason)
+
+            # 4. Corrupt / non-video file
+            corrupt_file = tmp_path / "corrupt_slide.mp4"
+            corrupt_file.write_bytes(b"not a real video file content")
+            valid, reason = validate_slide(corrupt_file)
+            self.assertFalse(valid)
+
+    def test_main_imports_and_validates_slide(self):
+        """Verify that main module imports validate_slide and can invoke slide validation."""
+        import main
+        self.assertTrue(hasattr(main, 'validate_slide'))
+        self.assertEqual(main.validate_slide, validate_slide)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            fake_slide = tmp_path / "slide_1.mp4"
+            # Non-existent file validation via main's validate_slide reference
+            valid, reason = main.validate_slide(fake_slide)
+            self.assertFalse(valid)
+            self.assertIn("missing", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
