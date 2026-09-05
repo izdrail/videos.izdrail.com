@@ -34,7 +34,11 @@ from core.config import Config
 from core.database import GenerationDB, DB
 from core.nlp.keyword_extractor import KeywordExtractor
 from core.nlp.ollama_client import DEFAULT_FALLBACK_KEYWORDS
-from core.ai.stable_diffusion import SDTurboGenerator, StableDiffusionManager, SD_AVAILABLE
+from core.ai.stable_diffusion import (
+    SDTurboGenerator,
+    StableDiffusionManager,
+    SD_AVAILABLE,
+)
 from core.visual import VisualProviderFactory
 from core.media.manager import MediaManager
 from core.media.youtube_audio import YouTubeAudioLibraryAPI
@@ -312,12 +316,33 @@ class FFmpegVideoGenerator:
             )
             return video
 
+        if self.sd_manager:
+            try:
+                sd_prompt = sentence or keyword or "abstract cinematic background"
+                sd_img = self.sd_manager.generate_image(
+                    sd_prompt,
+                    keyword=keyword,
+                    size=(self.video_width, self.video_height),
+                )
+                if sd_img and sd_img.exists():
+                    print(
+                        f"🎨 [SD] Generated fallback image: {sd_img.name} for '{keyword}'"
+                    )
+                    DB.log_keyword_selection(
+                        script_id,
+                        sentence_idx,
+                        keyword,
+                        context_preview=sentence or "",
+                        was_used=False,
+                    )
+                    return sd_img
+            except Exception as e:
+                print(f"⚠️ [SD] Generation failed: {e}")
         circle_video = self.get_circle_overlay_video()
         if circle_video:
             print(
                 f"🎨 [Fallback] Using circle overlay video as background: {circle_video.name}"
             )
-            # Circle overlay is a generic fallback, not a keyword-based match.
             DB.log_keyword_selection(
                 script_id,
                 sentence_idx,
@@ -575,34 +600,40 @@ class FFmpegVideoGenerator:
 
     @staticmethod
     def split_into_sentences(text: str) -> List[str]:
-        text = re.sub(r"\bDr\.", "Dr<dot>", text)
-        text = re.sub(r"\bMr\.", "Mr<dot>", text)
-        text = re.sub(r"\bMrs\.", "Mrs<dot>", text)
-        text = re.sub(r"\bMs\.", "Ms<dot>", text)
-        text = re.sub(r"\b([A-Z])\.", r"\1<dot>", text)
-        raw_sentences = re.split(r"(?<=[.!?。！？])\s+", text)
-        sentences = [
-            s.replace("<dot>", ".").strip() for s in raw_sentences if s.strip()
-        ]
-        for i, sentence in enumerate(sentences):
-            if not sentence.endswith((".", "!", "?", "。", "！", "？")):
-                sentences[i] = sentence + "."
-        filtered = []
-        i = 0
-        while i < len(sentences):
-            current = sentences[i]
-            if (
-                len(current.split()) < 3
-                and len(current) < 15
-                and i + 1 < len(sentences)
-            ):
-                merged = current + " " + sentences[i + 1]
-                filtered.append(merged)
-                i += 2
-            else:
-                filtered.append(current)
-                i += 1
-        return filtered
+        import logging
+
+        logger = logging.getLogger("split")
+        original = text
+        text = text.strip()
+        if not text:
+            return []
+        paragraphs = re.split(r"\n\s*\n", text)
+        all_sentences: List[str] = []
+        for para in paragraphs:
+            para = para.strip().replace("\n", " ")
+            if not para:
+                continue
+            tmp = re.sub(r"\bDr\.", "Dr<dot>", para)
+            tmp = re.sub(r"\bMr\.", "Mr<dot>", tmp)
+            tmp = re.sub(r"\bMrs\.", "Mrs<dot>", tmp)
+            tmp = re.sub(r"\bMs\.", "Ms<dot>", tmp)
+            tmp = re.sub(r"\b([A-Z])\.", r"\1<dot>", tmp)
+            raw_sentences = re.split(r"(?<=[.!?。！？])\s+", tmp)
+            sentences = [
+                s.replace("<dot>", ".").strip() for s in raw_sentences if s.strip()
+            ]
+            for i, sentence in enumerate(sentences):
+                if not sentence.endswith((".", "!", "?", "。", "！", "？")):
+                    sentences[i] = sentence + "."
+            all_sentences.extend(sentences)
+        logger.info(
+            f"[split] paragraphs={len(paragraphs)} raw_sentences={len(all_sentences)}"
+        )
+        for idx, s in enumerate(all_sentences):
+            logger.info(
+                f"[split] {idx}: '{s[:80]}' ({len(s)} chars, {len(s.split())} words)"
+            )
+        return all_sentences
 
     def _generate_overlay_mask(self, shape: str, diameter: int) -> Path:
         """Generates a high-quality PNG mask for the specified shape using Pillow."""
@@ -680,11 +711,22 @@ class FFmpegVideoGenerator:
             vh = video_height or self.video_height
 
             # --- Pre-flight input validation ---
-            if audio_path is None:
+            if audio_path is None or not Path(audio_path).exists():
                 print(
-                    f"❌ [FFmpeg] Slide {slide_num} error: audio_path is None. Check TTS logs for generation failures."
+                    f"⚠️ [FFmpeg] Slide {slide_num}: audio missing, creating silent fallback (1s)"
                 )
-                return None
+                fallback = (
+                    self.config.TEMP_DIR
+                    / f"silent_{slide_num}_{uuid.uuid4().hex[:6]}.wav"
+                )
+                try:
+                    AudioSegment.silent(duration=1500).export(
+                        str(fallback), format="wav"
+                    )
+                    audio_path = fallback
+                except Exception as e:
+                    print(f"❌ [FFmpeg] Slide {slide_num} silent fallback failed: {e}")
+                    return None
 
             audio_obj = Path(audio_path)
             if not audio_obj.exists():
@@ -701,7 +743,10 @@ class FFmpegVideoGenerator:
 
             # Force intro video for intro slides
             if is_intro:
-                if self.INTRO_VIDEO_PATH.exists() and self.INTRO_VIDEO_PATH.stat().st_size > 0:
+                if (
+                    self.INTRO_VIDEO_PATH.exists()
+                    and self.INTRO_VIDEO_PATH.stat().st_size > 0
+                ):
                     video_path = self.INTRO_VIDEO_PATH
                     print(f"🎬 [Intro] Using fixed background: {self.INTRO_VIDEO_PATH}")
                 else:
@@ -755,11 +800,22 @@ class FFmpegVideoGenerator:
             filter_parts = []
             input_count = 0
 
+            if overlay_shape == "Split Screen" and (
+                not circle_video or not Path(circle_video).exists()
+            ):
+                auto = self.get_circle_overlay_video()
+                if auto and auto.exists():
+                    circle_video = auto
+                    print(f"🔀 [SplitScreen] Auto-selected circle video: {auto.name}")
             is_split_screen = (
                 overlay_shape == "Split Screen"
                 and circle_video
-                and circle_video.exists()
+                and Path(circle_video).exists()
             )
+            if overlay_shape == "Split Screen" and not is_split_screen:
+                print(
+                    f"⚠️ [SplitScreen] Requested but no circle video available, falling back to normal"
+                )
 
             if is_split_screen:
                 # Top part: Background video or gradient fallback
@@ -927,8 +983,12 @@ class FFmpegVideoGenerator:
                 input_count += 2  # Incremented by 2 (video + mask)
 
             print(
-                f"🎬 [FFmpeg] Slide {slide_num}: Composition started. Layers: bg={video_path.name if video_path else 'Branded Gradient'}, text={text_overlay_path.name if text_overlay_path else 'None'}"
+                f"🎬 [FFmpeg] Slide {slide_num}: Composition started. Layers: bg={video_path.name if video_path else 'Branded Gradient'}, text={text_overlay_path.name if text_overlay_path else 'None'} split={is_split_screen}"
             )
+            if is_split_screen:
+                print(
+                    f"🎬 [FFmpeg] SplitScreen filter: top={video_path} bottom={circle_video}"
+                )
 
             audio_idx = input_count
             inputs.extend(["-i", str(audio_path)])
@@ -976,12 +1036,14 @@ class FFmpegVideoGenerator:
             return output_path
         except subprocess.TimeoutExpired as e:
             print(f"❌ [FFmpeg] Slide {slide_num} TIMED OUT after {e.timeout}s.")
-            cmd_str = ' '.join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+            cmd_str = " ".join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
             print(f"❌ [FFmpeg] Slide {slide_num} command that timed out: {cmd_str}")
             return None
         except subprocess.CalledProcessError as e:
-            print(f"❌ [FFmpeg] Slide {slide_num} failed with return code {e.returncode}")
-            cmd_str = ' '.join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+            print(
+                f"❌ [FFmpeg] Slide {slide_num} failed with return code {e.returncode}"
+            )
+            cmd_str = " ".join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
             print(f"❌ [FFmpeg] Slide {slide_num} command: {cmd_str}")
             print(f"❌ [FFmpeg] Slide {slide_num} Stderr: {e.stderr}")
             return None
@@ -1290,12 +1352,16 @@ class FFmpegVideoGenerator:
                 valid, reason = validate_slide(sp)
                 if valid:
                     valid_slide_paths.append(sp)
-                    print(f"[Pipeline] Slide {i+1} validation: OK ({sp.name})")
+                    print(f"[Pipeline] Slide {i + 1} validation: OK ({sp.name})")
                 else:
-                    print(f"❌ [Pipeline] Slide {i+1} validation failed ({sp.name}): {reason}")
+                    print(
+                        f"❌ [Pipeline] Slide {i + 1} validation failed ({sp.name}): {reason}"
+                    )
 
         if len(valid_slide_paths) != len(slides_data):
-            print(f"⚠️ [Pipeline] Validation warning: {len(valid_slide_paths)} of {len(slides_data)} slides passed pre-concatenation validation.")
+            print(
+                f"⚠️ [Pipeline] Validation warning: {len(valid_slide_paths)} of {len(slides_data)} slides passed pre-concatenation validation."
+            )
 
         slide_paths = valid_slide_paths
 
@@ -1303,11 +1369,15 @@ class FFmpegVideoGenerator:
             raise ValueError("No valid slides available for final composition")
 
         # Log slide file details before concatenation
-        print(f"🔍 [Pipeline] Verifying {len(slide_paths)} slide files before concatenation:")
+        print(
+            f"🔍 [Pipeline] Verifying {len(slide_paths)} slide files before concatenation:"
+        )
         for idx, sp in enumerate(slide_paths, 1):
             exists = sp.exists()
             size_mb = (sp.stat().st_size / 1024 / 1024) if exists else 0
-            print(f"   Slide {idx}: {sp.name} | Exists: {exists} | Size: {size_mb:.2f} MB | Path: {sp.absolute()}")
+            print(
+                f"   Slide {idx}: {sp.name} | Exists: {exists} | Size: {size_mb:.2f} MB | Path: {sp.absolute()}"
+            )
 
         # --- Stage 4: Concatenation (with optional crossfade) ---
         if progress_callback:
@@ -1380,7 +1450,7 @@ class FFmpegVideoGenerator:
                     f"✅ [Pipeline] Final video created (with crossfade): {output_path}"
                 )
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                err_detail = getattr(e, 'stderr', str(e))
+                err_detail = getattr(e, "stderr", str(e))
                 print(
                     f"❌ [FFmpeg] Crossfade failed or timed out ({err_detail[:500] if isinstance(err_detail, str) else err_detail}). Falling back to simple concat."
                 )
@@ -1406,11 +1476,15 @@ class FFmpegVideoGenerator:
             ]
             print("[FFmpeg] Concatenating slides...")
             try:
-                res = subprocess.run(concat_cmd, check=True, capture_output=True, text=True, timeout=300)
+                res = subprocess.run(
+                    concat_cmd, check=True, capture_output=True, text=True, timeout=300
+                )
                 print(f"✅ [Pipeline] Final video created: {output_path}")
             except subprocess.CalledProcessError as e:
-                err_msg = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
-                print(f"❌ [FFmpeg] Concat failed with returncode {e.returncode}: {err_msg[:500]}")
+                err_msg = e.stderr if hasattr(e, "stderr") and e.stderr else str(e)
+                print(
+                    f"❌ [FFmpeg] Concat failed with returncode {e.returncode}: {err_msg[:500]}"
+                )
                 raise RuntimeError(f"FFmpeg concat failed: {err_msg[:500]}") from e
             except subprocess.TimeoutExpired as e:
                 print(f"❌ [FFmpeg] Concat timed out after 300s")
@@ -2049,7 +2123,9 @@ class TextToVideoGenerator:
                 if progress_callback:
                     # Scale video phase (0..total) into the 2nd half of overall progress (audio_tasks_count..audio_tasks_count*2)
                     audio_count = len(audio_tasks)
-                    scaled_current = audio_count + int((current / max(total, 1)) * audio_count)
+                    scaled_current = audio_count + int(
+                        (current / max(total, 1)) * audio_count
+                    )
                     progress_callback(
                         min(scaled_current, audio_count * 2), audio_count * 2, message
                     )
@@ -2233,7 +2309,8 @@ class TextToVideoGenerator:
                     print(f"🔊 [Mixing] Overlaying background music: {music_path.name}")
                     try:
                         audio_extract = (
-                            self.config.TEMP_DIR / f"extracted_{uuid.uuid4().hex[:8]}.wav"
+                            self.config.TEMP_DIR
+                            / f"extracted_{uuid.uuid4().hex[:8]}.wav"
                         )
                         subprocess.run(
                             [
@@ -2252,7 +2329,9 @@ class TextToVideoGenerator:
                             timeout=300,
                         )
                         voice_seg = AudioSegment.from_file(str(audio_extract))
-                        music = AudioSegment.from_file(str(music_path)) + music_volume_db
+                        music = (
+                            AudioSegment.from_file(str(music_path)) + music_volume_db
+                        )
                         if len(music) < len(voice_seg):
                             loops = (len(voice_seg) // len(music)) + 2
                             music = music * loops
@@ -2268,7 +2347,8 @@ class TextToVideoGenerator:
                         )
                         mixed.export(str(mixed_audio), format="wav")
                         video_with_music = (
-                            self.config.TEMP_DIR / f"with_music_{uuid.uuid4().hex[:8]}.mp4"
+                            self.config.TEMP_DIR
+                            / f"with_music_{uuid.uuid4().hex[:8]}.mp4"
                         )
                         subprocess.run(
                             [
@@ -2302,7 +2382,9 @@ class TextToVideoGenerator:
                         video_temp_path = video_with_music
                         print("✅ [Mixing] Background music successfully overlaid.")
                     except Exception as eMix:
-                        print(f"⚠️ [Mixing] Failed to mix background music: {eMix}. Proceeding with original video.")
+                        print(
+                            f"⚠️ [Mixing] Failed to mix background music: {eMix}. Proceeding with original video."
+                        )
 
                 lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", language)
 

@@ -132,7 +132,12 @@ class Config:
             "bottom_margin": 150,
         }
 
-        # Processing configuration
+        self.SENTENCE_MERGE_ENABLED = False
+        self.SENTENCE_MERGE_MIN_WORDS = 3
+        self.SENTENCE_MERGE_MIN_CHARS = 15
+        self.ENABLE_SD_FALLBACK = (
+            os.getenv("ENABLE_SD_FALLBACK", "True").lower() == "true"
+        )
         self.MAX_PARALLEL_SLIDES = 4
         self.MIN_IMAGE_DURATION = 10.0
 
