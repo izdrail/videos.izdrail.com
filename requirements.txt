@@ -12,6 +12,7 @@ tokenizers>=0.21.0,<0.22.0
  huggingface-hub>=0.33.5,<1
  spacy>=3.8,<4
  sentence-transformers>=2.3,<4
+open-clip-torch
 pandas==1.5.3
 gTTS>=2.5.0
 langdetect>=1.0.9
