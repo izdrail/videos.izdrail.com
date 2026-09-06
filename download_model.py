@@ -82,5 +82,22 @@ def main():
         print(f"Error downloading SpeechBrain models: {e}")
         sys.exit(1)
 
+    print("\nPre-downloading CLIP (open_clip) models...")
+    try:
+        import open_clip
+
+        def download_clip():
+            for weights in ["laion2b_s34b_b79k", "openai"]:
+                try:
+                    print(f"Downloading open_clip ViT-B-32 with {weights}...")
+                    open_clip.create_model_and_transforms("ViT-B-32", pretrained=weights)
+                except Exception as clip_err:
+                    print(f"Warning downloading open_clip with {weights}: {clip_err}")
+
+        download_with_retry(download_clip, "open_clip models")
+    except Exception as e:
+        print(f"Error downloading open_clip models: {e}")
+        sys.exit(1)
+
 if __name__ == "__main__":
     main()
