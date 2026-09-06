@@ -192,32 +192,34 @@ class NeuronExtractor:
         language: str = "en",
         use_snn: bool = False,
     ) -> List[Dict[str, Any]]:
-        candidates = media_candidates[:5]
+        """
+        [Deprecated] Replaced by media_scoring.rerank_pooled_candidates / clip_relevance_score.
+        Evaluates media candidates using CLIP relevance and quality scoring.
+        """
+        from media_scoring import clip_relevance_score, compute_quality_score
 
-        logger.debug("[NeuronAI] Local evaluating %d media items...", len(candidates))
+        candidates = media_candidates[:10]
+        logger.debug("[NeuronExtractor] Evaluating %d media candidates using CLIP scoring...", len(candidates))
         results = []
+
         for i, media in enumerate(candidates):
-            media_info = f"{media.get('title', '')} {media.get('tags', '')}"
-            signals = self._local_evaluate_signals(text, media_info)
-            if signals:
-                signals["index"] = i
-                signals["media"] = media
-                results.append(signals)
+            if not isinstance(media, dict):
+                continue
 
-        if not results:
-            results = self._query_media_batch(text, candidates, language)
+            rel_score = clip_relevance_score(text, media)
+            qual_score = compute_quality_score(media)
+            decision_score = rel_score * 0.7 + qual_score * 0.3
 
-        for res in results:
-            if use_snn and self.brain_simulator:
-                score, details = self.brain_simulator.evaluate_keyword_snn(
-                    text, res.get("media", {}).get("title", ""), res
-                )
-                res["decision_score"] = score
-                res["snn_details"] = details
-            else:
-                res["decision_score"] = self._calculate_decision_score(res)
+            item_result = {
+                "index": i,
+                "media": media,
+                "relevance_score": rel_score,
+                "quality_score": qual_score,
+                "decision_score": decision_score,
+            }
+            results.append(item_result)
 
-        results.sort(key=lambda x: x.get("decision_score", 0), reverse=True)
+        results.sort(key=lambda x: x.get("decision_score", 0.0), reverse=True)
         return results
 
     def _local_evaluate_signals(

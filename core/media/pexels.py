@@ -18,7 +18,12 @@ class PexelsAPI(BaseMediaAPI):
             self.session.headers.update({"Authorization": self.api_key})
 
     def search_videos(
-        self, query: str, orientation: str = "portrait", per_page: int = 15
+        self,
+        query: str,
+        orientation: str = "portrait",
+        per_page: int = 15,
+        target_width: int = 1080,
+        target_height: int = 1920,
     ) -> List[Dict]:
         """
         Search Pexels for videos
@@ -58,8 +63,12 @@ class PexelsAPI(BaseMediaAPI):
                 # Get the best quality video file
                 video_files = video.get("video_files", [])
                 if video_files:
-                    # Sort by resolution (width) ascending to get the smallest version
-                    best_file = min(video_files, key=lambda x: x.get("width", 99999))
+                    # Find video closest to target resolution (1080x1920 by default)
+                    best_file = min(
+                        video_files,
+                        key=lambda x: abs(x.get("width", 0) - target_width)
+                        + abs(x.get("height", 0) - target_height),
+                    )
 
                     results.append(
                         {
