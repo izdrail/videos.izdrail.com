@@ -100,6 +100,21 @@ class GenerationDB:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS clip_performance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    media_url TEXT UNIQUE,
+                    keyword TEXT,
+                    source TEXT,
+                    selected_count INTEGER DEFAULT 0,
+                    replaced_count INTEGER DEFAULT 0,
+                    watch_duration REAL DEFAULT 0.0,
+                    completion_rate REAL DEFAULT 0.0,
+                    feedback_score REAL DEFAULT 0.0,
+                    last_updated TEXT NOT NULL
+                )
+            """)
+
             conn.commit()
 
     def get_cached_tts(
@@ -248,6 +263,108 @@ class GenerationDB:
                 )
         except Exception as e:  # pragma: no cover - best-effort audit
             logger.warning("[DB] keyword selection audit write failed: %s", e)
+
+    def log_clip_performance(
+        self,
+        media_url: str,
+        keyword: str = "",
+        source: str = "",
+        event_type: str = "select",
+        watch_duration: float = 0.0,
+        completion_rate: float = 0.0,
+        score_delta: float = 0.0,
+    ) -> None:
+        """Log user engagement / feedback for a clip to update bandit performance scores."""
+        if not media_url:
+            return
+        try:
+            with self.lock, sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT selected_count, replaced_count, watch_duration, completion_rate, feedback_score FROM clip_performance WHERE media_url=?",
+                    (media_url,),
+                )
+                row = cursor.fetchone()
+                now_str = datetime.now().isoformat()
+
+                if row:
+                    sel_cnt, rep_cnt, prev_dur, prev_comp, prev_score = row
+                    if event_type == "select":
+                        sel_cnt += 1
+                        prev_score += 0.1
+                    elif event_type == "replace":
+                        rep_cnt += 1
+                        prev_score -= 0.2
+                    elif event_type == "watch":
+                        prev_dur += watch_duration
+                        prev_comp = max(prev_comp, completion_rate)
+                        prev_score += completion_rate * 0.2
+                    elif event_type == "feedback":
+                        prev_score += score_delta
+
+                    cursor.execute(
+                        """UPDATE clip_performance SET
+                           selected_count=?, replaced_count=?, watch_duration=?,
+                           completion_rate=?, feedback_score=?, last_updated=?
+                           WHERE media_url=?""",
+                        (sel_cnt, rep_cnt, prev_dur, prev_comp, prev_score, now_str, media_url),
+                    )
+                else:
+                    sel_cnt = 1 if event_type == "select" else 0
+                    rep_cnt = 1 if event_type == "replace" else 0
+                    fb_score = (
+                        0.1 if event_type == "select" else (-0.2 if event_type == "replace" else score_delta)
+                    )
+                    cursor.execute(
+                        """INSERT INTO clip_performance
+                           (media_url, keyword, source, selected_count, replaced_count,
+                            watch_duration, completion_rate, feedback_score, last_updated)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            media_url,
+                            keyword,
+                            source,
+                            sel_cnt,
+                            rep_cnt,
+                            watch_duration,
+                            completion_rate,
+                            fb_score,
+                            now_str,
+                        ),
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.warning("[DB] clip_performance log write failed: %s", e)
+
+    def get_clip_performance_score(
+        self, media_url: str = None, keyword: str = None, source: str = None
+    ) -> float:
+        """Returns performance multiplier/offset based on past engagement history."""
+        try:
+            with self.lock, sqlite3.connect(self.db_path) as conn:
+                score = 0.0
+                cursor = conn.cursor()
+                if media_url:
+                    row = cursor.execute(
+                        "SELECT feedback_score, completion_rate, replaced_count FROM clip_performance WHERE media_url=?",
+                        (media_url,),
+                    ).fetchone()
+                    if row:
+                        fb_score, comp_rate, rep_cnt = row
+                        score += fb_score * 0.2 + comp_rate * 0.1 - rep_cnt * 0.05
+
+                if source:
+                    row = cursor.execute(
+                        "SELECT AVG(feedback_score) FROM clip_performance WHERE source=?",
+                        (source,),
+                    ).fetchone()
+                    if row and row[0] is not None:
+                        score += float(row[0]) * 0.1
+
+                return max(-0.5, min(0.5, score))
+        except Exception as e:
+            logger.warning("[DB] get_clip_performance_score failed: %s", e)
+            return 0.0
 
 
 # Default instance for shared use

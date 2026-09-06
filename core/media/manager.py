@@ -316,12 +316,19 @@ class MediaManager:
             usage = self._source_usage_count.get(src, 0)
             diversity = 1.0 / (usage + 1)
 
+            from core.database import DB
+            media_url = media.get("url") or ""
+            perf_score = DB.get_clip_performance_score(
+                media_url=media_url, keyword=query, source=src
+            )
+
             boost = 0.3 if (preferred_source and src == preferred_source) else 0.0
             scores[src] = (
-                semantic_score * 0.6
+                semantic_score * 0.5
                 + quality * 0.2
                 + freshness * 0.1
                 + diversity * 0.1
+                + perf_score * 0.1
                 + boost
             )
 

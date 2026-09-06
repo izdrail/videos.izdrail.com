@@ -1284,6 +1284,39 @@ class FFmpegVideoGenerator:
                             f"❌ [Pipeline] Emergency fallback also failed for slide {s_num}: {e2}"
                         )
 
+        # --- Stage 2.5: Apply Temporal Coherence Optimization ---
+        try:
+            from core.visual.temporal_coherence import TemporalCoherenceOptimizer
+            tc_opt = TemporalCoherenceOptimizer()
+            content_slides = [s for s in slides_data if not s.get("is_intro") and not s.get("is_cta")]
+            content_slide_nums = [s["slide_num"] for s in content_slides]
+            initial_clips = [slide_videos.get(s_num) for s_num in content_slide_nums]
+
+            # Build candidate pools per slide from local videos & alternative fetched assets
+            candidate_clips_map = {}
+            local_videos = []
+            if self.config and self.config.VIDEOS_DIR.exists():
+                for ext in ["*.mp4", "*.mov", "*.avi"]:
+                    local_videos.extend(list(self.config.VIDEOS_DIR.rglob(ext)))
+
+            for i, s_num in enumerate(content_slide_nums):
+                cands = []
+                if slide_videos.get(s_num):
+                    cands.append(slide_videos[s_num])
+                if local_videos:
+                    cands.extend(random.sample(local_videos, min(len(local_videos), 5)))
+                candidate_clips_map[i] = list(dict.fromkeys(cands))
+
+            optimized_clips = tc_opt.optimize_slide_clips(
+                initial_clips, candidate_clips_per_slide=candidate_clips_map
+            )
+            for s_num, opt_clip in zip(content_slide_nums, optimized_clips):
+                if opt_clip and opt_clip != slide_videos.get(s_num):
+                    print(f"🎬 [TemporalCoherence] Updated slide {s_num} background to {getattr(opt_clip, 'name', str(opt_clip))}")
+                    slide_videos[s_num] = opt_clip
+        except Exception as e:
+            print(f"⚠️ [TemporalCoherence] Post-processing skipped: {e}")
+
         # --- Stage 3: Parallel Rendering ---
         print(
             f"⚡ [Pipeline] Resources ready. Starting render of {total_slides} slides..."
@@ -3513,6 +3546,12 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                                     print(
                                         f"✅ Slide {s_num} <- {src}: {Path(result).name}"
                                     )
+                                    DB.log_clip_performance(
+                                        media_url=str(result),
+                                        keyword=kw,
+                                        source=src,
+                                        event_type="select",
+                                    )
                             except Exception as e:
                                 print(
                                     f"⚠️ Download failed slide {s_num} from {src}: {e}"
@@ -3538,11 +3577,25 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                     if action == "gradient":
                         pre_selected[s_num] = "__gradient__"
                     elif action == "skip":
+                        if s_num in pre_selected:
+                            DB.log_clip_performance(
+                                media_url=pre_selected[s_num],
+                                event_type="replace",
+                            )
                         pass  # Not in dict = auto-select during generation
                     elif action.startswith("/") or action.startswith("."):
                         p = Path(action)
                         if p.exists():
+                            if s_num in pre_selected:
+                                DB.log_clip_performance(
+                                    media_url=pre_selected[s_num],
+                                    event_type="replace",
+                                )
                             pre_selected[s_num] = str(p)
+                            DB.log_clip_performance(
+                                media_url=str(p),
+                                event_type="select",
+                            )
                         else:
                             print(f"⚠️ Override: path not found: {action}")
 

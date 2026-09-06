@@ -163,6 +163,25 @@ class NeuronExtractor:
             else:
                 res["decision_score"] = self._calculate_decision_score(res)
 
+        # Incorporate CLIP similarity scoring for visual semantic relevance
+        try:
+            from core.visual.clip_scorer import CLIPScorer
+            clip_scorer = CLIPScorer()
+            for res in results:
+                media = res.get("media", {})
+                img_src = (
+                    media.get("thumbnail")
+                    or media.get("url")
+                    or media.get("path")
+                )
+                if img_src:
+                    clip_score = clip_scorer.compute_similarity(text, img_src)
+                    res["clip_score"] = clip_score
+                    # Blend CLIP visual relevance score with decision_score
+                    res["decision_score"] = res.get("decision_score", 0.5) * 0.6 + clip_score * 0.4
+        except Exception as e:
+            logger.debug("[NeuronAI] CLIP scoring skipped: %s", e)
+
         results.sort(key=lambda x: x.get("decision_score", 0), reverse=True)
         return results
 
