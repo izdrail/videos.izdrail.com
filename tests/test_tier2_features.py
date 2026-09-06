@@ -121,7 +121,7 @@ def test_media_manager_bandit_incorporates_performance_score(tmp_path):
     """Test MediaManager bandit incorporates clip performance scores."""
     media_mgr = MediaManager()
     source_results = {
-        "Pexels": [{"url": "http://example.com/p1.mp4", "width": 1920, "height": 1080}],
+        "Pexels": [{"url": "http://example.com/p1.mp4", "width": 1080, "height": 1920}],
     }
     # Quality score check
     score = media_mgr._compute_quality_score(source_results["Pexels"][0])

@@ -22,6 +22,11 @@ from .internet_archive import InternetArchiveProvider
 from .base import MediaType, Media
 from core.nlp.neuron_extractor import NeuronExtractor
 from core.nlp.entity import EntityHandler
+from media_scoring import (
+    clip_relevance_score,
+    compute_quality_score,
+    rerank_pooled_candidates,
+)
 
 
 class MediaManager:
@@ -286,74 +291,35 @@ class MediaManager:
                     pass
             return None
 
-        # ── Stage 3: score every source with the bandit formula ──
+        # ── Stage 3: Pool all candidates and rerank globally with media_scoring ──
         now = time.time()
-        scores: Dict[str, float] = {}
-        best_media_per_source: Dict[str, dict] = {}
+        narration_text = context if (context and context.strip()) else query
 
-        for src, results in source_results.items():
-            evaluated = None
-            if context and len(results) > 0:
-                try:
-                    evaluated = self.neuron_extractor.evaluate_media(
-                        context, results, use_snn=use_snn
-                    )
-                except Exception:
-                    pass
+        best_clips = rerank_pooled_candidates(
+            narration_text=narration_text,
+            candidates_by_source=source_results,
+            used_urls=self._used_media_urls,
+            source_usage_count=self._source_usage_count,
+            source_last_used=self._source_last_used,
+            now=now,
+            preferred_source=preferred_source,
+            top_k=1,
+            target_width=1080,
+            target_height=1920,
+        )
 
-            if evaluated:
-                top = evaluated[0]
-                media = top.get("media") or top
-                semantic_score = max(0.0, top.get("decision_score", 0.5))
-            else:
-                media = results[0]
-                semantic_score = 0.5
+        if not best_clips:
+            print(f"💡 [Rerank] No eligible candidate clips after reranking for '{query}'.")
+            return None
 
-            best_media_per_source[src] = media
-            quality = self._compute_quality_score(media)
-            last_used = self._source_last_used.get(src, 0)
-            freshness = 1.0 / (now - last_used + 1)
-            usage = self._source_usage_count.get(src, 0)
-            diversity = 1.0 / (usage + 1)
-
-            from core.database import DB
-            media_url = media.get("url") or ""
-            perf_score = DB.get_clip_performance_score(
-                media_url=media_url, keyword=query, source=src
-            )
-
-            boost = 0.3 if (preferred_source and src == preferred_source) else 0.0
-            scores[src] = (
-                semantic_score * 0.5
-                + quality * 0.2
-                + freshness * 0.1
-                + diversity * 0.1
-                + perf_score * 0.1
-                + boost
-            )
-
-        # Sort sources by score descending
-        sorted_sources = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        best_src = sorted_sources[0][0]
-
-        # Force source rotation: avoid using the same source on consecutive
-        # queries when an alternative actually returned results.
-        if best_src == self._last_used_source and len(sorted_sources) > 1:
-            for alt_src, _ in sorted_sources[1:]:
-                if alt_src in source_results and source_results[alt_src]:
-                    print(
-                        f"🔄 [Bandit] Rotating away from {self._last_used_source}; "
-                        f"using {alt_src} (score={scores[alt_src]:.3f}) instead of "
-                        f"{best_src} (score={scores[best_src]:.3f}) for '{query}'"
-                    )
-                    best_src = alt_src
-                    break
+        best_media = best_clips[0]
+        best_src = best_media.get("_source", "Unknown")
+        best_score = best_media.get("_score", 0.0)
 
         self._last_used_source = best_src
-        best_media = best_media_per_source[best_src]
         print(
-            f"🎰 [Bandit] {best_src} wins (score={scores[best_src]:.3f}) "
-            f"for '{query}'  |  scores: { {s: f'{v:.2f}' for s, v in sorted(scores.items())} }"
+            f"🎰 [MediaScoring] {best_src} wins (score={best_score:.3f}) "
+            f"for '{query}'"
         )
 
         # ── Stage 4: download from the winning source ──
@@ -395,14 +361,8 @@ class MediaManager:
 
     @staticmethod
     def _compute_quality_score(media: dict) -> float:
-        """Score a media item's visual quality (resolution-based)."""
-        w = media.get("width") or 0
-        h = media.get("height") or 0
-        if w > 0 and h > 0:
-            pixels = w * h
-            ref = 1920 * 1080
-            return min(1.0, pixels / ref)
-        return 0.5
+        """Score a media item's visual quality (resolution + aspect ratio fit)."""
+        return compute_quality_score(media)
 
     def _simplify_query(self, query: str) -> str:
         """Reduce query complexity to improve search hit rate."""
