@@ -164,6 +164,35 @@ def mix_audio_with_music(
         logger.error("[Audio] Mixing error: %s", e)
         return False
 """
+GPU utility functions for device selection and memory management.
+"""
+import torch
+
+
+def get_optimal_device(requested_device: str = "auto") -> str:
+    """Determine optimal compute device based on availability and request.
+
+    Args:
+        requested_device: 'auto', 'cuda', or 'cpu'
+
+    Returns:
+        Device string ('cuda' or 'cpu')
+
+    Raises:
+        RuntimeError if 'cuda' requested but unavailable.
+    """
+    req = (requested_device or "auto").lower()
+    if req == "cpu":
+        return "cpu"
+
+    if req == "cuda":
+        if torch.cuda.is_available():
+            return "cuda"
+        raise RuntimeError("CUDA requested but not available on this system.")
+
+    # 'auto' mode: prefer CUDA if available, fallback to CPU
+    return "cuda" if torch.cuda.is_available() else "cpu"
+"""
 Video utilities for processing, metadata extraction and formatting
 """
 import random
@@ -330,6 +359,68 @@ def get_random_middle_frame(video_path: Path, output_path: Path, middle_start: f
     except Exception as e:
         raise RuntimeError(f"Failed to extract frame: {e}")
     return output_path
+
+
+def validate_background_asset(path: Path) -> tuple[bool, str]:
+    """Validate that background asset file exists, is regular, has valid extension and is FFmpeg-readable."""
+    if not path:
+        return False, "path is None"
+
+    path_str = str(path)
+    if path_str.endswith("None") or "/app/background_videos/" in path_str and path_str.endswith("None"):
+        return False, f"malformed path ending in None: {path_str}"
+
+    path_obj = Path(path)
+    if not path_obj.exists():
+        return False, f"file does not exist: {path_obj}"
+    if not path_obj.is_file():
+        return False, f"not a regular file: {path_obj}"
+    if path_obj.stat().st_size == 0:
+        return False, f"file is empty (0 bytes): {path_obj}"
+
+    valid_exts = (".mp4", ".mov", ".avi", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp")
+    if path_obj.suffix.lower() not in valid_exts:
+        return False, f"unsupported extension: {path_obj.suffix}"
+
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path_obj)],
+            capture_output=True, text=True, timeout=10
+        )
+        if probe.returncode != 0:
+            return False, f"ffprobe failed: {probe.stderr.strip()}"
+    except Exception as e:
+        return False, f"ffprobe error: {e}"
+
+    return True, "OK"
+
+
+def validate_slide(slide_path: Path) -> tuple[bool, str]:
+    """Validate generated slide video before concatenation."""
+    if not slide_path or not Path(slide_path).exists():
+        return False, f"slide file missing: {slide_path}"
+
+    p = Path(slide_path)
+    if not p.is_file():
+        return False, f"slide is not a regular file: {p}"
+    if p.stat().st_size == 0:
+        return False, f"slide file is empty: {p}"
+
+    duration = get_video_duration(p)
+    if duration <= 0:
+        return False, f"slide duration is invalid or 0s: {p}"
+
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
+            capture_output=True, text=True, timeout=10
+        )
+        if not probe.stdout.strip():
+            return False, f"slide has no video stream: {p}"
+    except Exception as e:
+        return False, f"slide video stream probe failed: {e}"
+
+    return True, "OK"
 # Media API modules
 """
 Base Media API Interface
@@ -879,534 +970,6 @@ class YouTubeAPI(BaseMediaAPI):
             "supports_license": False,
         }
 """
-Media Manager
-Coordinates multiple media source APIs to find the best background media
-"""
-
-import random
-import time
-import concurrent.futures
-from collections import defaultdict
-import re
-from typing import List, Dict, Optional, Tuple
-from pathlib import Path
-from .pexels import PexelsAPI
-from .giphy import GiphyAPI
-from .youtube import YouTubeAPI
-from .pixabay import PixabayAPI
-from .unsplash import UnsplashAPI
-from .searxng import SearXNGAPI
-from .openverse import OpenverseProvider
-from .wikimedia import WikimediaProvider
-from .internet_archive import InternetArchiveProvider
-from .base import MediaType, Media
-from core.nlp.neuron_extractor import NeuronExtractor
-from core.nlp.entity import EntityHandler
-
-
-class MediaManager:
-    """Coordinates search and download across multiple media APIs"""
-
-    def __init__(self, config=None):
-        self.config = config
-        self.apis = {
-            "Pexels": PexelsAPI(),
-            "Pixabay": PixabayAPI(),
-            "Giphy": GiphyAPI(),
-            "YouTube": YouTubeAPI(),
-            "Unsplash": UnsplashAPI(config.UNSPLASH_ACCESS_KEY if config else None),
-            "SearXNG": SearXNGAPI(),
-            "Openverse": OpenverseProvider(),
-            "Wikimedia": WikimediaProvider(),
-            "InternetArchive": InternetArchiveProvider(),
-        }
-        self.neuron_extractor = NeuronExtractor(
-            model=config.AI_MODEL if config else "gemma4:e2b"
-        )
-        self.entity_handler = EntityHandler()
-        # Open, key-less providers are tried first so the system prefers freely
-        # licensed media and only falls back to commercial APIs when needed.
-        self.preferred_order = [
-            "Openverse",
-            "Wikimedia",
-            "SearXNG",
-            "InternetArchive",
-            "YouTube",
-            "Pexels",
-            "Pixabay",
-            "Unsplash",
-            "Giphy",
-        ]
-        self.search_cache = {}
-        # Track successful fetches per source for dynamic prioritization
-        self.source_success_counts = defaultdict(int)
-        # Track successful keywords for learning
-        self.successful_keywords = defaultdict(int)
-        # Maximum attempts across sources to improve hit rate
-        self.MAX_ATTEMPTS = 3
-        self._used_media_urls = set()
-        # Bandit tracking
-        self._source_usage_count = defaultdict(int)
-        self._source_last_used = {}
-        # Last source actually chosen, used to force source rotation so a single
-        # high-scoring source does not win every query.
-        self._last_used_source = None
-
-    def get_random_media(
-        self,
-        queries: List[str],
-        preferred_source: Optional[str] = None,
-        context: Optional[str] = None,
-        use_snn: bool = False,
-        return_keyword: bool = False,
-        theme: Optional[str] = None,
-        entity: Optional[str] = None,
-    ):
-        """Fetch a background video for a list of *queries*.
-        Tries each query in the list across all sources.
-        When return_keyword=True, returns (path, keyword_that_worked).
-        If ``entity`` is supplied, searches are enriched with that entity.
-        """
-        if isinstance(queries, str):
-            queries = [queries]
-
-        # Append theme-based broad queries to the search list as an extra
-        # chance of finding relevant footage before falling back to local files.
-        if theme and isinstance(theme, str) and theme.strip():
-            queries = list(queries) + [theme.strip()]
-
-        unique_queries = []
-        seen = set()
-        for q in queries:
-            if q and q not in seen:
-                unique_queries.append(q)
-                seen.add(q)
-        queries = unique_queries[:4]
-
-        def _find_cached(q):
-            ck = (q, preferred_source)
-            if ck in self.search_cache:
-                cp = self.search_cache[ck]
-                if cp and Path(cp).exists():
-                    return Path(cp)
-            return None
-
-        # 1. Cache hit + direct search (3 queries max)
-        for query in queries:
-            cached = _find_cached(query)
-            if cached:
-                print(f"🔁 [MediaManager] Using cached video for '{query}'")
-                return (cached, query) if return_keyword else cached
-
-            print(f"🔍 [MediaManager] Searching for '{query}'...")
-            result = self._search_and_download(
-                query,
-                preferred_source,
-                context=context,
-                use_snn=use_snn,
-                theme=theme,
-                entity=entity,
-            )
-            if result:
-                return (result, query) if return_keyword else result
-
-        # 2. Word simplification fallback
-        for query in queries:
-            simplified = self._simplify_query(query)
-            if simplified and simplified != query:
-                cached = _find_cached(simplified)
-                if cached:
-                    return (cached, simplified) if return_keyword else cached
-                result = self._search_and_download(
-                    simplified,
-                    preferred_source,
-                    context=context,
-                    theme=theme,
-                    entity=entity,
-                )
-                if result:
-                    return (result, simplified) if return_keyword else result
-
-        # 3. Local file fallback
-        for ext in ["*.mp4", "*.mov", "*.avi", "*.jpg", "*.png"]:
-            if self.config and self.config.VIDEOS_DIR.exists():
-                files = list(self.config.VIDEOS_DIR.glob(ext))
-                if files:
-                    selected = random.choice(files)
-                    print(
-                        f"📁 [Local] Using local background video (Last Resort): {selected.name}"
-                    )
-                    return (selected, None) if return_keyword else selected
-        return (None, None) if return_keyword else None
-
-    def _search_and_download(
-        self,
-        query: str,
-        preferred_source: Optional[str],
-        context: Optional[str] = None,
-        use_snn: bool = False,
-        source_timeout: int = 60,
-        theme: Optional[str] = None,
-        entity: Optional[str] = None,
-    ) -> Optional[Path]:
-        """Semantic Multi-Armed Bandit: search all sources in parallel,
-        score each by semantic_match, quality, freshness & diversity,
-        then download from the highest-scoring source.
-        """
-        ordered_sources = self._get_ordered_sources(preferred_source)
-
-        # Enrich the search query with any supplied entity context so results
-        # are more targeted. Done before safe_q/cache_key so entity searches
-        # are cached independently.
-        entity_dict = self.entity_handler.parse_entity(entity) if entity else None
-        if entity_dict:
-            query = self.entity_handler.enrich_query(query, entity_dict)
-
-        safe_q = "".join([c if c.isalnum() else "_" for c in query.lower()])
-
-        if self.config:
-            keyword_folder = self.config.VIDEOS_DIR / safe_q
-            keyword_folder.mkdir(parents=True, exist_ok=True)
-        else:
-            keyword_folder = None
-
-        # ── Stage 1: check for existing local files (skip bandit, instant reuse) ──
-        if keyword_folder and self.config:
-            existing_videos = list(keyword_folder.glob("*.mp4")) + list(
-                keyword_folder.glob("*.mov")
-            )
-            if existing_videos:
-                selected_existing = random.choice(existing_videos)
-                print(
-                    f"🔁 [MediaManager] Reusing existing local video for '{query}': {selected_existing.name}"
-                )
-                cache_key = (query, preferred_source)
-                self.search_cache[cache_key] = str(selected_existing)
-                return selected_existing
-
-            existing_images = list(keyword_folder.glob("*.jpg")) + list(
-                keyword_folder.glob("*.png")
-            )
-            if existing_images:
-                selected_existing = random.choice(existing_images)
-                print(
-                    f"🔁 [MediaManager] Reusing existing local image for '{query}': {selected_existing.name}"
-                )
-                cache_key = (query, preferred_source)
-                self.search_cache[cache_key] = str(selected_existing)
-                return selected_existing
-
-        # ── Stage 2: search EVERY eligible source in parallel ──
-        def _search_source(source_name: str):
-            api = self.apis.get(source_name)
-            if not api or not hasattr(api, "search_videos"):
-                return None
-            # Skip a source only if it genuinely requires a key that is missing.
-            # Key-less open providers (Openverse, Wikimedia, Internet Archive,
-            # YouTube, SearXNG) must never be filtered out here.
-            try:
-                requires_key = api.capabilities().get(
-                    "requires_key", bool(getattr(api, "api_key", None))
-                )
-            except Exception:
-                requires_key = bool(getattr(api, "api_key", None))
-            if requires_key and not getattr(api, "api_key", None):
-                return None
-            try:
-                raw = api.search_videos(query, per_page=10)
-                if not raw:
-                    return None
-                filtered = [r for r in raw if r.get("url") not in self._used_media_urls]
-                return filtered if filtered else raw
-            except Exception:
-                return None
-
-        source_results: Dict[str, list] = {}
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(ordered_sources) or 1
-        ) as pool:
-            fut_map = {pool.submit(_search_source, s): s for s in ordered_sources}
-            for fut in concurrent.futures.as_completed(fut_map):
-                src = fut_map[fut]
-                try:
-                    res = fut.result(timeout=source_timeout)
-                    if res:
-                        source_results[src] = res
-                except concurrent.futures.TimeoutError:
-                    print(
-                        f"⏱️ [Bandit] {src} timed out after {source_timeout}s for '{query}'. Skipping."
-                    )
-                except Exception:
-                    pass
-
-        if entity_dict:
-            print(
-                f"🔎 [Search] query='{query}' entity='{entity_dict['raw']}' "
-                f"({entity_dict['type']}) results/source="
-                f"{ {s: len(v) for s, v in source_results.items()} }"
-            )
-
-        if not source_results:
-            print(f"💡 [Bandit] No results found for '{query}' from any source.")
-            # Theme-based fallback: broaden to the script's theme and generic
-            # terms so we still get on-theme (or at least neutral) footage.
-            if theme and theme.strip() and theme.strip().lower() not in query.lower():
-                print(f"🎯 [Bandit] Trying theme-based query: '{theme.strip()}'")
-                try:
-                    theme_result = self._search_and_download(
-                        theme.strip(),
-                        preferred_source,
-                        context=context,
-                        use_snn=use_snn,
-                        source_timeout=source_timeout,
-                    )
-                    if theme_result:
-                        return theme_result
-                except Exception:
-                    pass
-            return None
-
-        # ── Stage 3: score every source with the bandit formula ──
-        now = time.time()
-        scores: Dict[str, float] = {}
-        best_media_per_source: Dict[str, dict] = {}
-
-        for src, results in source_results.items():
-            evaluated = None
-            if context and len(results) > 0:
-                try:
-                    evaluated = self.neuron_extractor.evaluate_media(
-                        context, results, use_snn=use_snn
-                    )
-                except Exception:
-                    pass
-
-            if evaluated:
-                top = evaluated[0]
-                media = top.get("media") or top
-                semantic_score = max(0.0, top.get("decision_score", 0.5))
-            else:
-                media = results[0]
-                semantic_score = 0.5
-
-            best_media_per_source[src] = media
-            quality = self._compute_quality_score(media)
-            last_used = self._source_last_used.get(src, 0)
-            freshness = 1.0 / (now - last_used + 1)
-            usage = self._source_usage_count.get(src, 0)
-            diversity = 1.0 / (usage + 1)
-
-            boost = 0.3 if (preferred_source and src == preferred_source) else 0.0
-            scores[src] = (
-                semantic_score * 0.6
-                + quality * 0.2
-                + freshness * 0.1
-                + diversity * 0.1
-                + boost
-            )
-
-        # Sort sources by score descending
-        sorted_sources = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        best_src = sorted_sources[0][0]
-
-        # Force source rotation: avoid using the same source on consecutive
-        # queries when an alternative actually returned results.
-        if best_src == self._last_used_source and len(sorted_sources) > 1:
-            for alt_src, _ in sorted_sources[1:]:
-                if alt_src in source_results and source_results[alt_src]:
-                    print(
-                        f"🔄 [Bandit] Rotating away from {self._last_used_source}; "
-                        f"using {alt_src} (score={scores[alt_src]:.3f}) instead of "
-                        f"{best_src} (score={scores[best_src]:.3f}) for '{query}'"
-                    )
-                    best_src = alt_src
-                    break
-
-        self._last_used_source = best_src
-        best_media = best_media_per_source[best_src]
-        print(
-            f"🎰 [Bandit] {best_src} wins (score={scores[best_src]:.3f}) "
-            f"for '{query}'  |  scores: { {s: f'{v:.2f}' for s, v in sorted(scores.items())} }"
-        )
-
-        # ── Stage 4: download from the winning source ──
-        ext = best_media.get("ext", ".mp4")
-        if ext == ".mp4" and (best_src in ("Unsplash", "SearXNG")):
-            url = best_media.get("url", "")
-            if ".jpg" in url:
-                ext = ".jpg"
-            elif ".png" in url:
-                ext = ".png"
-            else:
-                ext = ".jpg"
-
-        output_path = (
-            keyword_folder
-            / f"{safe_q}_{best_src.lower()}_{random.randint(1000, 9999)}{ext}"
-        )
-
-        api = self.apis.get(best_src)
-        if api and api.download_video(best_media.get("url"), output_path):
-            print(f"✅ [Bandit] Downloaded from {best_src} for query: '{query}'")
-            self.source_success_counts[best_src] += 1
-            self.successful_keywords[query] += 1
-            self._source_usage_count[best_src] += 1
-            self._source_last_used[best_src] = now
-            cache_key = (query, preferred_source)
-            self.search_cache[cache_key] = str(output_path)
-            self._used_media_urls.add(best_media.get("url"))
-            return output_path
-
-        return None
-
-    @staticmethod
-    def _compute_quality_score(media: dict) -> float:
-        """Score a media item's visual quality (resolution-based)."""
-        w = media.get("width") or 0
-        h = media.get("height") or 0
-        if w > 0 and h > 0:
-            pixels = w * h
-            ref = 1920 * 1080
-            return min(1.0, pixels / ref)
-        return 0.5
-
-    def _simplify_query(self, query: str) -> str:
-        """Reduce query complexity to improve search hit rate."""
-        words = query.split()
-        if len(words) > 1:
-            simplified = " ".join(words[:2])
-            return simplified
-        return query
-
-    def is_keyword_available(
-        self, keyword: str, preferred_source: Optional[str] = None
-    ) -> bool:
-        """Quick availability dry-run for a single keyword.
-
-        Returns True if at least one eligible source returns ≥1 result for a
-        minimal (``per_page=1``) search. Used by the availability fallback so we
-        only commit to keyword candidates that can actually yield footage.
-        """
-        if not keyword:
-            return False
-        ordered = self._get_ordered_sources(preferred_source)
-        for src in ordered:
-            api = self.apis.get(src)
-            if not api or not hasattr(api, "search_videos"):
-                continue
-            try:
-                requires_key = api.capabilities().get(
-                    "requires_key", bool(getattr(api, "api_key", None))
-                )
-            except Exception:
-                requires_key = bool(getattr(api, "api_key", None))
-            if requires_key and not getattr(api, "api_key", None):
-                continue
-            try:
-                res = api.search_videos(keyword, per_page=1)
-                if res:
-                    return True
-            except Exception:
-                continue
-        return False
-
-    def _get_ordered_sources(self, preferred: Optional[str] = None) -> List[str]:
-        sources = list(self.apis.keys())
-        if preferred and preferred in sources:
-            sources.remove(preferred)
-            ordered = [preferred]
-        elif self.preferred_order:
-            # When no specific source selected, use preferred_order as the base
-            available = (
-                self.preferred_order if len(self.preferred_order) > 1 else sources
-            )
-            ordered = [s for s in available if s in sources]
-            sources = [s for s in sources if s not in ordered]
-        else:
-            ordered = []
-        # Sort remaining by success count
-        remaining = sorted(
-            sources, key=lambda s: self.source_success_counts.get(s, 0), reverse=True
-        )
-        ordered.extend(remaining)
-        return ordered
-
-    # ------------------------------------------------------------------
-    # Unified, de-duplicated discovery across all providers
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _canonical_key(media: "Media") -> str:
-        """Stable de-duplication key: normalized URL, else title+source."""
-        url = (media.url or "").strip()
-        if url:
-            from urllib.parse import urlparse
-
-            p = urlparse(url)
-            path = p.path.split("?")[0].rstrip("/").lower()
-            return f"{p.netloc}{path}"
-        return f"{(media.title or '').lower()}|{media.source or ''}"
-
-    def search(
-        self,
-        query: str,
-        media_type: MediaType = MediaType.ANY,
-        limit: int = 50,
-        min_results: int = 50,
-    ) -> List["Media"]:
-        """Aggregate results from every provider (open sources first).
-
-        Walks the priority list querying each provider (skipping those that don't
-        support the requested ``media_type`` or require a missing key) until at
-        least ``min_results`` items are collected or all providers are exhausted.
-        Results are de-duplicated by canonical URL so the same file surfacing on
-        multiple providers appears only once.
-
-        Returns:
-            A list of unified :class:`Media` objects.
-        """
-        collected: List[Media] = []
-        seen = set()
-        discovery_order = [s for s in self.preferred_order if s in self.apis]
-
-        for src in discovery_order:
-            api = self.apis.get(src)
-            if not api:
-                continue
-            try:
-                caps = api.capabilities()
-            except Exception:
-                caps = {}
-            supports = caps.get("supports_media_types", [MediaType.ANY])
-            if media_type != MediaType.ANY and media_type not in supports:
-                continue
-            if caps.get("requires_key") and not getattr(api, "api_key", None):
-                continue
-
-            try:
-                if hasattr(api, "search"):
-                    items = api.search(query, media_type=media_type, limit=limit)
-                else:
-                    items = [
-                        Media.from_dict(d, src)
-                        for d in api.search_videos(query, "portrait", limit)
-                    ]
-            except Exception as e:
-                print(f"⚠️ [Search] {src} failed: {e}")
-                items = []
-
-            for m in items:
-                key = self._canonical_key(m)
-                if key in seen:
-                    continue
-                seen.add(key)
-                collected.append(m)
-                if len(collected) >= min_results:
-                    break
-            if len(collected) >= min_results:
-                break
-
-        return collected[:limit]
-"""
 Pixabay API Client
 Provides access to Pixabay video library
 """
@@ -1938,179 +1501,6 @@ class OpenverseProvider(BaseMediaAPI):
             "supports_license": True,
         }
 """
-Wikimedia Commons API Client
-Searches the Wikimedia Commons file repository (images, videos, audio) via the
-MediaWiki Action API. No API key required.
-"""
-
-from typing import List, Dict, Optional
-from urllib.parse import urlparse
-
-from .base import BaseMediaAPI, Media, MediaType
-
-
-class WikimediaProvider(BaseMediaAPI):
-    """Read-only access to Wikimedia Commons openly licensed media."""
-
-    API = "https://commons.wikimedia.org/w/api.php"
-
-    def __init__(self, api_key: Optional[str] = None):
-        super().__init__(api_key)
-
-    # -- helpers ---------------------------------------------------------
-    @staticmethod
-    def _ext(url: Optional[str]) -> Optional[str]:
-        if not url:
-            return None
-        path = urlparse(url).path.lower()
-        for ext in (
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".gif",
-            ".webp",
-            ".tif",
-            ".tiff",
-            ".mp4",
-            ".webm",
-            ".ogv",
-            ".ogg",
-            ".mp3",
-            ".wav",
-        ):
-            if path.endswith(ext):
-                return ext
-        return None
-
-    @staticmethod
-    def _em(value):
-        """Extract the ``*.value`` wrapper MediaWiki often uses in extmetadata."""
-        if isinstance(value, dict):
-            return value.get("value")
-        return value
-
-    def _query(self, params: Dict) -> Dict:
-        try:
-            resp = self.session.get(self.API, params=params, timeout=20)
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            print(f"[Wikimedia] API error: {e}")
-            return {}
-
-    # -- public API ------------------------------------------------------
-    def search(
-        self,
-        query: str,
-        media_type: MediaType = MediaType.ANY,
-        limit: int = 20,
-    ) -> List[Media]:
-        cache_key = f"wc_{query}_{media_type.value}_{limit}"
-        if cache_key in self.search_cache:
-            return self.search_cache[cache_key]
-
-        # 1) Find file pages in the File namespace (6).
-        sr = self._query(
-            {
-                "action": "query",
-                "format": "json",
-                "list": "search",
-                "srnamespace": 6,
-                "srsearch": query,
-                "srlimit": limit,
-                "srwhat": "text",
-            }
-        )
-        titles = [r.get("title") for r in sr.get("query", {}).get("search", [])]
-        if not titles:
-            self.search_cache[cache_key] = []
-            return []
-
-        # 2) Fetch imageinfo (url, size, mime, license) for all titles at once.
-        ii = self._query(
-            {
-                "action": "query",
-                "format": "json",
-                "titles": "|".join(titles),
-                "prop": "imageinfo",
-                "iiprop": "url|size|mime|mediatype|extmetadata",
-                "iiurlwidth": 640,
-            }
-        )
-
-        results: List[Media] = []
-        pages = (ii.get("query", {}).get("pages", {}) or {}).values()
-        for page in pages:
-            info = (page.get("imageinfo") or [{}])[0]
-            url = info.get("url")
-            if not url:
-                continue
-            mime = (info.get("mime") or "").lower()
-            if mime.startswith("video"):
-                mt = MediaType.VIDEO
-            elif mime.startswith("image"):
-                mt = MediaType.IMAGE
-            elif mime.startswith("audio"):
-                mt = MediaType.AUDIO
-            else:
-                ext = self._ext(url) or ""
-                mt = (
-                    MediaType.VIDEO
-                    if ext in (".mp4", ".webm", ".ogv")
-                    else MediaType.IMAGE
-                )
-            if media_type != MediaType.ANY and mt != media_type:
-                continue
-
-            em = info.get("extmetadata") or {}
-            artist = self._em(em.get("Artist")) or page.get("title")
-            # Artist often contains wikitext/html; strip crude tags if present.
-            if isinstance(artist, str) and ("[[" in artist or "<" in artist):
-                artist = (page.get("title") or "").replace("File:", "")
-            license_short = self._em(em.get("LicenseShortName"))
-            license_url = self._em(em.get("LicenseUrl"))
-
-            results.append(
-                Media(
-                    url=url,
-                    title=page.get("title"),
-                    creator=artist,
-                    thumbnail_url=info.get("thumburl"),
-                    license=license_short or "CC BY-SA",
-                    license_version=self._em(em.get("LicenseVersion")),
-                    attribution=artist,
-                    license_url=license_url,
-                    width=info.get("width"),
-                    height=info.get("height"),
-                    duration=None,
-                    ext=self._ext(url),
-                    provider="Wikimedia Commons",
-                    media_type=mt,
-                    source="Wikimedia",
-                )
-            )
-            if len(results) >= limit:
-                break
-
-        self.search_cache[cache_key] = results
-        return results
-
-    def search_videos(
-        self, query: str, orientation: str = "portrait", per_page: int = 15
-    ) -> List[Dict]:
-        media = self.search(query, media_type=MediaType.ANY, limit=per_page)
-        return [m.to_dict() for m in media]
-
-    def download_video(self, video_url: str, output_path) -> bool:
-        return self._download_file(video_url, output_path)
-
-    def capabilities(self) -> Dict:
-        return {
-            "supports_media_types": [MediaType.IMAGE, MediaType.VIDEO],
-            "requires_key": False,
-            "supports_license": True,
-        }
-"""
 Internet Archive API Client
 Searches the Internet Archive (archive.org) for openly licensed movies, audio and
 images via the advancedsearch + metadata APIs. No API key required.
@@ -2324,7 +1714,7 @@ class InternetArchiveProvider(BaseMediaAPI):
             width=None,
             height=None,
             duration=None,
-            ext=self._ext(name),
+            ext=self._ext(name) or ".mp4",
             provider="Internet Archive",
             media_type=mt,
             source="InternetArchive",
@@ -2352,6 +1742,714 @@ class InternetArchiveProvider(BaseMediaAPI):
                 MediaType.VIDEO,
                 MediaType.AUDIO,
             ],
+            "requires_key": False,
+            "supports_license": True,
+        }
+"""
+Media Manager
+Coordinates multiple media source APIs to find the best background media
+"""
+
+import random
+import time
+import concurrent.futures
+from collections import defaultdict
+import re
+from typing import List, Dict, Optional, Tuple
+from pathlib import Path
+from .pexels import PexelsAPI
+from .giphy import GiphyAPI
+from .youtube import YouTubeAPI
+from .pixabay import PixabayAPI
+from .unsplash import UnsplashAPI
+from .searxng import SearXNGAPI
+from .openverse import OpenverseProvider
+from .wikimedia import WikimediaProvider
+from .internet_archive import InternetArchiveProvider
+from .base import MediaType, Media
+from core.nlp.neuron_extractor import NeuronExtractor
+from core.nlp.entity import EntityHandler
+
+
+class MediaManager:
+    """Coordinates search and download across multiple media APIs"""
+
+    def __init__(self, config=None):
+        self.config = config
+        self.apis = {
+            "Pexels": PexelsAPI(),
+            "Pixabay": PixabayAPI(),
+            "Giphy": GiphyAPI(),
+            "YouTube": YouTubeAPI(),
+            "Unsplash": UnsplashAPI(config.UNSPLASH_ACCESS_KEY if config else None),
+            "SearXNG": SearXNGAPI(),
+            "Openverse": OpenverseProvider(),
+            "Wikimedia": WikimediaProvider(),
+            "InternetArchive": InternetArchiveProvider(),
+        }
+        self.neuron_extractor = NeuronExtractor(
+            model=config.AI_MODEL if config else "gemma4:e2b"
+        )
+        self.entity_handler = EntityHandler()
+        # Open, key-less providers are tried first so the system prefers freely
+        # licensed media and only falls back to commercial APIs when needed.
+        self.preferred_order = [
+            "Openverse",
+            "Wikimedia",
+            "SearXNG",
+            "InternetArchive",
+            "YouTube",
+            "Pexels",
+            "Pixabay",
+            "Unsplash",
+            "Giphy",
+        ]
+        self.search_cache = {}
+        # Track successful fetches per source for dynamic prioritization
+        self.source_success_counts = defaultdict(int)
+        # Track successful keywords for learning
+        self.successful_keywords = defaultdict(int)
+        # Maximum attempts across sources to improve hit rate
+        self.MAX_ATTEMPTS = 3
+        self._used_media_urls = set()
+        # Bandit tracking
+        self._source_usage_count = defaultdict(int)
+        self._source_last_used = {}
+        # Last source actually chosen, used to force source rotation so a single
+        # high-scoring source does not win every query.
+        self._last_used_source = None
+
+    def get_random_media(
+        self,
+        queries: List[str],
+        preferred_source: Optional[str] = None,
+        context: Optional[str] = None,
+        use_snn: bool = False,
+        return_keyword: bool = False,
+        theme: Optional[str] = None,
+        entity: Optional[str] = None,
+    ):
+        """Fetch a background video for a list of *queries*.
+        Tries each query in the list across all sources.
+        When return_keyword=True, returns (path, keyword_that_worked).
+        If ``entity`` is supplied, searches are enriched with that entity.
+        """
+        if isinstance(queries, str):
+            queries = [queries]
+
+        # Append theme-based broad queries to the search list as an extra
+        # chance of finding relevant footage before falling back to local files.
+        if theme and isinstance(theme, str) and theme.strip():
+            queries = list(queries) + [theme.strip()]
+
+        unique_queries = []
+        seen = set()
+        for q in queries:
+            if q and q not in seen:
+                unique_queries.append(q)
+                seen.add(q)
+        queries = unique_queries[:4]
+
+        def _find_cached(q):
+            ck = (q, preferred_source)
+            if ck in self.search_cache:
+                cp = self.search_cache[ck]
+                if cp and Path(cp).exists():
+                    return Path(cp)
+            return None
+
+        # 1. Cache hit + direct search (3 queries max)
+        for query in queries:
+            cached = _find_cached(query)
+            if cached:
+                print(f"🔁 [MediaManager] Using cached video for '{query}'")
+                return (cached, query) if return_keyword else cached
+
+            print(f"🔍 [MediaManager] Searching for '{query}'...")
+            result = self._search_and_download(
+                query,
+                preferred_source,
+                context=context,
+                use_snn=use_snn,
+                theme=theme,
+                entity=entity,
+            )
+            if result:
+                return (result, query) if return_keyword else result
+
+        # 2. Word simplification fallback
+        for query in queries:
+            simplified = self._simplify_query(query)
+            if simplified and simplified != query:
+                cached = _find_cached(simplified)
+                if cached:
+                    return (cached, simplified) if return_keyword else cached
+                result = self._search_and_download(
+                    simplified,
+                    preferred_source,
+                    context=context,
+                    theme=theme,
+                    entity=entity,
+                )
+                if result:
+                    return (result, simplified) if return_keyword else result
+
+        # 3. Local file fallback
+        for ext in ["*.mp4", "*.mov", "*.avi", "*.jpg", "*.png"]:
+            if self.config and self.config.VIDEOS_DIR.exists():
+                files = list(self.config.VIDEOS_DIR.glob(ext))
+                if files:
+                    selected = random.choice(files)
+                    print(
+                        f"📁 [Local] Using local background video (Last Resort): {selected.name}"
+                    )
+                    return (selected, None) if return_keyword else selected
+        return (None, None) if return_keyword else None
+
+    def _search_and_download(
+        self,
+        query: str,
+        preferred_source: Optional[str],
+        context: Optional[str] = None,
+        use_snn: bool = False,
+        source_timeout: int = 60,
+        theme: Optional[str] = None,
+        entity: Optional[str] = None,
+    ) -> Optional[Path]:
+        """Semantic Multi-Armed Bandit: search all sources in parallel,
+        score each by semantic_match, quality, freshness & diversity,
+        then download from the highest-scoring source.
+        """
+        ordered_sources = self._get_ordered_sources(preferred_source)
+
+        # Enrich the search query with any supplied entity context so results
+        # are more targeted. Done before safe_q/cache_key so entity searches
+        # are cached independently.
+        entity_dict = self.entity_handler.parse_entity(entity) if entity else None
+        if entity_dict:
+            query = self.entity_handler.enrich_query(query, entity_dict)
+
+        safe_q = "".join([c if c.isalnum() else "_" for c in query.lower()])
+
+        if self.config:
+            keyword_folder = self.config.VIDEOS_DIR / safe_q
+            keyword_folder.mkdir(parents=True, exist_ok=True)
+        else:
+            keyword_folder = None
+
+        # ── Stage 1: check for existing local files (skip bandit, instant reuse) ──
+        if keyword_folder and self.config:
+            existing_videos = list(keyword_folder.glob("*.mp4")) + list(
+                keyword_folder.glob("*.mov")
+            )
+            if existing_videos:
+                selected_existing = random.choice(existing_videos)
+                print(
+                    f"🔁 [MediaManager] Reusing existing local video for '{query}': {selected_existing.name}"
+                )
+                cache_key = (query, preferred_source)
+                self.search_cache[cache_key] = str(selected_existing)
+                return selected_existing
+
+            existing_images = list(keyword_folder.glob("*.jpg")) + list(
+                keyword_folder.glob("*.png")
+            )
+            if existing_images:
+                selected_existing = random.choice(existing_images)
+                print(
+                    f"🔁 [MediaManager] Reusing existing local image for '{query}': {selected_existing.name}"
+                )
+                cache_key = (query, preferred_source)
+                self.search_cache[cache_key] = str(selected_existing)
+                return selected_existing
+
+        # ── Stage 2: search EVERY eligible source in parallel ──
+        def _search_source(source_name: str):
+            api = self.apis.get(source_name)
+            if not api or not hasattr(api, "search_videos"):
+                return None
+            # Skip a source only if it genuinely requires a key that is missing.
+            # Key-less open providers (Openverse, Wikimedia, Internet Archive,
+            # YouTube, SearXNG) must never be filtered out here.
+            try:
+                requires_key = api.capabilities().get(
+                    "requires_key", bool(getattr(api, "api_key", None))
+                )
+            except Exception:
+                requires_key = bool(getattr(api, "api_key", None))
+            if requires_key and not getattr(api, "api_key", None):
+                return None
+            try:
+                raw = api.search_videos(query, per_page=10)
+                if not raw:
+                    return None
+                filtered = [r for r in raw if r.get("url") not in self._used_media_urls]
+                return filtered if filtered else raw
+            except Exception:
+                return None
+
+        source_results: Dict[str, list] = {}
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(ordered_sources) or 1
+        ) as pool:
+            fut_map = {pool.submit(_search_source, s): s for s in ordered_sources}
+            for fut in concurrent.futures.as_completed(fut_map):
+                src = fut_map[fut]
+                try:
+                    res = fut.result(timeout=source_timeout)
+                    if res:
+                        source_results[src] = res
+                except concurrent.futures.TimeoutError:
+                    print(
+                        f"⏱️ [Bandit] {src} timed out after {source_timeout}s for '{query}'. Skipping."
+                    )
+                except Exception:
+                    pass
+
+        if entity_dict:
+            print(
+                f"🔎 [Search] query='{query}' entity='{entity_dict['raw']}' "
+                f"({entity_dict['type']}) results/source="
+                f"{ {s: len(v) for s, v in source_results.items()} }"
+            )
+
+        if not source_results:
+            print(f"💡 [Bandit] No results found for '{query}' from any source.")
+            # Theme-based fallback: broaden to the script's theme and generic
+            # terms so we still get on-theme (or at least neutral) footage.
+            if theme and theme.strip() and theme.strip().lower() not in query.lower():
+                print(f"🎯 [Bandit] Trying theme-based query: '{theme.strip()}'")
+                try:
+                    theme_result = self._search_and_download(
+                        theme.strip(),
+                        preferred_source,
+                        context=context,
+                        use_snn=use_snn,
+                        source_timeout=source_timeout,
+                    )
+                    if theme_result:
+                        return theme_result
+                except Exception:
+                    pass
+            return None
+
+        # ── Stage 3: score every source with the bandit formula ──
+        now = time.time()
+        scores: Dict[str, float] = {}
+        best_media_per_source: Dict[str, dict] = {}
+
+        for src, results in source_results.items():
+            evaluated = None
+            if context and len(results) > 0:
+                try:
+                    evaluated = self.neuron_extractor.evaluate_media(
+                        context, results, use_snn=use_snn
+                    )
+                except Exception:
+                    pass
+
+            if evaluated:
+                top = evaluated[0]
+                media = top.get("media") or top
+                semantic_score = max(0.0, top.get("decision_score", 0.5))
+            else:
+                media = results[0]
+                semantic_score = 0.5
+
+            best_media_per_source[src] = media
+            quality = self._compute_quality_score(media)
+            last_used = self._source_last_used.get(src, 0)
+            freshness = 1.0 / (now - last_used + 1)
+            usage = self._source_usage_count.get(src, 0)
+            diversity = 1.0 / (usage + 1)
+
+            boost = 0.3 if (preferred_source and src == preferred_source) else 0.0
+            scores[src] = (
+                semantic_score * 0.6
+                + quality * 0.2
+                + freshness * 0.1
+                + diversity * 0.1
+                + boost
+            )
+
+        # Sort sources by score descending
+        sorted_sources = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        best_src = sorted_sources[0][0]
+
+        # Force source rotation: avoid using the same source on consecutive
+        # queries when an alternative actually returned results.
+        if best_src == self._last_used_source and len(sorted_sources) > 1:
+            for alt_src, _ in sorted_sources[1:]:
+                if alt_src in source_results and source_results[alt_src]:
+                    print(
+                        f"🔄 [Bandit] Rotating away from {self._last_used_source}; "
+                        f"using {alt_src} (score={scores[alt_src]:.3f}) instead of "
+                        f"{best_src} (score={scores[best_src]:.3f}) for '{query}'"
+                    )
+                    best_src = alt_src
+                    break
+
+        self._last_used_source = best_src
+        best_media = best_media_per_source[best_src]
+        print(
+            f"🎰 [Bandit] {best_src} wins (score={scores[best_src]:.3f}) "
+            f"for '{query}'  |  scores: { {s: f'{v:.2f}' for s, v in sorted(scores.items())} }"
+        )
+
+        # ── Stage 4: download from the winning source ──
+        raw_ext = best_media.get("ext")
+        if not raw_ext or not isinstance(raw_ext, str) or raw_ext.strip().lower() in ("none", "null", ""):
+            ext = ".mp4"
+        else:
+            ext = raw_ext.strip().lower()
+            if not ext.startswith("."):
+                ext = f".{ext}"
+
+        if ext == ".mp4" and (best_src in ("Unsplash", "SearXNG")):
+            url = best_media.get("url", "")
+            if ".jpg" in url:
+                ext = ".jpg"
+            elif ".png" in url:
+                ext = ".png"
+            else:
+                ext = ".jpg"
+
+        output_path = (
+            keyword_folder
+            / f"{safe_q}_{best_src.lower()}_{random.randint(1000, 9999)}{ext}"
+        )
+
+        api = self.apis.get(best_src)
+        if api and api.download_video(best_media.get("url"), output_path):
+            print(f"✅ [Bandit] Downloaded from {best_src} for query: '{query}'")
+            self.source_success_counts[best_src] += 1
+            self.successful_keywords[query] += 1
+            self._source_usage_count[best_src] += 1
+            self._source_last_used[best_src] = now
+            cache_key = (query, preferred_source)
+            self.search_cache[cache_key] = str(output_path)
+            self._used_media_urls.add(best_media.get("url"))
+            return output_path
+
+        return None
+
+    @staticmethod
+    def _compute_quality_score(media: dict) -> float:
+        """Score a media item's visual quality (resolution-based)."""
+        w = media.get("width") or 0
+        h = media.get("height") or 0
+        if w > 0 and h > 0:
+            pixels = w * h
+            ref = 1920 * 1080
+            return min(1.0, pixels / ref)
+        return 0.5
+
+    def _simplify_query(self, query: str) -> str:
+        """Reduce query complexity to improve search hit rate."""
+        words = query.split()
+        if len(words) > 1:
+            simplified = " ".join(words[:2])
+            return simplified
+        return query
+
+    def is_keyword_available(
+        self, keyword: str, preferred_source: Optional[str] = None
+    ) -> bool:
+        """Quick availability dry-run for a single keyword.
+
+        Returns True if at least one eligible source returns ≥1 result for a
+        minimal (``per_page=1``) search. Used by the availability fallback so we
+        only commit to keyword candidates that can actually yield footage.
+        """
+        if not keyword:
+            return False
+        ordered = self._get_ordered_sources(preferred_source)
+        for src in ordered:
+            api = self.apis.get(src)
+            if not api or not hasattr(api, "search_videos"):
+                continue
+            try:
+                requires_key = api.capabilities().get(
+                    "requires_key", bool(getattr(api, "api_key", None))
+                )
+            except Exception:
+                requires_key = bool(getattr(api, "api_key", None))
+            if requires_key and not getattr(api, "api_key", None):
+                continue
+            try:
+                res = api.search_videos(keyword, per_page=1)
+                if res:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _get_ordered_sources(self, preferred: Optional[str] = None) -> List[str]:
+        sources = list(self.apis.keys())
+        if preferred and preferred in sources:
+            sources.remove(preferred)
+            ordered = [preferred]
+        elif self.preferred_order:
+            # When no specific source selected, use preferred_order as the base
+            available = (
+                self.preferred_order if len(self.preferred_order) > 1 else sources
+            )
+            ordered = [s for s in available if s in sources]
+            sources = [s for s in sources if s not in ordered]
+        else:
+            ordered = []
+        # Sort remaining by success count
+        remaining = sorted(
+            sources, key=lambda s: self.source_success_counts.get(s, 0), reverse=True
+        )
+        ordered.extend(remaining)
+        return ordered
+
+    # ------------------------------------------------------------------
+    # Unified, de-duplicated discovery across all providers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _canonical_key(media: "Media") -> str:
+        """Stable de-duplication key: normalized URL, else title+source."""
+        url = (media.url or "").strip()
+        if url:
+            from urllib.parse import urlparse
+
+            p = urlparse(url)
+            path = p.path.split("?")[0].rstrip("/").lower()
+            return f"{p.netloc}{path}"
+        return f"{(media.title or '').lower()}|{media.source or ''}"
+
+    def search(
+        self,
+        query: str,
+        media_type: MediaType = MediaType.ANY,
+        limit: int = 50,
+        min_results: int = 50,
+    ) -> List["Media"]:
+        """Aggregate results from every provider (open sources first).
+
+        Walks the priority list querying each provider (skipping those that don't
+        support the requested ``media_type`` or require a missing key) until at
+        least ``min_results`` items are collected or all providers are exhausted.
+        Results are de-duplicated by canonical URL so the same file surfacing on
+        multiple providers appears only once.
+
+        Returns:
+            A list of unified :class:`Media` objects.
+        """
+        collected: List[Media] = []
+        seen = set()
+        discovery_order = [s for s in self.preferred_order if s in self.apis]
+
+        for src in discovery_order:
+            api = self.apis.get(src)
+            if not api:
+                continue
+            try:
+                caps = api.capabilities()
+            except Exception:
+                caps = {}
+            supports = caps.get("supports_media_types", [MediaType.ANY])
+            if media_type != MediaType.ANY and media_type not in supports:
+                continue
+            if caps.get("requires_key") and not getattr(api, "api_key", None):
+                continue
+
+            try:
+                if hasattr(api, "search"):
+                    items = api.search(query, media_type=media_type, limit=limit)
+                else:
+                    items = [
+                        Media.from_dict(d, src)
+                        for d in api.search_videos(query, "portrait", limit)
+                    ]
+            except Exception as e:
+                print(f"⚠️ [Search] {src} failed: {e}")
+                items = []
+
+            for m in items:
+                key = self._canonical_key(m)
+                if key in seen:
+                    continue
+                seen.add(key)
+                collected.append(m)
+                if len(collected) >= min_results:
+                    break
+            if len(collected) >= min_results:
+                break
+
+        return collected[:limit]
+"""
+Wikimedia Commons API Client
+Searches the Wikimedia Commons file repository (images, videos, audio) via the
+MediaWiki Action API. No API key required.
+"""
+
+from typing import List, Dict, Optional
+from urllib.parse import urlparse
+
+from .base import BaseMediaAPI, Media, MediaType
+
+
+class WikimediaProvider(BaseMediaAPI):
+    """Read-only access to Wikimedia Commons openly licensed media."""
+
+    API = "https://commons.wikimedia.org/w/api.php"
+
+    def __init__(self, api_key: Optional[str] = None):
+        super().__init__(api_key)
+
+    # -- helpers ---------------------------------------------------------
+    @staticmethod
+    def _ext(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        path = urlparse(url).path.lower()
+        for ext in (
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".webp",
+            ".tif",
+            ".tiff",
+            ".mp4",
+            ".webm",
+            ".ogv",
+            ".ogg",
+            ".mp3",
+            ".wav",
+        ):
+            if path.endswith(ext):
+                return ext
+        return None
+
+    @staticmethod
+    def _em(value):
+        """Extract the ``*.value`` wrapper MediaWiki often uses in extmetadata."""
+        if isinstance(value, dict):
+            return value.get("value")
+        return value
+
+    def _query(self, params: Dict) -> Dict:
+        try:
+            resp = self.session.get(self.API, params=params, timeout=20)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            print(f"[Wikimedia] API error: {e}")
+            return {}
+
+    # -- public API ------------------------------------------------------
+    def search(
+        self,
+        query: str,
+        media_type: MediaType = MediaType.ANY,
+        limit: int = 20,
+    ) -> List[Media]:
+        cache_key = f"wc_{query}_{media_type.value}_{limit}"
+        if cache_key in self.search_cache:
+            return self.search_cache[cache_key]
+
+        # 1) Find file pages in the File namespace (6).
+        sr = self._query(
+            {
+                "action": "query",
+                "format": "json",
+                "list": "search",
+                "srnamespace": 6,
+                "srsearch": query,
+                "srlimit": limit,
+                "srwhat": "text",
+            }
+        )
+        titles = [r.get("title") for r in sr.get("query", {}).get("search", [])]
+        if not titles:
+            self.search_cache[cache_key] = []
+            return []
+
+        # 2) Fetch imageinfo (url, size, mime, license) for all titles at once.
+        ii = self._query(
+            {
+                "action": "query",
+                "format": "json",
+                "titles": "|".join(titles),
+                "prop": "imageinfo",
+                "iiprop": "url|size|mime|mediatype|extmetadata",
+                "iiurlwidth": 640,
+            }
+        )
+
+        results: List[Media] = []
+        pages = (ii.get("query", {}).get("pages", {}) or {}).values()
+        for page in pages:
+            info = (page.get("imageinfo") or [{}])[0]
+            url = info.get("url")
+            if not url:
+                continue
+            mime = (info.get("mime") or "").lower()
+            if mime.startswith("video"):
+                mt = MediaType.VIDEO
+            elif mime.startswith("image"):
+                mt = MediaType.IMAGE
+            elif mime.startswith("audio"):
+                mt = MediaType.AUDIO
+            else:
+                ext = self._ext(url) or ""
+                mt = (
+                    MediaType.VIDEO
+                    if ext in (".mp4", ".webm", ".ogv")
+                    else MediaType.IMAGE
+                )
+            if media_type != MediaType.ANY and mt != media_type:
+                continue
+
+            em = info.get("extmetadata") or {}
+            artist = self._em(em.get("Artist")) or page.get("title")
+            # Artist often contains wikitext/html; strip crude tags if present.
+            if isinstance(artist, str) and ("[[" in artist or "<" in artist):
+                artist = (page.get("title") or "").replace("File:", "")
+            license_short = self._em(em.get("LicenseShortName"))
+            license_url = self._em(em.get("LicenseUrl"))
+
+            results.append(
+                Media(
+                    url=url,
+                    title=page.get("title"),
+                    creator=artist,
+                    thumbnail_url=info.get("thumburl"),
+                    license=license_short or "CC BY-SA",
+                    license_version=self._em(em.get("LicenseVersion")),
+                    attribution=artist,
+                    license_url=license_url,
+                    width=info.get("width"),
+                    height=info.get("height"),
+                    duration=None,
+                    ext=self._ext(url) or ".mp4",
+                    provider="Wikimedia Commons",
+                    media_type=mt,
+                    source="Wikimedia",
+                )
+            )
+            if len(results) >= limit:
+                break
+
+        self.search_cache[cache_key] = results
+        return results
+
+    def search_videos(
+        self, query: str, orientation: str = "portrait", per_page: int = 15
+    ) -> List[Dict]:
+        media = self.search(query, media_type=MediaType.ANY, limit=per_page)
+        return [m.to_dict() for m in media]
+
+    def download_video(self, video_url: str, output_path) -> bool:
+        return self._download_file(video_url, output_path)
+
+    def capabilities(self) -> Dict:
+        return {
+            "supports_media_types": [MediaType.IMAGE, MediaType.VIDEO],
             "requires_key": False,
             "supports_license": True,
         }
@@ -4733,128 +4831,339 @@ class EntityHandler:
             return 0
 
         return sorted(keywords, key=lambda k: (-score(k), keywords.index(k)))
+# AI modules
 """
-Stable Diffusion Manager
-Handles AI image generation using Stable Diffusion on CPU
+Prompt Generator for SD-Turbo Image Generation.
+Converts context sentences, keywords, and entities into high quality prompts.
 """
-import uuid
-import torch
+import re
+from typing import List, Optional
+
+
+class PromptGenerator:
+    """Generates SD-Turbo image prompts from sentence context and metadata."""
+
+    TEMPLATES = {
+        "business": "professional corporate environment, modern office, meeting, {concept}",
+        "technology": "futuristic technology, digital innovation, {concept}",
+        "nature": "serene natural landscape, outdoor, {concept}",
+        "people": "diverse group of people, authentic emotions, {concept}",
+        "default": "cinematic scene, {concept}",
+    }
+
+    STYLE_MODIFIERS = [
+        "documentary photography",
+        "dramatic natural lighting",
+        "vertical social media composition",
+        "professional grade",
+        "vivid colors",
+        "sharp focus",
+    ]
+
+    def __init__(self, config=None):
+        self.config = config
+
+    def generate(
+        self,
+        sentence: Optional[str] = None,
+        keyword: Optional[str] = None,
+        entities: Optional[List[str]] = None,
+    ) -> str:
+        """Generate a prompt suitable for SD-Turbo text-to-image pipeline."""
+        concepts = self._extract_concepts(sentence, keyword, entities)
+
+        base_concept = ", ".join(concepts) if concepts else "a captivating visual scene"
+
+        base_prompt = f"Cinematic editorial photograph of {base_concept}"
+        modifiers = ", ".join(self.STYLE_MODIFIERS)
+
+        return f"{base_prompt}, {modifiers}"
+
+    def _extract_concepts(
+        self,
+        sentence: Optional[str],
+        keyword: Optional[str],
+        entities: Optional[List[str]],
+    ) -> List[str]:
+        concepts = []
+
+        if keyword and keyword.strip():
+            concepts.append(keyword.strip())
+
+        if entities:
+            for ent in entities:
+                if ent and ent.strip() and ent.strip() not in concepts:
+                    concepts.append(ent.strip())
+
+        if sentence and not concepts:
+            cleaned = re.sub(r"[^\w\s]", "", sentence).strip()
+            words = [w for w in cleaned.split() if len(w) > 3]
+            if words:
+                concepts.append(" ".join(words[:4]))
+
+        return concepts
+"""
+Stability AI SD-Turbo Image Generator
+Handles AI image generation using SD-Turbo with lazy loading, device detection, SHA256 caching, and aspect ratio crop.
+"""
+
 import hashlib
-from typing import Optional, Tuple
+import logging
+import threading
+import time
+import uuid
 from pathlib import Path
-from PIL import Image
+from typing import Optional, Tuple
+
+import torch
+from PIL import Image, ImageOps
+
+from ..config import Config
+from ..utils.gpu import get_optimal_device
+
+logger = logging.getLogger(__name__)
 
 try:
-    from diffusers import StableDiffusionPipeline
-    SD_AVAILABLE = True
-except ImportError:
-    print("[SD] diffusers library not found. SD image generation will be unavailable.")
-    SD_AVAILABLE = False
+    from diffusers import AutoPipelineForText2Image
+
+    SD_TURBO_AVAILABLE = True
+except Exception as e:
+    logger.warning(
+        f"[SD] diffusers library not found or AutoPipelineForText2Image unavailable: {e}"
+    )
+    print(f"[SD] Warning: diffusers library not available: {e}")
+    SD_TURBO_AVAILABLE = False
+
+SD_AVAILABLE = SD_TURBO_AVAILABLE
+
+
+class SDTurboGenerator:
+    """Stability AI SD-Turbo image generator with lazy loading and memory management."""
+
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        model_path: Optional[str] = None,
+        device: str = "auto",
+    ):
+        self.config = config or Config()
+        self.model_name = (
+            model_path
+            or getattr(
+                self.config, "IMAGE_GENERATION_MODEL", "stabilityai/sd-turbo"
+            )
+        )
+        self.requested_device = getattr(
+            self.config, "IMAGE_GENERATION_DEVICE", device
+        )
+        self._pipeline = None
+        self._device = None
+        self._loaded = False
+        self._load_lock = threading.Lock()
+        self.cache_dir = getattr(
+            self.config,
+            "IMAGE_GENERATION_CACHE_DIR",
+            self.config.ROOT_DIR / "cache/images",
+        )
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _detect_device(self) -> str:
+        return get_optimal_device(self.requested_device)
+
+    def _load_model(self):
+        """Lazy load the SD-Turbo pipeline on demand."""
+        if self._loaded or not SD_TURBO_AVAILABLE:
+            return
+
+        with self._load_lock:
+            if self._loaded:
+                return
+
+            try:
+                self._device = self._detect_device()
+                logger.info(
+                    f"[SD] Loading model {self.model_name} on device: {self._device}..."
+                )
+                print(
+                    f"[SD] Loading model {self.model_name} on device: {self._device}..."
+                )
+
+                if self._device == "cuda":
+                    self._pipeline = AutoPipelineForText2Image.from_pretrained(
+                        self.model_name,
+                        torch_dtype=torch.float16,
+                        variant="fp16",
+                    )
+                else:
+                    self._pipeline = AutoPipelineForText2Image.from_pretrained(
+                        self.model_name,
+                        torch_dtype=torch.float32,
+                    )
+
+                self._pipeline.to(self._device)
+                if hasattr(self._pipeline, "enable_attention_slicing"):
+                    self._pipeline.enable_attention_slicing()
+
+                self._loaded = True
+                logger.info("[SD] SD-Turbo pipeline loaded successfully")
+                print("[SD] SD-Turbo pipeline loaded successfully")
+            except Exception as e:
+                logger.error(f"[SD] Failed to load SD-Turbo pipeline: {e}")
+                print(f"[SD] Failed to load SD-Turbo pipeline: {e}")
+                self._pipeline = None
+                self._loaded = False
+
+    def _generate_cache_key(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        steps: int,
+        guidance_scale: float,
+    ) -> str:
+        raw_key = (
+            f"{self.model_name}_{prompt}_{width}_{height}_{steps}_{guidance_scale}"
+        )
+        return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+    def generate(
+        self,
+        prompt: str,
+        keyword: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        steps: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        scene_index: Optional[int] = None,
+        target_size: Optional[Tuple[int, int]] = (1080, 1920),
+        **kwargs,
+    ) -> Optional[Path]:
+        """Generate an image using SD-Turbo and crop to target_size.
+
+        Args:
+            prompt: Text prompt
+            keyword: Optional keyword
+            width: Raw generation width (default from config or 512)
+            height: Raw generation height (default from config or 512)
+            steps: Inference steps (default 1 for SD-Turbo)
+            guidance_scale: Guidance scale (default 0.0 for SD-Turbo)
+            scene_index: Scene/slide index for logging
+            target_size: Output resolution (width, height), e.g. (1080, 1920)
+
+        Returns:
+            Path to generated image or None on failure.
+        """
+        if not SD_TURBO_AVAILABLE:
+            return None
+
+        w = width or getattr(self.config, "IMAGE_GENERATION_WIDTH", 512)
+        h = height or getattr(self.config, "IMAGE_GENERATION_HEIGHT", 512)
+        num_steps = steps if steps is not None else getattr(self.config, "IMAGE_GENERATION_STEPS", 1)
+        g_scale = (
+            guidance_scale
+            if guidance_scale is not None
+            else getattr(self.config, "IMAGE_GENERATION_GUIDANCE_SCALE", 0.0)
+        )
+
+        cache_key = self._generate_cache_key(prompt, w, h, num_steps, g_scale)
+        cache_path = self.cache_dir / f"{cache_key}.png"
+
+        if cache_path.exists():
+            logger.info(f"[IMAGE] Provider: Stability AI")
+            logger.info(f"[IMAGE] Model: {self.model_name}")
+            logger.info(f"[IMAGE] Device: {self._device or self.requested_device}")
+            logger.info(f"[IMAGE] Scene: {scene_index}")
+            logger.info(f"[IMAGE] Resolution: {target_size[0]}x{target_size[1] if target_size else h}")
+            logger.info(f"[IMAGE] Steps: {num_steps}")
+            logger.info(f"[IMAGE] Cache: HIT")
+            logger.info(f"[IMAGE] Generation: 0.00s")
+            logger.info(f"[IMAGE] Output: {cache_path}")
+            return cache_path
+
+        start_time = time.time()
+        self._load_model()
+        if not self._pipeline:
+            return None
+
+        try:
+            with torch.no_grad():
+                result = self._pipeline(
+                    prompt=prompt,
+                    num_inference_steps=num_steps,
+                    guidance_scale=g_scale,
+                    width=w,
+                    height=h,
+                )
+
+            if result.images:
+                pil_image = result.images[0].convert("RGB")
+
+                # Format/crop image to target resolution if requested
+                if target_size:
+                    pil_image = ImageOps.fit(
+                        pil_image, target_size, method=Image.Resampling.LANCZOS
+                    )
+
+                pil_image.save(cache_path, "PNG", quality=95)
+                duration = time.time() - start_time
+
+                logger.info(f"[IMAGE] Provider: Stability AI")
+                logger.info(f"[IMAGE] Model: {self.model_name}")
+                logger.info(f"[IMAGE] Device: {self._device}")
+                logger.info(f"[IMAGE] Scene: {scene_index}")
+                logger.info(
+                    f"[IMAGE] Resolution: {target_size[0]}x{target_size[1]}"
+                )
+                logger.info(f"[IMAGE] Steps: {num_steps}")
+                logger.info(f"[IMAGE] Cache: MISS")
+                logger.info(f"[IMAGE] Generation: {duration:.2f}s")
+                logger.info(f"[IMAGE] Output: {cache_path}")
+                print(
+                    f"[IMAGE] SD-Turbo generation completed in {duration:.2f}s -> {cache_path.name}"
+                )
+
+                return cache_path
+
+        except Exception as e:
+            logger.error(f"[IMAGE] SD-Turbo generation error: {e}")
+            print(f"[IMAGE] SD-Turbo generation error: {e}")
+
+        return None
+
+    def clear_memory(self):
+        """Free memory and clear CUDA cache if available."""
+        if self._device == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 
 class StableDiffusionManager:
-    """Manages Stable Diffusion image generation (optimized for CPU)"""
-    
-    def __init__(self, model_path: Optional[str] = None, device: str = "cpu"):
-        from ..config import Config
-        cfg = Config()
-        self.model_path = model_path or str(cfg.SD_MODEL_DIR)
-        self.device = "cpu"
-        self.pipe = None
-        self.generation_cache = {}
-        self.cache_dir = cfg.IMAGES_DIR
-        self.cache_dir.mkdir(exist_ok=True)
-    
-    def _load_pipeline(self):
-        """Lazy load the pipeline to save memory"""
-        if not SD_AVAILABLE or self.pipe is not None:
-            return
-            
-        try:
-            print(f"[SD] Loading model from {self.model_path} on CPU...")
-            self.pipe = StableDiffusionPipeline.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.float32,
-                safety_checker=None,
-                requires_safety_checker=False
-            )
-            self.pipe = self.pipe.to(self.device)
-            # Optimize for memory
-            self.pipe.enable_attention_slicing()
-            print("[SD] Pipeline loaded successfuly")
-        except Exception as e:
-            print(f"[SD] Failed to load pipeline: {e}")
-            self.pipe = None
+    """Backwards-compatibility wrapper for SDTurboGenerator."""
 
-    def generate_image(self, prompt: str, keyword: Optional[str] = None, 
-                      size: Tuple[int, int] = (1080, 1920)) -> Optional[Path]:
-        """
-        Generate an image matching the prompt
-        
-        Args:
-            prompt: Text description
-            keyword: Optional keyword for caching
-            size: Desired image size
-            
-        Returns:
-            Path to generated image or None
-        """
-        if not SD_AVAILABLE:
-            return None
-            
-        # Check cache
-        cache_key = hashlib.sha256(f"{prompt}_{keyword}_{size}".encode()).hexdigest()
-        if cache_key in self.generation_cache:
-            cached_path = self.generation_cache[cache_key]
-            if cached_path.exists():
-                return cached_path
-        
-        self._load_pipeline()
-        if not self.pipe:
-            return None
-            
-        try:
-            # Optimize prompt for SD
-            full_prompt = (
-                f"{prompt}, high quality, detailed, realistic background, "
-                f"cinematic lighting, {keyword or ''}"
-            ).strip(", ")
-            
-            negative_prompt = "text, watermark, logo, blurry, low resolution, distorted"
-            
-            # Generate smaller image and upscale/resize to save CPU time
-            gen_width, gen_height = 512, 768 # Portrait aspect
-            if size[0] > size[1]: # Landscape
-                gen_width, gen_height = 768, 512
-                
-            print(f"[SD] Generating image for: {keyword or prompt[:30]}...")
-            with torch.no_grad():
-                result = self.pipe(
-                    full_prompt,
-                    negative_prompt=negative_prompt,
-                    num_inference_steps=20, # Low steps for CPU speed
-                    guidance_scale=7.5,
-                    width=gen_width,
-                    height=gen_height
-                )
-            
-            if result.images:
-                image = result.images[0].resize(size, Image.LANCZOS)
-                output_path = self.cache_dir / f"sd_{uuid.uuid4().hex[:8]}.png"
-                image.save(output_path, "PNG", quality=95)
-                self.generation_cache[cache_key] = output_path
-                print(f"[SD] Image saved: {output_path}")
-                return output_path
-                
-        except Exception as e:
-            print(f"[SD] Generation error: {e}")
-            
-        return None
-# AI modules
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        device: str = "auto",
+        config: Optional[Config] = None,
+    ):
+        self.generator = SDTurboGenerator(
+            config=config, model_path=model_path, device=device
+        )
+
+    def generate_image(
+        self,
+        prompt: str,
+        keyword: Optional[str] = None,
+        size: Tuple[int, int] = (1080, 1920),
+    ) -> Optional[Path]:
+        return self.generator.generate(
+            prompt=prompt, keyword=keyword, target_size=size
+        )
 # TTS modules
 """
 TTS Manager
 Unified interface for multiple TTS engines (Kokoro, XTTS2, SpeechBrain)
 """
+
 import os
 import uuid
 import torch
@@ -4874,9 +5183,10 @@ CHATTERBOX_AVAILABLE = False
 
 import threading
 
+
 class TTSManager:
     """Unified manager for various TTS engines"""
-    
+
     def __init__(self, config, engine: str = "auto"):
         self.config = config
         self.engine = engine
@@ -4885,11 +5195,11 @@ class TTSManager:
         self.loaded_engine = None
         self.current_kokoro_lang = None
         self.last_status_message = "Idle. No engine loaded."
-        self._lock = threading.Lock() # Lock for _load_engine
-        self.lock = threading.Lock() # Lock for generate_speech
+        self._lock = threading.Lock()  # Lock for _load_engine
+        self.lock = threading.Lock()  # Lock for generate_speech
         self.health_status = self.check_engines()
-        
-    def _load_engine(self, target_engine: str, lang_code: str = 'a'):
+
+    def _load_engine(self, target_engine: str, lang_code: str = "a"):
         """Lazy load the requested engine"""
         with self._lock:
             if self.loaded_engine == target_engine:
@@ -4898,7 +5208,7 @@ class TTSManager:
                     pass
                 else:
                     return
-                
+
             if target_engine == "kokoro":
                 self._load_kokoro(lang_code)
             elif target_engine == "xtts":
@@ -4909,11 +5219,12 @@ class TTSManager:
                 self._load_mms()
             elif target_engine == "chatterbox":
                 self._load_chatterbox()
-            
-    def _load_kokoro(self, lang_code: str = 'a'):
+
+    def _load_kokoro(self, lang_code: str = "a"):
         global KOKORO_AVAILABLE
         try:
             from kokoro import KPipeline
+
             # lang_code ensures we load the correct phonemizer/vocabulary
             try:
                 self.model = KPipeline(lang_code=lang_code)
@@ -4930,12 +5241,15 @@ class TTSManager:
         except ImportError:
             self.last_status_message = "❌ Kokoro library not found"
             print(f"[TTS] {self.last_status_message}")
-            
+
     def _load_xtts(self):
         global XTTS_AVAILABLE
         try:
             from TTS.api import TTS
-            self.model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.config.DEVICE)
+
+            self.model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(
+                self.config.DEVICE
+            )
             self.loaded_engine = "xtts"
             XTTS_AVAILABLE = True
             self.last_status_message = "✅ Coqui XTTSv2 loaded"
@@ -4948,6 +5262,7 @@ class TTSManager:
         global GTTS_AVAILABLE
         try:
             from gtts import gTTS
+
             self.loaded_engine = "gtts"
             GTTS_AVAILABLE = True
             self.last_status_message = "✅ gTTS (Google) loaded"
@@ -4961,10 +5276,12 @@ class TTSManager:
         try:
             from transformers import VitsModel, AutoTokenizer
             import torch
-            
+
             print(f"[TTS] Loading MMS model: {repo_id}...")
             # Attempt to load from cache
-            self.tokenizer = AutoTokenizer.from_pretrained(repo_id, local_files_only=True)
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                repo_id, local_files_only=True
+            )
             self.model = VitsModel.from_pretrained(repo_id, local_files_only=True)
             self.loaded_engine = "mms"
             MMS_AVAILABLE = True
@@ -4974,6 +5291,7 @@ class TTSManager:
             # Fallback to online if local fails (though in Docker it shouldn't)
             try:
                 from transformers import VitsModel, AutoTokenizer
+
                 self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
                 self.model = VitsModel.from_pretrained(repo_id)
                 self.loaded_engine = "mms"
@@ -4989,15 +5307,17 @@ class TTSManager:
         try:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
             import torchaudio
-            
+
             self.last_status_message = "⏳ Loading Chatterbox..."
             print(f"[TTS] {self.last_status_message}")
-            
+
             # Using Multilingual model by default for broader support
-            self.model = ChatterboxMultilingualTTS.from_pretrained(device=self.config.DEVICE)
+            self.model = ChatterboxMultilingualTTS.from_pretrained(
+                device=self.config.DEVICE
+            )
             self.loaded_engine = "chatterbox"
             CHATTERBOX_AVAILABLE = True
-            
+
             self.last_status_message = "✅ Chatterbox Multilingual loaded"
             print(f"[TTS] {self.last_status_message}")
         except Exception as e:
@@ -5007,21 +5327,22 @@ class TTSManager:
     def _clean_text(self, text: str) -> str:
         """Clean text of custom metadata tags and problematic punctuation for TTS."""
         import re
+
         # Remove [N level] or [N levels] optionally followed by (...)
-        text = re.sub(r'\[\d+\s+levels?\](?:\([^)]+\))?', '', text)
-        
+        text = re.sub(r"\[\d+\s+levels?\](?:\([^)]+\))?", "", text)
+
         # Standardize ellipsis
-        text = re.sub(r'\.{2,}', '...', text)
-        
+        text = re.sub(r"\.{2,}", "...", text)
+
         # Remove characters that often cause phonemizer warnings or "words count mismatch"
         # We keep standard punctuation . , ! ? : ; ' " -
         # But we remove or replace others.
-        text = text.replace('*', ' ').replace('#', ' ').replace('@', ' ')
-        text = text.replace('_', ' ').replace('~', ' ')
-        
+        text = text.replace("*", " ").replace("#", " ").replace("@", " ")
+        text = text.replace("_", " ").replace("~", " ")
+
         # Normalize whitespace
-        text = re.sub(r'\s+', ' ', text)
-        
+        text = re.sub(r"\s+", " ", text)
+
         return text.strip()
 
     def check_engines(self) -> Dict[str, bool]:
@@ -5031,52 +5352,68 @@ class TTSManager:
             "xtts": False,
             "gtts": False,
             "mms": False,
-            "chatterbox": False
+            "chatterbox": False,
         }
-        
+
         # Check Kokoro
         try:
             import kokoro
+
             status["kokoro"] = True
-        except ImportError: pass
-        
+        except ImportError:
+            pass
+
         # Check XTTS
         try:
             from TTS.api import TTS
+
             status["xtts"] = True
-        except ImportError: pass
-        
+        except ImportError:
+            pass
+
         # Check gTTS
         try:
             import gtts
+
             status["gtts"] = True
-        except ImportError: pass
-        
+        except ImportError:
+            pass
+
         # Check MMS
         try:
             import transformers
+
             status["mms"] = True
-        except ImportError: pass
-        
+        except ImportError:
+            pass
+
         # Check Chatterbox
         try:
             import chatterbox
+
             status["chatterbox"] = True
-        except ImportError: pass
-        
+        except ImportError:
+            pass
+
         return status
 
-    def generate_speech(self, text: str, voice_id: str, language: str = "en", 
-                       engine: Optional[str] = None, speed: float = 1.0) -> Path:
+    def generate_speech(
+        self,
+        text: str,
+        voice_id: str,
+        language: str = "en",
+        engine: Optional[str] = None,
+        speed: float = 1.0,
+    ) -> Path:
         """
         Generate speech from text
-        
+
         Args:
             text: Input text
             voice_id: Voice identifier or speaker name
             language: ISO language code
             engine: Override default engine
-            
+
         Returns:
             Path to generated audio
         """
@@ -5089,103 +5426,142 @@ class TTSManager:
         if cached and Path(cached).exists():
             print(f"🔁 [TTS] Reusing cached audio for: '{text[:30]}...' ({voice_id})")
             return Path(cached)
-            
+
         # Determine capabilities
         lang_config = self.config.SUPPORTED_LANGUAGES.get(language, {})
-        kokoro_code = lang_config.get('kokoro_code')
-        
+        kokoro_code = lang_config.get("kokoro_code")
+
         # Select engine
         engine = engine or self.engine
-        
+
         # Check if voice_id is a clone (folder exists)
         is_clone = False
         try:
-             if (self.config.VOICE_SAMPLES_DIR / voice_id).exists() and (self.config.VOICE_SAMPLES_DIR / voice_id).is_dir():
-                 is_clone = True
+            if (self.config.VOICE_SAMPLES_DIR / voice_id).exists() and (
+                self.config.VOICE_SAMPLES_DIR / voice_id
+            ).is_dir():
+                is_clone = True
         except Exception:
-             pass
+            pass
 
         if engine == "auto":
-            # Heuristic: 
+            # Heuristic:
             # 1. If it's a clone voice -> XTTS (XTTS is best for cloning)
             # 2. If it's Romanian -> MMS (XTTS doesn't support RO, Kokoro doesn't support RO)
             # 3. If valid Kokoro lang -> Kokoro (Kokoro is fastest)
             # 4. Fallback to gTTS (Most compatible but online)
             if is_clone:
                 engine = "xtts"
-            elif language == 'ro':
+            elif language == "ro":
                 engine = "mms"
             elif kokoro_code:
                 engine = "kokoro"
             else:
                 engine = "gtts"
-                
-                
+
         # Force MMS if the voice is explicitly "MMS-TTS Romanian"
         if voice_id == "MMS-TTS Romanian":
             engine = "mms"
         # Only force Kokoro for these names if it's NOT a clone
-        elif not is_clone and (voice_id in ["sexy", "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_michael", "am_adam", "am_liam", "am_puck"] 
-                             or voice_id.startswith("af_") or voice_id.startswith("am_") 
-                             or voice_id.startswith("bf_") or voice_id.startswith("bm_")):
+        elif not is_clone and (
+            voice_id
+            in [
+                "sexy",
+                "af_heart",
+                "af_bella",
+                "af_nicole",
+                "af_sarah",
+                "af_sky",
+                "am_michael",
+                "am_adam",
+                "am_liam",
+                "am_puck",
+            ]
+            or voice_id.startswith("af_")
+            or voice_id.startswith("am_")
+            or voice_id.startswith("bf_")
+            or voice_id.startswith("bm_")
+        ):
             engine = "kokoro"
-            
+
         with self.lock:
-            # Use persistent audio cache directory from config
             output_path = self.config.TEMP_AUDIO_DIR / f"tts_{uuid.uuid4().hex}.wav"
             print(f"▶ [TTS] Starting generation for: '{text[:50]}...' using {engine}")
-            
-            try:
-                self._load_engine(engine, lang_code=kokoro_code or 'a')
-                
-                if self.loaded_engine == "kokoro":
-                    self._generate_kokoro(text, voice_id, output_path, speed)
-                elif self.loaded_engine == "xtts":
-                    self._generate_xtts(text, voice_id, language, output_path, speed)
-                elif self.loaded_engine == "gtts":
-                    self._generate_gtts(text, language, output_path)
-                elif self.loaded_engine == "mms":
-                    self._generate_mms(text, output_path)
-                elif self.loaded_engine == "chatterbox":
-                    self._generate_chatterbox(text, output_path, language)
-                else:
-                    raise ValueError(f"No functional engine for {engine}")
-                
-                if not output_path.exists():
-                     raise FileNotFoundError(f"Engine {self.loaded_engine} claims success but {output_path} is missing")
+            last_err = None
+            for attempt in range(3):
+                try:
+                    self._load_engine(engine, lang_code=kokoro_code or "a")
+                    if self.loaded_engine == "kokoro":
+                        self._generate_kokoro(text, voice_id, output_path, speed)
+                    elif self.loaded_engine == "xtts":
+                        self._generate_xtts(
+                            text, voice_id, language, output_path, speed
+                        )
+                    elif self.loaded_engine == "gtts":
+                        self._generate_gtts(text, language, output_path)
+                    elif self.loaded_engine == "mms":
+                        self._generate_mms(text, output_path)
+                    elif self.loaded_engine == "chatterbox":
+                        self._generate_chatterbox(text, output_path, language)
+                    else:
+                        raise ValueError(f"No functional engine for {engine}")
+                    if not output_path.exists():
+                        raise FileNotFoundError(
+                            f"Engine {self.loaded_engine} claims success but {output_path} is missing"
+                        )
+                    break
+                except Exception as e:
+                    last_err = e
+                    print(f"⚠️ [TTS] Attempt {attempt + 1}/3 failed with {engine}: {e}")
+                    import time
 
-                # Post-process
+                    time.sleep(0.5 * (2**attempt))
+                    if attempt == 2:
+                        print(f"❌ [TTS] All retries failed: {last_err}")
+                        import traceback
+
+                        traceback.print_exc()
+                        try:
+                            silent = AudioSegment.silent(duration=1000)
+                            silent.export(str(output_path), format="wav")
+                            print(
+                                f"📁 [TTS] Created emergency silent fallback at: {output_path}"
+                            )
+                            return output_path
+                        except Exception as e2:
+                            print(f"💀 [TTS] Even emergency fallback failed: {e2}")
+                            return None
+            try:
+                if not output_path.exists():
+                    raise FileNotFoundError(
+                        f"Engine {self.loaded_engine} claims success but {output_path} is missing"
+                    )
                 print(f"🪄 [TTS] Post-processing audio quality...")
                 improved_path = improve_audio_quality(output_path)
                 if improved_path != output_path:
                     output_path.unlink(missing_ok=True)
                     output_path = improved_path
-                    
-                # Save to cache
                 self.db.save_tts(text, voice_id, language, output_path, speed=speed)
                 print(f"✅ [TTS] Successfully generated: {output_path}")
                 return output_path
-                
             except Exception as e:
-                print(f"❌ [TTS] Generation failed with {engine}: {e}")
-                import traceback
-                traceback.print_exc()
-                
-                # Emergency Fallback: Generate a 1-second silent WAV file
+                print(f"❌ [TTS] Post-process failed: {e}")
+                if output_path.exists():
+                    return output_path
                 try:
-                    if not output_path.exists():
-                        silent = AudioSegment.silent(duration=1000) # 1 sec
-                        silent.export(str(output_path), format="wav")
-                        print(f"📁 [TTS] Created emergency silent fallback at: {output_path}")
+                    silent = AudioSegment.silent(duration=1000)
+                    silent.export(str(output_path), format="wav")
                     return output_path
                 except Exception as e2:
-                    print(f"💀 [TTS] Even emergency fallback failed: {e2}")
+                    print(f"💀 [TTS] Fallback failed: {e2}")
                     return None
 
-    def _generate_kokoro(self, text: str, voice_id: str, output_path: Path, speed: float = 1.0):
+    def _generate_kokoro(
+        self, text: str, voice_id: str, output_path: Path, speed: float = 1.0
+    ):
         import scipy.io.wavfile as wavfile
         import numpy as np
-        
+
         # Voice mapping: translates descriptive names to Kokoro IDs
         # Standard Kokoro v1.0 voices
         VOICE_MAPPING = {
@@ -5193,20 +5569,18 @@ class TTSManager:
             self.config.STANDARD_VOICE_NAME: "af_heart",
             "american-woman": "af_heart",
             "american-woman-2": "af_bella",
-            "american-woman-3": "af_nicole", 
+            "american-woman-3": "af_nicole",
             "american-woman-4": "af_sarah",
             "american-woman-5": "af_sky",
             "american-man": "am_michael",
             "american-man-2": "am_adam",
             "american-man-3": "am_liam",
             "american-man-4": "am_puck",
-
             # British English
             "british-woman": "bf_emma",
             "british-woman-2": "bf_isabella",
             "british-man": "bm_george",
             "british-man-2": "bm_lewis",
-
             # Other languages
             "spanish-woman": "es_karen",
             "french-woman": "ff_siwis",
@@ -5220,7 +5594,6 @@ class TTSManager:
             "chinese-man": "zm_yunjian",
             "hindi-voice": "hf_alpha",
             "hindi-man": "hm_omega",
-            
             # Legacy mappings
             "asrm": "af_bella",
             "austrian": "af_bella",
@@ -5232,24 +5605,33 @@ class TTSManager:
             "megan": "af_nicole",
             "sexy": "af_heart",
         }
-        
+
         # Fallback to af_heart if voice_id not found or is None
         kk_voice = VOICE_MAPPING.get(voice_id, "af_heart")
-        
+
         # Process chunks
         all_audio = []
         for gs, ps, audio in self.model(text, voice=kk_voice, speed=speed):
             if audio is not None and len(audio) > 0:
                 all_audio.append(audio)
-        
+
         if not all_audio:
-            raise ValueError(f"Kokoro failed to generate any audio chunks for text: {text[:50]}...")
-            
+            raise ValueError(
+                f"Kokoro failed to generate any audio chunks for text: {text[:50]}..."
+            )
+
         full_audio = np.concatenate(all_audio)
         full_audio = (full_audio * 32767).astype(np.int16)
         wavfile.write(str(output_path), 24000, full_audio)
 
-    def _generate_xtts(self, text: str, voice_id: str, language: str, output_path: Path, speed: float = 1.0):
+    def _generate_xtts(
+        self,
+        text: str,
+        voice_id: str,
+        language: str,
+        output_path: Path,
+        speed: float = 1.0,
+    ):
         # Handle cloning if voice_id is a path or name of sample
         speaker_wav = None
         if voice_id.endswith(".wav"):
@@ -5259,63 +5641,64 @@ class TTSManager:
             for f in sample_dir.glob("*.wav"):
                 speaker_wav = str(f)
                 break
-        
+
         if speaker_wav:
             self.model.tts_to_file(
                 text=text,
                 file_path=str(output_path),
                 speaker_wav=speaker_wav,
                 language=language[:2],
-                speed=speed
+                speed=speed,
             )
         else:
             # Fallback to standard speaker
             self.model.tts_to_file(
                 text=text,
                 file_path=str(output_path),
-                speaker="Conditioning Latent", # Default standard
+                speaker="Conditioning Latent",  # Default standard
                 language=language[:2],
-                speed=speed
+                speed=speed,
             )
 
     def _generate_gtts(self, text: str, language: str, output_path: Path):
         from gtts import gTTS
+
         tts = gTTS(text=text, lang=language)
         tts.save(str(output_path))
 
     def _generate_mms(self, text: str, output_path: Path):
         import scipy.io.wavfile as wavfile
         import torch
-        
+
         inputs = self.tokenizer(text, return_tensors="pt")
         with torch.no_grad():
             output = self.model(**inputs).waveform
-        
+
         # Squeeze and convert to numpy
         audio_data = output.cpu().numpy().squeeze()
         # MMS outputs float32, usually normalized. Scale to int16.
         # But VITS might be at a specific sample rate.
         # Check model config for sampling rate.
         sampling_rate = self.model.config.sampling_rate
-        
+
         wavfile.write(str(output_path), sampling_rate, audio_data)
 
     def _generate_chatterbox(self, text: str, output_path: Path, language: str):
         import torchaudio
-        
+
         # Clean text
         text = self._clean_text(text)
-        
+
         # Chatterbox expects language codes like 'en', 'fr', etc.
         # Ensure we pass the correct language ID if supported
         # Defaulting to 'en' if not specified or fallback
-        lang_id = language if language else 'en'
-        
+        lang_id = language if language else "en"
+
         # Generate
         # Note: The model might be multilingual or single language depending on how we refine _load_chatterbox
         # Currently assuming Multilingual
         wav = self.model.generate(text, language_id=lang_id)
-        
+
         # Save
         torchaudio.save(str(output_path), wav, self.model.sr)
 
@@ -5323,14 +5706,33 @@ class TTSManager:
         """Get voices supported by the engine"""
         if engine == "kokoro":
             return [
-                "american-woman", "american-woman-2", "american-woman-3", "american-woman-4", "american-woman-5",
-                "american-man", "american-man-2", "american-man-3", "american-man-4",
-                "british-woman", "british-woman-2",
-                "british-man", "british-man-2",
-                "spanish-woman", "french-woman", "italian-woman", "italian-man", "portuguese-woman", "portuguese-man",
-                "japanese-voice", "japanese-man", "chinese-voice", "chinese-man", "hindi-voice", "hindi-man",
+                "american-woman",
+                "american-woman-2",
+                "american-woman-3",
+                "american-woman-4",
+                "american-woman-5",
+                "american-man",
+                "american-man-2",
+                "american-man-3",
+                "american-man-4",
+                "british-woman",
+                "british-woman-2",
+                "british-man",
+                "british-man-2",
+                "spanish-woman",
+                "french-woman",
+                "italian-woman",
+                "italian-man",
+                "portuguese-woman",
+                "portuguese-man",
+                "japanese-voice",
+                "japanese-man",
+                "chinese-voice",
+                "chinese-man",
+                "hindi-voice",
+                "hindi-man",
                 "MMS-TTS Romanian",
-                "Chatterbox Multilingual"
+                "Chatterbox Multilingual",
             ]
         return ["Standard"]
 # Core module for shared video generation components
@@ -5589,6 +5991,309 @@ class GenerationDB:
 # Default instance for shared use
 DB = GenerationDB()
 """
+Visual Abstraction Module.
+"""
+from .asset import VisualAsset, AssetType
+from .provider import VisualProvider
+from .stock_provider import StockMediaProvider
+from .ai_provider import AIImageProvider
+from .mixed_provider import MixedProvider
+from .factory import VisualProviderFactory
+
+__all__ = [
+    "VisualAsset",
+    "AssetType",
+    "VisualProvider",
+    "StockMediaProvider",
+    "AIImageProvider",
+    "MixedProvider",
+    "VisualProviderFactory",
+]
+"""
+AI image provider using SD-Turbo.
+"""
+import logging
+from typing import Dict, Any, Optional
+from .asset import VisualAsset, AssetType
+from .provider import VisualProvider
+from ..ai.prompt_generator import PromptGenerator
+
+logger = logging.getLogger(__name__)
+
+
+class AIImageProvider(VisualProvider):
+    """AI image provider using SD-Turbo generator."""
+
+    def __init__(self, sd_generator, prompt_generator: Optional[PromptGenerator] = None, fallback_provider: Optional[VisualProvider] = None):
+        self.sd_generator = sd_generator
+        self.prompt_generator = prompt_generator or PromptGenerator(
+            getattr(sd_generator, "config", None)
+        )
+        self.fallback_provider = fallback_provider
+
+    def get_visual(self, context: Dict[str, Any], **kwargs) -> VisualAsset:
+        sentence = context.get("sentence", "")
+        keyword = context.get("keyword")
+        entities = context.get("entities")
+        if not entities and context.get("entity"):
+            entities = [context["entity"]]
+
+        duration = kwargs.get("duration", 3.0)
+        target_size = kwargs.get("target_size", (1080, 1920))
+
+        prompt = self.prompt_generator.generate(
+            sentence=sentence, keyword=keyword, entities=entities
+        )
+
+        image_path = None
+        if self.sd_generator:
+            image_path = self.sd_generator.generate(
+                prompt=prompt,
+                keyword=keyword,
+                scene_index=context.get("sentence_idx"),
+                target_size=target_size,
+            )
+
+        if image_path and image_path.exists():
+            return VisualAsset(
+                asset_type=AssetType.IMAGE,
+                path=image_path,
+                duration=duration,
+                metadata={"prompt": prompt, "provider": "sd_turbo"},
+            )
+
+        logger.warning("[AIImageProvider] AI generation failed or returned None. Triggering fallback.")
+        if self.fallback_provider:
+            return self.fallback_provider.get_visual(context, **kwargs)
+
+        return VisualAsset(
+            asset_type=AssetType.GRADIENT,
+            duration=duration,
+            metadata={"source": "gradient_fallback"},
+        )
+"""
+Visual asset representation for video generation pipeline.
+"""
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Dict, Any, Optional, Union
+
+
+class AssetType(Enum):
+    VIDEO = "video"
+    IMAGE = "image"
+    COLOR = "color"
+    GRADIENT = "gradient"
+
+
+@dataclass
+class VisualAsset:
+    asset_type: AssetType
+    path: Optional[Union[str, Path]] = None
+    color: Optional[tuple] = None
+    duration: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def is_video(self) -> bool:
+        return self.asset_type == AssetType.VIDEO
+
+    def is_image(self) -> bool:
+        return self.asset_type == AssetType.IMAGE
+
+    def is_color(self) -> bool:
+        return self.asset_type == AssetType.COLOR
+
+    def is_gradient(self) -> bool:
+        return self.asset_type == AssetType.GRADIENT
+
+    def get_path_obj(self) -> Optional[Path]:
+        if self.path:
+            return Path(self.path)
+        return None
+"""
+Visual Provider Factory.
+"""
+from typing import Optional
+from .provider import VisualProvider
+from .stock_provider import StockMediaProvider
+from .ai_provider import AIImageProvider
+from .mixed_provider import MixedProvider
+from ..ai.prompt_generator import PromptGenerator
+
+
+class VisualProviderFactory:
+    """Factory for instantiating VisualProvider based on source type."""
+
+    @staticmethod
+    def create(
+        source_type: str,
+        config=None,
+        sd_generator=None,
+        media_manager=None,
+        background_video_fetcher=None,
+    ) -> VisualProvider:
+        st = (source_type or "stock").lower().replace(" ", "_").strip()
+
+        stock_prov = StockMediaProvider(
+            media_manager=media_manager,
+            background_video_fetcher=background_video_fetcher,
+        )
+
+        prompt_gen = PromptGenerator(config)
+        ai_prov = AIImageProvider(
+            sd_generator=sd_generator,
+            prompt_generator=prompt_gen,
+            fallback_provider=stock_prov,
+        )
+
+        if st in ["ai", "ai_generated_images", "ai_generated", "ai_images"]:
+            return ai_prov
+        elif st == "mixed":
+            ratio = getattr(config, "MIXED_MODE_IMAGE_RATIO", 0.5) if config else 0.5
+            return MixedProvider(
+                stock_provider=stock_prov,
+                ai_provider=ai_prov,
+                ratio=ratio,
+            )
+        else:
+            # Default to stock
+            return stock_prov
+"""
+Mixed provider alternating between stock and AI visuals.
+"""
+import random
+from typing import Dict, Any
+from .asset import VisualAsset
+from .provider import VisualProvider
+
+
+class MixedProvider(VisualProvider):
+    """Mixed provider combining stock media and AI image generation."""
+
+    def __init__(
+        self,
+        stock_provider: VisualProvider,
+        ai_provider: VisualProvider,
+        ratio: float = 0.5,
+    ):
+        self.stock_provider = stock_provider
+        self.ai_provider = ai_provider
+        self.ratio = ratio
+        self._counter = 0
+
+    def get_visual(self, context: Dict[str, Any], **kwargs) -> VisualAsset:
+        self._counter += 1
+
+        # Deterministic alternation if ratio is 0.5, else random based on ratio
+        if self.ratio == 0.5:
+            use_ai = (self._counter % 2 == 0)
+        else:
+            use_ai = (random.random() < self.ratio)
+
+        if use_ai:
+            asset = self.ai_provider.get_visual(context, **kwargs)
+            # If AI provider fails / falls back to gradient, try stock provider
+            if asset.is_gradient() and self.stock_provider:
+                stock_asset = self.stock_provider.get_visual(context, **kwargs)
+                if not stock_asset.is_gradient():
+                    return stock_asset
+            return asset
+        else:
+            asset = self.stock_provider.get_visual(context, **kwargs)
+            if asset.is_gradient() and self.ai_provider:
+                ai_asset = self.ai_provider.get_visual(context, **kwargs)
+                if not ai_asset.is_gradient():
+                    return ai_asset
+            return asset
+"""
+Visual provider abstract interface.
+"""
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any
+from .asset import VisualAsset
+
+
+class VisualProvider(ABC):
+    """Abstract base class for visual source providers."""
+
+    @abstractmethod
+    def get_visual(self, context: Dict[str, Any], **kwargs) -> VisualAsset:
+        """Get visual asset for given context."""
+        pass
+
+    def get_multiple(self, contexts: List[Dict[str, Any]], **kwargs) -> List[VisualAsset]:
+        """Get visual assets for multiple contexts."""
+        return [self.get_visual(ctx, **kwargs) for ctx in contexts]
+"""
+Stock media provider.
+"""
+from pathlib import Path
+from typing import Dict, Any, Optional
+from .asset import VisualAsset, AssetType
+from .provider import VisualProvider
+
+
+class StockMediaProvider(VisualProvider):
+    """Stock media provider using MediaManager / local video stock."""
+
+    def __init__(self, media_manager=None, background_video_fetcher=None):
+        self.media_manager = media_manager
+        self.background_video_fetcher = background_video_fetcher
+
+    def get_visual(self, context: Dict[str, Any], **kwargs) -> VisualAsset:
+        duration = kwargs.get("duration", 3.0)
+
+        # If a background_video_fetcher callable is passed, use it
+        if self.background_video_fetcher:
+            video_path = self.background_video_fetcher(
+                keyword=context.get("keyword"),
+                sentence=context.get("sentence"),
+                preferred_source=context.get("preferred_source"),
+                theme=context.get("theme"),
+                entity=context.get("entity"),
+                script_id=context.get("script_id"),
+                sentence_idx=context.get("sentence_idx"),
+                candidate_keywords=context.get("candidate_keywords"),
+            )
+            if video_path:
+                return VisualAsset(
+                    asset_type=AssetType.VIDEO,
+                    path=video_path,
+                    duration=duration,
+                    metadata={"source": "stock_fetcher"},
+                )
+
+        # Fallback to direct media manager call if available
+        if self.media_manager and hasattr(self.media_manager, "get_random_media"):
+            search_keywords = []
+            if context.get("keyword"):
+                search_keywords.append(context["keyword"])
+            elif context.get("sentence"):
+                search_keywords.append(context["sentence"])
+
+            if search_keywords:
+                video_path = self.media_manager.get_random_media(
+                    search_keywords,
+                    preferred_source=context.get("preferred_source"),
+                    theme=context.get("theme"),
+                    entity=context.get("entity"),
+                )
+                if video_path:
+                    return VisualAsset(
+                        asset_type=AssetType.VIDEO,
+                        path=video_path,
+                        duration=duration,
+                        metadata={"source": "media_manager"},
+                    )
+
+        # If no video path returned, return gradient fallback
+        return VisualAsset(
+            asset_type=AssetType.GRADIENT,
+            duration=duration,
+            metadata={"source": "gradient_fallback"},
+        )
+"""
 Application Configuration
 Centralized configuration for video generation applications
 """
@@ -5612,6 +6317,9 @@ class Config:
         self.OUTPUT_DIR = self.ROOT_DIR / "output"
         self.BACKUP_OUTPUT_DIR = self.ROOT_DIR / "backup_output"
         self.BACKGROUND_VIDEOS_DIR = self.VIDEOS_DIR  # Alias for clearer usage
+        self.IMAGE_GENERATION_CACHE_DIR = (
+            self.ROOT_DIR / os.getenv("IMAGE_GENERATION_CACHE_DIR", "cache/images")
+        )
 
         # Create all directories
         for d in [
@@ -5622,6 +6330,7 @@ class Config:
             self.TEMP_DIR,
             self.OUTPUT_DIR,
             self.BACKUP_OUTPUT_DIR,
+            self.IMAGE_GENERATION_CACHE_DIR,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -5639,10 +6348,31 @@ class Config:
         self.ENTITY_WEIGHT_BOOST = 1.5
         self.KEYWORD_HISTORY_LIMIT = int(os.getenv("KEYWORD_HISTORY_LIMIT", "200"))
 
+        # Image Generation Settings (SD-Turbo)
+        self.IMAGE_GENERATION_ENABLED = (
+            os.getenv("IMAGE_GENERATION_ENABLED", "true").lower() == "true"
+        )
+        self.IMAGE_GENERATION_MODEL = os.getenv(
+            "IMAGE_GENERATION_MODEL", "stabilityai/sd-turbo"
+        )
+        self.IMAGE_GENERATION_DEVICE = os.getenv("IMAGE_GENERATION_DEVICE", "auto")
+        self.IMAGE_GENERATION_STEPS = int(os.getenv("IMAGE_GENERATION_STEPS", "1"))
+        self.IMAGE_GENERATION_GUIDANCE_SCALE = float(
+            os.getenv("IMAGE_GENERATION_GUIDANCE_SCALE", "0.0")
+        )
+        self.IMAGE_GENERATION_WIDTH = int(os.getenv("IMAGE_GENERATION_WIDTH", "512"))
+        self.IMAGE_GENERATION_HEIGHT = int(os.getenv("IMAGE_GENERATION_HEIGHT", "512"))
+
+        # Visual Source Settings
+        self.VISUAL_SOURCE = os.getenv("VISUAL_SOURCE", "stock")  # stock, ai, mixed
+        self.MIXED_MODE_IMAGE_RATIO = float(
+            os.getenv("MIXED_MODE_IMAGE_RATIO", "0.5")
+        )
+
         # Additional directory paths
         self.VIDEO_OVERLAYS_DIR = self.ROOT_DIR / "video-overlays"
         self.CIRCLE_OVERLAYS_DIR = self.ROOT_DIR / "circle_overlays"
-        self.SD_MODEL_DIR = self.ROOT_DIR / "models/stable-diffusion-v1-5"
+        self.SD_MODEL_DIR = self.ROOT_DIR / "models/sd-turbo"
 
         # Ensure additional directories exist
         for d in [self.VIDEO_OVERLAYS_DIR, self.CIRCLE_OVERLAYS_DIR]:
@@ -5697,7 +6427,12 @@ class Config:
             "bottom_margin": 150,
         }
 
-        # Processing configuration
+        self.SENTENCE_MERGE_ENABLED = False
+        self.SENTENCE_MERGE_MIN_WORDS = 3
+        self.SENTENCE_MERGE_MIN_CHARS = 15
+        self.ENABLE_SD_FALLBACK = (
+            os.getenv("ENABLE_SD_FALLBACK", "True").lower() == "true"
+        )
         self.MAX_PARALLEL_SLIDES = 4
         self.MIN_IMAGE_DURATION = 10.0
 
