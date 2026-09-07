@@ -115,6 +115,38 @@ class GenerationDB:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT UNIQUE NOT NULL,
+                    status TEXT NOT NULL,
+                    progress INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    params TEXT NOT NULL,
+                    output_dir TEXT,
+                    video_path TEXT,
+                    audio_path TEXT,
+                    thumbnail_path TEXT,
+                    error_message TEXT
+                )
+            """)
+            try:
+                cols = [
+                    r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()
+                ]
+                if "thumbnail_path" not in cols:
+                    conn.execute("ALTER TABLE jobs ADD COLUMN thumbnail_path TEXT")
+            except Exception:
+                pass
+            try:
+                conn.execute(
+                    "UPDATE jobs SET status='failed', updated_at=?, error_message=COALESCE(error_message,'Interrupted by server restart') WHERE status='processing'",
+                    (datetime.now().isoformat(),),
+                )
+            except Exception:
+                pass
+
             conn.commit()
 
     def get_cached_tts(
@@ -307,13 +339,23 @@ class GenerationDB:
                            selected_count=?, replaced_count=?, watch_duration=?,
                            completion_rate=?, feedback_score=?, last_updated=?
                            WHERE media_url=?""",
-                        (sel_cnt, rep_cnt, prev_dur, prev_comp, prev_score, now_str, media_url),
+                        (
+                            sel_cnt,
+                            rep_cnt,
+                            prev_dur,
+                            prev_comp,
+                            prev_score,
+                            now_str,
+                            media_url,
+                        ),
                     )
                 else:
                     sel_cnt = 1 if event_type == "select" else 0
                     rep_cnt = 1 if event_type == "replace" else 0
                     fb_score = (
-                        0.1 if event_type == "select" else (-0.2 if event_type == "replace" else score_delta)
+                        0.1
+                        if event_type == "select"
+                        else (-0.2 if event_type == "replace" else score_delta)
                     )
                     cursor.execute(
                         """INSERT INTO clip_performance

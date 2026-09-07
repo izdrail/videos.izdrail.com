@@ -43,6 +43,7 @@ from core.visual import VisualProviderFactory
 from core.media.manager import MediaManager
 from core.media.youtube_audio import YouTubeAudioLibraryAPI
 from core.tts.manager import TTSManager
+from core.job_manager import JobManager
 from core.utils.audio import improve_audio_quality, remove_metallic_artifacts
 from core.utils.video import (
     get_video_duration,
@@ -2530,6 +2531,32 @@ class TextToVideoGenerator:
 
 
 # =============== GRADIO UI ===============
+job_manager = None
+
+def _jobs_dataframe():
+    try:
+        jobs = job_manager.get_all_jobs(limit=50) if job_manager else []
+    except Exception:
+        jobs=[]
+    import pandas as pd
+    rows=[[j['job_id'][:8], j['status'], f"{j['progress']}%", j['created_at'][:19], (j.get('error_message') or '')[:60]] for j in jobs]
+    return pd.DataFrame(rows, columns=["Job ID","Status","Progress","Created","Error"])
+
+def _jobs_html():
+    try:
+        jobs = job_manager.get_all_jobs(limit=50) if job_manager else []
+    except Exception:
+        jobs=[]
+    if not jobs:
+        return "<p style='color:#888;text-align:center;padding:20px'>No jobs yet. Generate a video to create one.</p>"
+    html="<table style='width:100%;border-collapse:collapse;font-size:13px'><tr style='background:#2a2a3e;color:#ccc'><th style='padding:6px;border:1px solid #444'>Job ID</th><th style='padding:6px;border:1px solid #444'>Status</th><th style='padding:6px;border:1px solid #444'>Progress</th><th style='padding:6px;border:1px solid #444'>Created</th></tr>"
+    color={"queued":"#888","processing":"#4a9","completed":"#4CAF50","failed":"#e55","canceled":"#aa5"}
+    for j in jobs:
+        c=color.get(j['status'],"#ccc")
+        html+=f"<tr><td style='padding:6px;border:1px solid #333'>{j['job_id'][:8]}</td><td style='padding:6px;border:1px solid #333;color:{c}'>{j['status']}</td><td style='padding:6px;border:1px solid #333'><div style='background:#333;border-radius:6px;height:14px'><div style='width:{j['progress']}%;background:{c};height:14px;border-radius:6px'></div></div>{j['progress']}%</td><td style='padding:6px;border:1px solid #333'>{j['created_at'][:19]}</td></tr>"
+    html+="</table>"
+    return html
+
 def setup_ui(generator: TextToVideoGenerator):
     with gr.Blocks(
         title="AI Video Generator Pro", theme=gr.themes.Soft(primary_hue="blue")
@@ -2874,6 +2901,122 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                 status_output = gr.Markdown(
                     value="*Your video will appear here after generation.*"
                 )
+
+            with gr.Tab("📋 Jobs") as jobs_tab:
+                gr.Markdown("## 📋 Jobs — persistent queue (auto-refresh every 2s)")
+                jobs_html = gr.HTML(value=_jobs_html())
+                jobs_df = gr.Dataframe(value=_jobs_dataframe(), headers=["Job ID","Status","Progress","Created","Error"], interactive=False, wrap=True)
+                with gr.Row():
+                    job_id_dropdown = gr.Dropdown(label="Select Job (completed)", choices=[], value=None)
+                    refresh_jobs_btn = gr.Button("🔄 Refresh", size="sm")
+                with gr.Row():
+                    download_btn = gr.Button("⬇️ Download Video", variant="primary")
+                    retry_btn = gr.Button("🔁 Retry Failed", variant="secondary")
+                    cancel_btn = gr.Button("⛔ Cancel", size="sm")
+                download_file = gr.File(label="Download", interactive=False)
+                job_status_msg = gr.Markdown("")
+                jobs_timer = gr.Timer(value=2, active=True)
+
+                def _refresh_jobs():
+                    import pandas as pd
+                    jobs = job_manager.get_all_jobs(limit=50) if job_manager else []
+                    html = _jobs_html()
+                    df = _jobs_dataframe()
+                    choices = [j['job_id'] for j in jobs if j['status']=='completed']
+                    labels = [f"{j['job_id'][:8]} — {j['status']} {j['progress']}%" for j in jobs]
+                    # dropdown choices as job_ids
+                    return html, df, gr.Dropdown(choices=choices)
+                jobs_timer.tick(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown])
+                refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown])
+
+                def _download(job_id):
+                    if not job_id or not job_manager:
+                        return None
+                    j = job_manager.get_job(job_id)
+                    if not j or j['status']!='completed' or not j.get('video_path'):
+                        return None
+                    p = j['video_path']
+                    import pathlib as _pl
+                    return _pl.Path(p) if _pl.Path(p).exists() else None
+                download_btn.click(fn=_download, inputs=[job_id_dropdown], outputs=[download_file])
+
+                def _retry(job_id):
+                    if not job_id or not job_manager:
+                        return "No job selected"
+                    j = job_manager.get_job(job_id)
+                    if not j:
+                        return "Job not found"
+                    new_id = job_manager.retry_job(job_id)
+                    return f"Retried as {new_id[:8]}" if new_id else "Retry failed"
+                retry_btn.click(fn=_retry, inputs=[job_id_dropdown], outputs=[job_status_msg])
+
+                def _cancel(job_id):
+                    if not job_id or not job_manager:
+                        return "No job selected"
+                    ok = job_manager.cancel_job(job_id)
+                    return "Canceled" if ok else "Cannot cancel"
+                cancel_btn.click(fn=_cancel, inputs=[job_id_dropdown], outputs=[job_status_msg])
+
+        def _submit_job_wrapper(text, language, speaker, use_random, visual_source, media_source, keyword, selected_background_video_name, enable_music, music_select, music_vol, enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val, enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, audio_only_val, normalize_audio_val, aspect_ratio_val, quality_val, enable_crossfade_val, pre_selected_videos, js_json, override_text, slide_data, entity):
+            if not text or not text.strip():
+                return "❌ Enter text first."
+            # build params dict matching generate_video signature
+            params = dict(text=text, language=language, speaker_id=speaker, pexels_keyword=keyword.strip() if keyword else None, preferred_media_source=media_source, visual_source=visual_source, selected_background_video_name=selected_background_video_name, pre_selected_videos=pre_selected_videos, enable_background_music=enable_music, music_selection=music_select, music_volume_db=music_vol, add_intro_slide=enable_intro, add_call_to_action=enable_cta, use_random_voices=use_random, enable_circle_overlay=enable_circle, circle_diameter=circle_diam, circle_position=circle_pos, circle_border_width=circle_border, circle_selection=circle_sel, circle_upload_path=circle_upload_path, hide_text=hide_text, export_fps=export_fps_val, overlay_shape=overlay_shape_val, ai_model=ai_model_val, ai_api_url=ai_api_url_val, stress_level=stress_level_val, use_snn=use_snn_val, audio_only=audio_only_val, normalize_audio=normalize_audio_val, aspect_ratio=aspect_ratio_val, quality=quality_val, enable_crossfade=enable_crossfade_val, entity=entity)
+            # merge visual selections same as generate_wrapper does
+            import json as _json
+            final_pre = dict(pre_selected_videos) if isinstance(pre_selected_videos, dict) else {}
+            media_mgr = generator.video_generator.media_manager
+            if js_json and js_json.strip() not in ("", "{}") and slide_data:
+                try:
+                    visual_sel = _json.loads(js_json)
+                    for k,v in visual_sel.items():
+                        try:
+                            s_num=int(k)
+                        except: continue
+                        if not v: continue
+                        src=v[0]
+                        kw=None
+                        for sd in slide_data:
+                            if sd["slide_num"]==s_num: kw=sd.get("keyword"); break
+                        if kw and kw!="N/A":
+                            try:
+                                r=media_mgr.get_random_media([kw], preferred_source=src)
+                                if isinstance(r,tuple): r=r[0]
+                                if r: final_pre[s_num]=str(r)
+                            except: pass
+                except: pass
+            if override_text and override_text.strip():
+                for line in override_text.strip().split("\n"):
+                    line=line.strip()
+                    if not line or line.startswith("#"): continue
+                    parts=line.split(":",1)
+                    if len(parts)!=2: continue
+                    try: s_num=int(parts[0].strip())
+                    except: continue
+                    act=parts[1].strip().lower()
+                    if act=="gradient": final_pre[s_num]="__gradient__"
+                    elif act=="skip": final_pre.pop(s_num,None)
+                    elif act.startswith("/") or act.startswith("."):
+                        from pathlib import Path as _P
+                        if _P(act).exists(): final_pre[s_num]=str(_P(act))
+            params["pre_selected_videos"]=final_pre
+            # handle circle upload object
+            cp=params.get("circle_upload_path")
+            if cp is not None:
+                if isinstance(cp,(list,tuple)): cp=cp[0]
+                if hasattr(cp,"name"): cp=cp.name
+                elif hasattr(cp,"path"): cp=cp.path
+                params["circle_upload_path"]=cp if isinstance(cp,str) else None
+            try:
+                jid = job_manager.submit_job(params)
+                return f"✅ Job queued: {jid[:8]} (ID: {jid}) — switch to Jobs tab to track."
+            except Exception as e:
+                return f"❌ Queue failed: {e}"
+
+        # hook submit button to job queue (keep original generate_wrapper for direct preview)
+        submit_job_btn = gr.Button("📋 Submit as Background Job", variant="secondary")
+        job_submit_status = gr.Markdown("")
+        submit_job_btn.click(fn=_submit_job_wrapper, inputs=[text_input, language_dropdown, speaker_dropdown, use_random_voices, visual_source_radio, media_source_dropdown, pexels_keyword, background_video_dropdown, enable_music, music_dropdown, music_volume, enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape, enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level, use_snn_checkbox, audio_only_checkbox, normalize_audio_checkbox, aspect_ratio_dropdown, quality_dropdown, enable_crossfade_checkbox, pre_selected_videos_state, js_selections, custom_selections_input, preview_data_state, entity_input], outputs=[job_submit_status])
 
         def generate_wrapper(
             text,
@@ -3834,6 +3977,10 @@ if __name__ == "__main__":
         print("   CLI mode: python main.py --cli --text 'Your script here'")
         print("=" * 80 + "\n")
 
+        import core.job_manager as _jm
+        globals()['job_manager'] = _jm.JobManager(config=cfg)
+        job_manager.set_generator_factory(lambda: TextToVideoGenerator())
+        print(f"📋 Job queue ready: {job_manager.max_workers} workers")
         demo = setup_ui(generator)
         demo.queue()
         demo.launch(
