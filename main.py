@@ -2566,342 +2566,343 @@ def setup_ui(generator: TextToVideoGenerator):
             "Create stunning videos with multi-language TTS, auto-backgrounds, and dynamic overlays."
         )
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                with gr.Tabs():
-                    with gr.TabItem("📝 Content"):
-                        text_input = gr.Textbox(
-                            label="Text Content",
-                            placeholder="Enter your script here...",
-                            lines=10,
-                        )
-                        with gr.Row():
-                            btn_generate_script = gr.Button(
-                                "✨ AI Clean & Generate Script (No Pauses)",
-                                variant="secondary",
-                                size="sm",
-                            )
-
-                        with gr.Row():
-                            ai_api_url = gr.Textbox(
-                                label="🌐 AI API URL",
-                                value=generator.keyword_extractor.api_url,
-                                placeholder="https://ai.izdrail.com/api/generate",
-                                info="Endpoint for Ollama keyword extraction",
-                            )
-                        with gr.Row():
-                            ai_model_dropdown = gr.Dropdown(
-                                label="🤖 AI Model",
-                                choices=generator.available_models,
-                                value="gemma4:e2b",
-                                info="Select LLM for keyword extraction",
-                            )
-                            btn_refresh_models = gr.Button(
-                                "🔄 Refresh Models", size="sm"
-                            )
-
-                        with gr.Row():
-                            language_dropdown = gr.Dropdown(
-                                label="🌐 Language",
-                                choices=[
-                                    (SUPPORTED_LANGUAGES[k]["name"], k)
-                                    for k in generator.available_languages
-                                ],
-                                value="auto",
-                            )
-                            speaker_dropdown = gr.Dropdown(
-                                label="🎙️ Voice",
-                                choices=generator.available_voices,
-                                value=generator.config.STANDARD_VOICE_NAME,
-                            )
-                        use_random_voices = gr.Checkbox(
-                            label="🎲 Random voice per sentence", value=False
-                        )
-                        with gr.Row():
-                            preview_voice_btn = gr.Button("👂 Preview Voice", size="sm")
-                            preview_audio = gr.Audio(
-                                label="Voice Preview", interactive=False
-                            )
-
-                    with gr.TabItem("🎥 Media"):
-                        visual_source_radio = gr.Radio(
-                            choices=["Stock Media", "AI Generated Images", "Mixed"],
-                            value="Stock Media",
-                            label="🖼️ Visual Source",
-                            info="Choose background source for scenes: Stock Media, AI Images (SD-Turbo), or Mixed",
-                        )
-                        media_source_dropdown = gr.Dropdown(
-                            label="🎞️ Preferred Media Source",
-                            choices=[
-                                "Random",
-                                "Pexels",
-                                "Pixabay",
-                                "YouTube",
-                                "Giphy",
-                                "SearXNG",
-                                "Dailymotion",
-                                "Vimeo",
-                                "Twitch",
-                                "PeerTube",
-                                "api.video",
-                                "Cloudflare Stream",
-                                "Mux",
-                                "Kaltura",
-                                "JSON2Video",
-                            ],
-                            value="YouTube",
-                            info="Select your primary source for background videos (Random shuffles available APIs)",
-                        )
-                        pexels_keyword = gr.Textbox(
-                            label="🔍 Custom Search Keyword",
-                            placeholder="e.g., 'cyberpunk city', 'peaceful forest'",
-                            info="Leave empty for auto-extraction",
-                        )
-                        entity_input = gr.Textbox(
-                            label="🏷️ Entity (optional)",
-                            placeholder="e.g., 'Tesla', 'Paris', 'NASA'",
-                            info="Person, brand, location or concept to bias keywords & searches",
-                        )
-                        background_video_dropdown = gr.Dropdown(
-                            label="🏞️ Select Background Video",
-                            choices=generator.available_background_videos,
-                            value="Auto-select (Pexels/Giphy/Local)",
-                            info="Choose a specific video from your 'background_videos' folder or let the system auto-select.",
-                        )
-                        with gr.Row():
-                            enable_music = gr.Checkbox(
-                                label="🎵 Add background music", value=True
-                            )
-                            music_dropdown = gr.Dropdown(
-                                label="Music Track",
-                                choices=generator.available_music,
-                                value="Random",
-                            )
-
-                        with gr.Accordion(
-                            "🔎 Search YouTube Free Audio Library", open=False
-                        ):
-                            with gr.Row():
-                                yt_audio_query = gr.Textbox(
-                                    label="Search Tracks",
-                                    placeholder="e.g. 'Epic', 'Chill'...",
+        with gr.Tabs():
+            with gr.Tab("Video Generation"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        with gr.Tabs():
+                            with gr.TabItem("📝 Content"):
+                                text_input = gr.Textbox(
+                                    label="Text Content",
+                                    placeholder="Enter your script here...",
+                                    lines=10,
                                 )
-                                yt_audio_search_btn = gr.Button("🔍 Search")
-                            yt_audio_results = gr.Dropdown(
-                                label="Library Results",
-                                choices=[],
-                                info="Search for tracks and select one to use.",
-                            )
-                            yt_audio_download_info = gr.Markdown(
-                                "*Search and select a track to download it to your local 'background_music' folder.*"
-                            )
+                                with gr.Row():
+                                    btn_generate_script = gr.Button(
+                                        "✨ AI Clean & Generate Script (No Pauses)",
+                                        variant="secondary",
+                                        size="sm",
+                                    )
 
-                        music_volume = gr.Slider(
-                            -40, -5, -22, 1, label="Music Volume (dB)"
+                                with gr.Row():
+                                    ai_api_url = gr.Textbox(
+                                        label="🌐 AI API URL",
+                                        value=generator.keyword_extractor.api_url,
+                                        placeholder="https://ai.izdrail.com/api/generate",
+                                        info="Endpoint for Ollama keyword extraction",
+                                    )
+                                with gr.Row():
+                                    ai_model_dropdown = gr.Dropdown(
+                                        label="🤖 AI Model",
+                                        choices=generator.available_models,
+                                        value="gemma4:e2b",
+                                        info="Select LLM for keyword extraction",
+                                    )
+                                    btn_refresh_models = gr.Button(
+                                        "🔄 Refresh Models", size="sm"
+                                    )
+
+                                with gr.Row():
+                                    language_dropdown = gr.Dropdown(
+                                        label="🌐 Language",
+                                        choices=[
+                                            (SUPPORTED_LANGUAGES[k]["name"], k)
+                                            for k in generator.available_languages
+                                        ],
+                                        value="auto",
+                                    )
+                                    speaker_dropdown = gr.Dropdown(
+                                        label="🎙️ Voice",
+                                        choices=generator.available_voices,
+                                        value=generator.config.STANDARD_VOICE_NAME,
+                                    )
+                                use_random_voices = gr.Checkbox(
+                                    label="🎲 Random voice per sentence", value=False
+                                )
+                                with gr.Row():
+                                    preview_voice_btn = gr.Button("👂 Preview Voice", size="sm")
+                                    preview_audio = gr.Audio(
+                                        label="Voice Preview", interactive=False
+                                    )
+
+                            with gr.TabItem("🎥 Media"):
+                                visual_source_radio = gr.Radio(
+                                    choices=["Stock Media", "AI Generated Images", "Mixed"],
+                                    value="Stock Media",
+                                    label="🖼️ Visual Source",
+                                    info="Choose background source for scenes: Stock Media, AI Images (SD-Turbo), or Mixed",
+                                )
+                                media_source_dropdown = gr.Dropdown(
+                                    label="🎞️ Preferred Media Source",
+                                    choices=[
+                                        "Random",
+                                        "Pexels",
+                                        "Pixabay",
+                                        "YouTube",
+                                        "Giphy",
+                                        "SearXNG",
+                                        "Dailymotion",
+                                        "Vimeo",
+                                        "Twitch",
+                                        "PeerTube",
+                                        "api.video",
+                                        "Cloudflare Stream",
+                                        "Mux",
+                                        "Kaltura",
+                                        "JSON2Video",
+                                    ],
+                                    value="YouTube",
+                                    info="Select your primary source for background videos (Random shuffles available APIs)",
+                                )
+                                pexels_keyword = gr.Textbox(
+                                    label="🔍 Custom Search Keyword",
+                                    placeholder="e.g., 'cyberpunk city', 'peaceful forest'",
+                                    info="Leave empty for auto-extraction",
+                                )
+                                entity_input = gr.Textbox(
+                                    label="🏷️ Entity (optional)",
+                                    placeholder="e.g., 'Tesla', 'Paris', 'NASA'",
+                                    info="Person, brand, location or concept to bias keywords & searches",
+                                )
+                                background_video_dropdown = gr.Dropdown(
+                                    label="🏞️ Select Background Video",
+                                    choices=generator.available_background_videos,
+                                    value="Auto-select (Pexels/Giphy/Local)",
+                                    info="Choose a specific video from your 'background_videos' folder or let the system auto-select.",
+                                )
+                                with gr.Row():
+                                    enable_music = gr.Checkbox(
+                                        label="🎵 Add background music", value=True
+                                    )
+                                    music_dropdown = gr.Dropdown(
+                                        label="Music Track",
+                                        choices=generator.available_music,
+                                        value="Random",
+                                    )
+
+                                with gr.Accordion(
+                                    "🔎 Search YouTube Free Audio Library", open=False
+                                ):
+                                    with gr.Row():
+                                        yt_audio_query = gr.Textbox(
+                                            label="Search Tracks",
+                                            placeholder="e.g. 'Epic', 'Chill'...",
+                                        )
+                                        yt_audio_search_btn = gr.Button("🔍 Search")
+                                    yt_audio_results = gr.Dropdown(
+                                        label="Library Results",
+                                        choices=[],
+                                        info="Search for tracks and select one to use.",
+                                    )
+                                    yt_audio_download_info = gr.Markdown(
+                                        "*Search and select a track to download it to your local 'background_music' folder.*"
+                                    )
+
+                                music_volume = gr.Slider(
+                                    -40, -5, -22, 1, label="Music Volume (dB)"
+                                )
+
+                            with gr.TabItem("⭕ Overlays"):
+                                enable_circle = gr.Checkbox(
+                                    label="Enable Picture-in-Picture Circle", value=False
+                                )
+                                circle_selection = gr.Dropdown(
+                                    label="Circle Content (Local Folder)",
+                                    choices=generator.available_circles,
+                                    value="Random",
+                                    info="Select a video from the local 'circle_overlays' folder",
+                                )
+                                circle_upload = gr.File(
+                                    label="📤 Upload Custom Circle Video", file_types=["video"]
+                                )
+                                with gr.Row():
+                                    circle_diameter = gr.Slider(
+                                        150, 600, 300, 25, label="Diameter (px)"
+                                    )
+                                    circle_border_width = gr.Slider(
+                                        0, 20, 5, 1, label="Border Width (px)"
+                                    )
+                                    circle_position = gr.Dropdown(
+                                        [
+                                            "top-left",
+                                            "top-right",
+                                            "bottom-left",
+                                            "bottom-right",
+                                            "center",
+                                        ],
+                                        value="top-right",
+                                        label="Position",
+                                    )
+                                    overlay_shape = gr.Dropdown(
+                                        [
+                                            "Circle",
+                                            "Rectangle",
+                                            "Square",
+                                            "Star",
+                                            "Split Screen",
+                                        ],
+                                        value="Circle",
+                                        label="Overlay Shape",
+                                        info="Shape of the PIP overlay",
+                                    )
+
+                            with gr.TabItem("⚙️ Advanced"):
+                                with gr.Row():
+                                    aspect_ratio_dropdown = gr.Dropdown(
+                                        label="📐 Aspect Ratio",
+                                        choices=list(generator.config.ASPECT_RATIOS.keys()),
+                                        value="9:16 Portrait (TikTok/Shorts)",
+                                        info="Output video dimensions",
+                                    )
+                                    quality_dropdown = gr.Dropdown(
+                                        label="🎯 Quality",
+                                        choices=list(generator.config.QUALITY_PRESETS.keys()),
+                                        value="Medium (Balanced)",
+                                        info="Encoding quality vs speed tradeoff",
+                                    )
+                                preset_dropdown = gr.Dropdown(
+                                    label="📋 Quick Presets",
+                                    choices=[
+                                        "Default",
+                                        "TikTok Viral",
+                                        "YouTube Shorts High-Energy",
+                                        "Instagram Reels Aesthetic",
+                                    ],
+                                    value="Default",
+                                    info="Select a preset to automatically adjust speed, FPS, and volume.",
+                                )
+                                with gr.Row():
+                                    enable_intro = gr.Checkbox(
+                                        label="📢 Add Intro Slide", value=True
+                                    )
+                                    enable_cta = gr.Checkbox(
+                                        label="📣 Add CTA Outro", value=True
+                                    )
+                                    enable_crossfade_checkbox = gr.Checkbox(
+                                        label="✨ Crossfade Slides", value=False
+                                    )
+                                hide_text = gr.Checkbox(
+                                    label="🛑 Hide Text Overlay", value=False
+                                )
+                                export_fps = gr.Slider(
+                                    10,
+                                    60,
+                                    30,
+                                    1,
+                                    label="🎞️ Export FPS",
+                                    info="0 = auto based on quality preset (default: 30)",
+                                )
+                                stress_level = gr.Slider(
+                                    0.8,
+                                    1.5,
+                                    1.0,
+                                    0.1,
+                                    label="🗣️ Voice Speed / Stress",
+                                    info="1.0 is normal, higher is faster/more energetic",
+                                )
+                                use_snn_checkbox = gr.Checkbox(
+                                    label="🧠 Use SNN Biological Evaluation (Slow but Realistic)",
+                                    value=False,
+                                )
+                                audio_only_checkbox = gr.Checkbox(
+                                    label="🔊 Only generate audio (skip video rendering)",
+                                    value=False,
+                                )
+                                normalize_audio_checkbox = gr.Checkbox(
+                                    label="🔊 Normalize Audio (LUFS)", value=True
+                                )
+                                with gr.Row():
+                                    clear_cache_btn = gr.Button(
+                                        "🗑️ Clear Cache", variant="secondary", size="sm"
+                                    )
+                                    cache_status = gr.Textbox(
+                                        label="Cache",
+                                        value="",
+                                        interactive=False,
+                                        visible=False,
+                                    )
+
+                            with gr.TabItem("🎬 Background Selection"):
+                                with gr.Row():
+                                    preview_btn = gr.Button(
+                                        "🔍 Preview & Find Backgrounds",
+                                        variant="primary",
+                                        scale=2,
+                                    )
+                                    clear_preview_btn = gr.Button("🗑️ Clear", scale=1, size="sm")
+
+                                preview_html = gr.HTML(
+                                    value="<p style='text-align:center;color:#888;padding:40px'>Click <b>Preview & Find Backgrounds</b> to search for videos per slide.</p>",
+                                )
+
+                                preview_js = gr.HTML(
+                                    value="""<style>
+         .hidden-textbox { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+        </style>
+        <script>
+        document.addEventListener('click',function(e){var c=e.target.closest('.vid-card');if(c){c.classList.toggle('selected');var cb=c.querySelector('input[type=checkbox]');if(cb)cb.checked=c.classList.contains('selected');b();}});
+        document.addEventListener('change',function(e){if(e.target.matches('.vid-card input[type=checkbox]')){var c=e.target.closest('.vid-card');if(c){c.classList.toggle('selected');b();}}});
+        function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(function(c){var i=c.getAttribute('data-slide');var r=c.getAttribute('data-source');if(!s[i])s[i]=[];s[i].push(r);});var x=document.getElementById('js-selections-storage');if(!x)return;var t=x.tagName==='INPUT'||x.tagName==='TEXTAREA'?x:x.querySelector('input,textarea');if(!t)return;t.value=JSON.stringify(s);t.dispatchEvent(new Event('input',{bubbles:true}));t.dispatchEvent(new Event('change',{bubbles:true}));}
+        </script>"""
+                                )
+
+                                js_selections = gr.Textbox(
+                                    value="{}",
+                                    elem_id="js-selections-storage",
+                                    elem_classes="hidden-textbox",
+                                )
+
+                                custom_selections_input = gr.Textbox(
+                                    label="✏️ Per-Slide Override Rules",
+                                    placeholder=(
+                                        "Format: slide_num:action, one per line\n\n"
+                                        "Examples:\n"
+                                        "  1:gradient\n"
+                                        "  3:skip\n"
+                                        "  5:/path/to/video.mp4\n\n"
+                                        "Leave empty to use suggested videos."
+                                    ),
+                                    lines=2,
+                                )
+                                apply_btn = gr.Button("💾 Apply Overrides", variant="secondary")
+
+                                selection_status = gr.Markdown(
+                                    "*No backgrounds selected. System will auto-select.*"
+                                )
+
+                                pre_selected_videos_state = gr.State(None)
+                                preview_data_state = gr.State([])
+
+                        generate_button = gr.Button(
+                            "🚀 Generate Video", variant="primary", size="lg"
+                        )
+                        engine_status_output = gr.Textbox(
+                            label="TTS Engine Status", value="Idle", interactive=False
+                        )
+                        progress_bar = gr.Textbox(
+                            label="⚡ Status", value="Ready", interactive=False
                         )
 
-                    with gr.TabItem("⭕ Overlays"):
-                        enable_circle = gr.Checkbox(
-                            label="Enable Picture-in-Picture Circle", value=False
+                    with gr.Column(scale=1):
+                        with gr.Tabs():
+                            with gr.TabItem("🎬 Video"):
+                                video_output = gr.Video(label="Generated Video", height=600)
+                            with gr.TabItem("🖼️ Thumbnail"):
+                                thumbnail_output = gr.Image(
+                                    label="Last Frame Thumbnail", type="filepath"
+                                )
+                            with gr.TabItem("🎵 Audio"):
+                                audio_output = gr.Audio(label="Extracted Voiceover")
+                            with gr.TabItem("📢 Social"):
+                                social_output = gr.Textbox(
+                                    label="Social Media Descriptions", lines=15
+                                )
+                        char_count_display = gr.Markdown(
+                            value="**Characters:** 0 | **TikTok:** ✅ | **Shorts:** ✅"
                         )
-                        circle_selection = gr.Dropdown(
-                            label="Circle Content (Local Folder)",
-                            choices=generator.available_circles,
-                            value="Random",
-                            info="Select a video from the local 'circle_overlays' folder",
+                        status_output = gr.Markdown(
+                            value="*Your video will appear here after generation.*"
                         )
-                        circle_upload = gr.File(
-                            label="📤 Upload Custom Circle Video", file_types=["video"]
-                        )
-                        with gr.Row():
-                            circle_diameter = gr.Slider(
-                                150, 600, 300, 25, label="Diameter (px)"
-                            )
-                            circle_border_width = gr.Slider(
-                                0, 20, 5, 1, label="Border Width (px)"
-                            )
-                            circle_position = gr.Dropdown(
-                                [
-                                    "top-left",
-                                    "top-right",
-                                    "bottom-left",
-                                    "bottom-right",
-                                    "center",
-                                ],
-                                value="top-right",
-                                label="Position",
-                            )
-                            overlay_shape = gr.Dropdown(
-                                [
-                                    "Circle",
-                                    "Rectangle",
-                                    "Square",
-                                    "Star",
-                                    "Split Screen",
-                                ],
-                                value="Circle",
-                                label="Overlay Shape",
-                                info="Shape of the PIP overlay",
-                            )
-
-                    with gr.TabItem("⚙️ Advanced"):
-                        with gr.Row():
-                            aspect_ratio_dropdown = gr.Dropdown(
-                                label="📐 Aspect Ratio",
-                                choices=list(generator.config.ASPECT_RATIOS.keys()),
-                                value="9:16 Portrait (TikTok/Shorts)",
-                                info="Output video dimensions",
-                            )
-                            quality_dropdown = gr.Dropdown(
-                                label="🎯 Quality",
-                                choices=list(generator.config.QUALITY_PRESETS.keys()),
-                                value="Medium (Balanced)",
-                                info="Encoding quality vs speed tradeoff",
-                            )
-                        preset_dropdown = gr.Dropdown(
-                            label="📋 Quick Presets",
-                            choices=[
-                                "Default",
-                                "TikTok Viral",
-                                "YouTube Shorts High-Energy",
-                                "Instagram Reels Aesthetic",
-                            ],
-                            value="Default",
-                            info="Select a preset to automatically adjust speed, FPS, and volume.",
-                        )
-                        with gr.Row():
-                            enable_intro = gr.Checkbox(
-                                label="📢 Add Intro Slide", value=True
-                            )
-                            enable_cta = gr.Checkbox(
-                                label="📣 Add CTA Outro", value=True
-                            )
-                            enable_crossfade_checkbox = gr.Checkbox(
-                                label="✨ Crossfade Slides", value=False
-                            )
-                        hide_text = gr.Checkbox(
-                            label="🛑 Hide Text Overlay", value=False
-                        )
-                        export_fps = gr.Slider(
-                            10,
-                            60,
-                            30,
-                            1,
-                            label="🎞️ Export FPS",
-                            info="0 = auto based on quality preset (default: 30)",
-                        )
-                        stress_level = gr.Slider(
-                            0.8,
-                            1.5,
-                            1.0,
-                            0.1,
-                            label="🗣️ Voice Speed / Stress",
-                            info="1.0 is normal, higher is faster/more energetic",
-                        )
-                        use_snn_checkbox = gr.Checkbox(
-                            label="🧠 Use SNN Biological Evaluation (Slow but Realistic)",
-                            value=False,
-                        )
-                        audio_only_checkbox = gr.Checkbox(
-                            label="🔊 Only generate audio (skip video rendering)",
-                            value=False,
-                        )
-                        normalize_audio_checkbox = gr.Checkbox(
-                            label="🔊 Normalize Audio (LUFS)", value=True
-                        )
-                        with gr.Row():
-                            clear_cache_btn = gr.Button(
-                                "🗑️ Clear Cache", variant="secondary", size="sm"
-                            )
-                            cache_status = gr.Textbox(
-                                label="Cache",
-                                value="",
-                                interactive=False,
-                                visible=False,
-                            )
-
-                    with gr.TabItem("🎬 Background Selection"):
-                        with gr.Row():
-                            preview_btn = gr.Button(
-                                "🔍 Preview & Find Backgrounds",
-                                variant="primary",
-                                scale=2,
-                            )
-                            clear_preview_btn = gr.Button("🗑️ Clear", scale=1, size="sm")
-
-                        preview_html = gr.HTML(
-                            value="<p style='text-align:center;color:#888;padding:40px'>Click <b>Preview & Find Backgrounds</b> to search for videos per slide.</p>",
-                        )
-
-                        preview_js = gr.HTML(
-                            value="""<style>
- .hidden-textbox { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
-</style>
-<script>
-document.addEventListener('click',function(e){var c=e.target.closest('.vid-card');if(c){c.classList.toggle('selected');var cb=c.querySelector('input[type=checkbox]');if(cb)cb.checked=c.classList.contains('selected');b();}});
-document.addEventListener('change',function(e){if(e.target.matches('.vid-card input[type=checkbox]')){var c=e.target.closest('.vid-card');if(c){c.classList.toggle('selected');b();}}});
-function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(function(c){var i=c.getAttribute('data-slide');var r=c.getAttribute('data-source');if(!s[i])s[i]=[];s[i].push(r);});var x=document.getElementById('js-selections-storage');if(!x)return;var t=x.tagName==='INPUT'||x.tagName==='TEXTAREA'?x:x.querySelector('input,textarea');if(!t)return;t.value=JSON.stringify(s);t.dispatchEvent(new Event('input',{bubbles:true}));t.dispatchEvent(new Event('change',{bubbles:true}));}
-</script>"""
-                        )
-
-                        js_selections = gr.Textbox(
-                            value="{}",
-                            elem_id="js-selections-storage",
-                            elem_classes="hidden-textbox",
-                        )
-
-                        custom_selections_input = gr.Textbox(
-                            label="✏️ Per-Slide Override Rules",
-                            placeholder=(
-                                "Format: slide_num:action, one per line\n\n"
-                                "Examples:\n"
-                                "  1:gradient\n"
-                                "  3:skip\n"
-                                "  5:/path/to/video.mp4\n\n"
-                                "Leave empty to use suggested videos."
-                            ),
-                            lines=2,
-                        )
-                        apply_btn = gr.Button("💾 Apply Overrides", variant="secondary")
-
-                        selection_status = gr.Markdown(
-                            "*No backgrounds selected. System will auto-select.*"
-                        )
-
-                        pre_selected_videos_state = gr.State(None)
-                        preview_data_state = gr.State([])
-
-                generate_button = gr.Button(
-                    "🚀 Generate Video", variant="primary", size="lg"
-                )
-                engine_status_output = gr.Textbox(
-                    label="TTS Engine Status", value="Idle", interactive=False
-                )
-                progress_bar = gr.Textbox(
-                    label="⚡ Status", value="Ready", interactive=False
-                )
-
-            with gr.Column(scale=1):
-                with gr.Tabs():
-                    with gr.TabItem("🎬 Video"):
-                        video_output = gr.Video(label="Generated Video", height=600)
-                    with gr.TabItem("🖼️ Thumbnail"):
-                        thumbnail_output = gr.Image(
-                            label="Last Frame Thumbnail", type="filepath"
-                        )
-                    with gr.TabItem("🎵 Audio"):
-                        audio_output = gr.Audio(label="Extracted Voiceover")
-                    with gr.TabItem("📢 Social"):
-                        social_output = gr.Textbox(
-                            label="Social Media Descriptions", lines=15
-                        )
-                char_count_display = gr.Markdown(
-                    value="**Characters:** 0 | **TikTok:** ✅ | **Shorts:** ✅"
-                )
-                status_output = gr.Markdown(
-                    value="*Your video will appear here after generation.*"
-                )
-
             with gr.Tab("📋 Jobs") as jobs_tab:
                 gr.Markdown("## 📋 Jobs — persistent queue (auto-refresh every 2s)")
                 jobs_html = gr.HTML(value=_jobs_html())
@@ -2937,7 +2938,7 @@ function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(fu
                         return None
                     p = j['video_path']
                     import pathlib as _pl
-                    return _pl.Path(p) if _pl.Path(p).exists() else None
+                    return str(_pl.Path(p)) if _pl.Path(p).exists() else None
                 download_btn.click(fn=_download, inputs=[job_id_dropdown], outputs=[download_file])
 
                 def _retry(job_id):
