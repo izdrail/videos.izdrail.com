@@ -1758,6 +1758,12 @@ class TextToVideoGenerator:
 
         # Reset keywords for this session
         self.keyword_extractor.clear_used()
+        # Reset per-video media selection state (MMR diversity + used URLs)
+        try:
+            if self.video_generator and self.video_generator.media_manager:
+                self.video_generator.media_manager.reset_media_selection()
+        except Exception:
+            pass
         input_params = {
             "text": text,
             "speaker_id": speaker_id,

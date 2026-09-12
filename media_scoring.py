@@ -88,6 +88,92 @@ def _fetch_thumbnail_image(thumbnail_url: str) -> Optional[Image.Image]:
     return None
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a float tuning knob from the environment with a safe fallback."""
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _canonical_url(url: Any) -> Optional[str]:
+    """Canonical dedupe key for a media URL (scheme+host+path, lower-cased).
+
+    The same clip surfacing on two providers (or twice on one) must not occupy
+    two pool slots; exact-match `used_urls` alone cannot catch that.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(url.strip())
+        if not p.netloc:
+            return url.strip().lower()
+        path = p.path.split("?")[0].rstrip("/").lower()
+        return f"{p.netloc.lower()}{path}"
+    except Exception:
+        return url.strip().lower()
+
+
+def _text_embedding(text: str):
+    """Normalized CLIP text embedding, or None when CLIP is unavailable."""
+    if not text or not text.strip():
+        return None
+    try:
+        import torch
+        import open_clip
+
+        model, preprocess, device = _get_clip_model()
+        if model is None:
+            return None
+        tokens = open_clip.tokenize([text[:256]]).to(device)
+        with torch.no_grad():
+            feats = model.encode_text(tokens)
+            feats /= feats.norm(dim=-1, keepdim=True)
+        return feats[0].detach().cpu().numpy()
+    except Exception as e:
+        logger.debug(f"text embedding failed: {e}")
+        return None
+
+
+def _image_embedding(pil_image):
+    """Normalized CLIP image embedding, or None when CLIP is unavailable."""
+    if pil_image is None:
+        return None
+    try:
+        import torch
+
+        model, preprocess, device = _get_clip_model()
+        if model is None or preprocess is None:
+            return None
+        tensor = preprocess(pil_image.convert("RGB")).unsqueeze(0).to(device)
+        with torch.no_grad():
+            feats = model.encode_image(tensor)
+            feats /= feats.norm(dim=-1, keepdim=True)
+        return feats[0].detach().cpu().numpy()
+    except Exception as e:
+        logger.debug(f"image embedding failed: {e}")
+        return None
+
+
+def _cosine(a, b) -> float:
+    if a is None or b is None:
+        return 0.0
+    try:
+        import numpy as np
+
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        return float(np.dot(a, b) / denom) if denom > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _emb_to_clip_score(cosine_sim: float) -> float:
+    """Map a raw CLIP cosine (typically 0.05..0.30) to roughly [0, 1]."""
+    return max(0.0, min(1.0, (cosine_sim - 0.05) / 0.25))
+
+
 def clip_relevance_score(text: str, thumbnail_url: Any, model_name: str = "ViT-B-32") -> float:
     """
     Cross-modal text-image relevance score using CLIP.
@@ -213,21 +299,41 @@ def rerank_pooled_candidates(
     top_k: int = 1,
     target_width: int = 1080,
     target_height: int = 1920,
+    keyword_text: Optional[str] = None,
+    previous_media: Optional[List[dict]] = None,
 ) -> List[dict]:
     """
-    Pool candidate media items across all sources and globally rerank them in a single stage.
+    Pool candidate media items across all sources and globally rerank them.
 
-    Scoring formula:
+    Base scoring formula (unchanged):
         Relevance (CLIP): 55%
         Quality (resolution/aspect): 25%
         Freshness (time since source used): 10%
         Diversity (source usage count): 10%
         Preferred source boost: +0.15
 
+    Enhancements (see docs/research/video-selection-and-free-sources.md):
+
+    * **Two-gate relevance** — when ``keyword_text`` differs from
+      ``narration_text``, relevance blends CLIP(keyword, thumbnail) with
+      CLIP(full sentence, thumbnail), catching keyword/theme drift
+      ("apple" fruit vs the company). Blend via ``MS_GATE_B_WEIGHT``
+      (default 0.5).
+    * **MMR diversity** — each candidate is penalised by its CLIP-image
+      similarity to the clips already chosen for earlier slides
+      (``previous_media``), so near-duplicate scenes cannot land on
+      consecutive slides. Strength via ``MS_MMR_LAMBDA`` (default 0.85;
+      1.0 disables the penalty).
+    * **Canonical-URL dedupe** — the same clip offered by two sources
+      occupies one pool slot.
+
+    Falls back to the legacy single-text ``clip_relevance_score`` path when
+    CLIP embeddings are unavailable.
+
     Args:
-        narration_text: Text snippet to score relevance against.
+        narration_text: Full sentence/context to score relevance against.
         candidates_by_source: Map of source_name -> list of media candidate dicts.
-        used_urls: Set of previously used media URLs to exclude or penalize.
+        used_urls: Set of previously used media URLs to exclude.
         source_usage_count: Map of source_name -> integer usage count.
         source_last_used: Map of source_name -> timestamp of last usage.
         now: Current timestamp (defaults to time.time()).
@@ -235,9 +341,12 @@ def rerank_pooled_candidates(
         top_k: Number of top candidate items to return.
         target_width: Desired video width.
         target_height: Desired video height.
+        keyword_text: The search keyword that produced this pool (gate A).
+        previous_media: Candidate dicts already chosen for earlier slides
+            (MMR diversity reference set).
 
     Returns:
-        List of top_k candidate dicts, enriched with '_source' and '_score' fields.
+        List of top_k candidate dicts, enriched with '_source' and '_score'.
     """
     if now is None:
         now = time.time()
@@ -245,8 +354,37 @@ def rerank_pooled_candidates(
     used_urls = used_urls or set()
     source_usage_count = source_usage_count or {}
     source_last_used = source_last_used or {}
+    previous_media = previous_media or []
+
+    gate_b_weight = _env_float("MS_GATE_B_WEIGHT", 0.5)
+    gate_b_weight = max(0.0, min(1.0, gate_b_weight))
+    mmr_lambda = _env_float("MS_MMR_LAMBDA", 0.85)
+    mmr_lambda = max(0.0, min(1.0, mmr_lambda))
+
+    narration = (narration_text or "").strip()
+    keyword = (keyword_text or "").strip()
+    use_two_gate = bool(keyword) and keyword.lower() != narration.lower()
+
+    # Precompute text + previous-selection embeddings once per rerank call.
+    text_emb_a = _text_embedding(keyword if use_two_gate else narration)
+    text_emb_b = _text_embedding(narration) if use_two_gate else None
+    prev_embs = []
+    if previous_media and mmr_lambda < 1.0:
+        for prev in previous_media:
+            if not isinstance(prev, dict):
+                continue
+            pref = prev.get("thumbnail") or prev.get("image") or prev.get("url")
+            pimg = None
+            if isinstance(pref, Image.Image):
+                pimg = pref.convert("RGB")
+            elif isinstance(pref, str):
+                pimg = _fetch_thumbnail_image(pref)
+            pemb = _image_embedding(pimg) if pimg is not None else None
+            if pemb is not None:
+                prev_embs.append(pemb)
 
     pooled_candidates = []
+    seen_keys = set()
 
     for source_name, candidate_list in candidates_by_source.items():
         if not candidate_list:
@@ -268,14 +406,40 @@ def rerank_pooled_candidates(
                 # Exclude already used media
                 continue
 
+            # Canonical-URL dedupe across sources within the pool
+            ckey = _canonical_url(candidate_url)
+            if ckey and ckey in seen_keys:
+                continue
+            if ckey:
+                seen_keys.add(ckey)
+
             # Create a shallow copy of candidate to enrich with scores
             item = dict(candidate)
 
-            # Calculate individual signal scores
-            relevance = clip_relevance_score(
-                narration_text,
-                item.get("thumbnail") or item.get("image") or candidate_url
-            )
+            # --- Two-gate relevance via shared embeddings (legacy fallback) ---
+            ref = item.get("thumbnail") or item.get("image") or candidate_url
+            img = None
+            if isinstance(ref, Image.Image):
+                img = ref.convert("RGB")
+            elif isinstance(ref, str):
+                img = _fetch_thumbnail_image(ref)
+            img_emb = _image_embedding(img) if img is not None else None
+
+            if img_emb is not None and text_emb_a is not None:
+                score_a = _emb_to_clip_score(_cosine(img_emb, text_emb_a))
+                if use_two_gate and text_emb_b is not None:
+                    score_b = _emb_to_clip_score(_cosine(img_emb, text_emb_b))
+                    relevance = (1.0 - gate_b_weight) * score_a + gate_b_weight * score_b
+                    item["_gate_a"] = float(score_a)
+                    item["_gate_b"] = float(score_b)
+                else:
+                    relevance = score_a
+            else:
+                relevance = clip_relevance_score(
+                    narration_text,
+                    item.get("thumbnail") or item.get("image") or candidate_url,
+                )
+
             quality = compute_quality_score(item, target_w=target_width, target_h=target_height)
 
             # DB clip performance score multiplier if available
@@ -297,6 +461,12 @@ def rerank_pooled_candidates(
                 + perf_score * 0.05
                 + preferred_boost
             )
+
+            # --- MMR diversity penalty against already-selected clips ---
+            if prev_embs and img_emb is not None:
+                max_sim = max(_cosine(img_emb, pe) for pe in prev_embs)
+                total_score = mmr_lambda * total_score - (1.0 - mmr_lambda) * max_sim
+                item["_mmr_sim"] = float(max_sim)
 
             item["_source"] = source_name
             item["_score"] = float(total_score)
