@@ -2908,7 +2908,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 jobs_html = gr.HTML(value=_jobs_html())
                 jobs_df = gr.Dataframe(value=_jobs_dataframe(), headers=["Job ID","Status","Progress","Created","Error"], interactive=False, wrap=True)
                 with gr.Row():
-                    job_id_dropdown = gr.Dropdown(label="Select Job (completed)", choices=[], value=None)
+                    job_id_dropdown = gr.Dropdown(label="Select Job (completed / failed / canceled)", choices=[], value=None)
                     refresh_jobs_btn = gr.Button("🔄 Refresh", size="sm")
                 with gr.Row():
                     download_btn = gr.Button("⬇️ Download Video", variant="primary")
@@ -2918,17 +2918,22 @@ def setup_ui(generator: TextToVideoGenerator):
                 job_status_msg = gr.Markdown("")
                 jobs_timer = gr.Timer(value=2, active=True)
 
-                def _refresh_jobs():
+                def _refresh_jobs(selected=None):
                     import pandas as pd
                     jobs = job_manager.get_all_jobs(limit=50) if job_manager else []
                     html = _jobs_html()
                     df = _jobs_dataframe()
-                    choices = [j['job_id'] for j in jobs if j['status']=='completed']
-                    labels = [f"{j['job_id'][:8]} — {j['status']} {j['progress']}%" for j in jobs]
-                    # dropdown choices as job_ids
-                    return html, df, gr.Dropdown(choices=choices)
-                jobs_timer.tick(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown])
-                refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown])
+                    # Failed and canceled jobs must be selectable so the Retry
+                    # button can restart them; completed jobs stay selectable
+                    # for Download. (label, value) pairs keep full job ids as
+                    # values while showing status in the label.
+                    selectable = [j for j in jobs if j['status'] in ('completed', 'failed', 'canceled')]
+                    choices = [(f"{j['job_id'][:8]} — {j['status']} {j['progress']}%", j['job_id']) for j in selectable]
+                    valid_ids = {v for _, v in choices}
+                    value = selected if selected in valid_ids else None
+                    return html, df, gr.Dropdown(choices=choices, value=value)
+                jobs_timer.tick(fn=_refresh_jobs, inputs=[job_id_dropdown], outputs=[jobs_html, jobs_df, job_id_dropdown])
+                refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[job_id_dropdown], outputs=[jobs_html, jobs_df, job_id_dropdown])
 
                 def _download(job_id):
                     if not job_id or not job_manager:
@@ -2947,8 +2952,10 @@ def setup_ui(generator: TextToVideoGenerator):
                     j = job_manager.get_job(job_id)
                     if not j:
                         return "Job not found"
+                    if j['status'] not in ('failed', 'canceled'):
+                        return f"Job is {j['status']} — only failed or canceled jobs can be retried."
                     new_id = job_manager.retry_job(job_id)
-                    return f"Retried as {new_id[:8]}" if new_id else "Retry failed"
+                    return f"🔁 Retried as new job {new_id[:8]} — watch the queue above." if new_id else "Retry failed"
                 retry_btn.click(fn=_retry, inputs=[job_id_dropdown], outputs=[job_status_msg])
 
                 def _cancel(job_id):
@@ -3980,6 +3987,9 @@ if __name__ == "__main__":
 
         import core.job_manager as _jm
         globals()['job_manager'] = _jm.JobManager(config=cfg)
+        recovered = job_manager.recover_interrupted_jobs()
+        if recovered:
+            print(f"📋 Recovered {recovered} interrupted job(s) -> failed (retryable)")
         job_manager.set_generator_factory(lambda: TextToVideoGenerator())
         print(f"📋 Job queue ready: {job_manager.max_workers} workers")
         demo = setup_ui(generator)
