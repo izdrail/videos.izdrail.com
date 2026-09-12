@@ -145,3 +145,97 @@ def test_pexels_api_target_resolution_selection():
     assert results[0]["url"] == "http://pexels.com/target_hd.mp4"
     assert results[0]["width"] == 1080
     assert results[0]["height"] == 1920
+
+
+# ---------------------------------------------------------------------------
+# Two-gate relevance, MMR diversity, canonical-URL dedupe (2026-09 research)
+# ---------------------------------------------------------------------------
+
+import numpy as np
+import media_scoring as ms
+
+
+def test_rerank_dedupes_canonical_urls():
+    """The same clip offered by two sources occupies one pool slot."""
+    now = time.time()
+    candidates_by_source = {
+        "Pexels": [{"url": "http://cdn.example.com/clip.mp4", "width": 1080, "height": 1920}],
+        "Pixabay": [{"url": "http://cdn.example.com/clip.mp4", "width": 1080, "height": 1920}],
+        "Wikimedia": [{"url": "http://cdn.example.com/other.mp4", "width": 1080, "height": 1920}],
+    }
+    results = rerank_pooled_candidates(
+        narration_text="",  # no CLIP needed; fallback relevance
+        candidates_by_source=candidates_by_source,
+        now=now,
+        top_k=10,
+    )
+    assert len(results) == 2  # duplicate collapsed
+
+
+def test_two_gate_relevance_blending(monkeypatch):
+    """Relevance blends keyword gate (A) and sentence gate (B)."""
+    monkeypatch.setenv("MS_GATE_B_WEIGHT", "0.5")
+    img = Image.new("RGB", (64, 64), color=(10, 200, 10))
+    monkeypatch.setattr(ms, "_fetch_thumbnail_image", lambda url: img)
+    monkeypatch.setattr(ms, "_image_embedding", lambda im: np.array([1.0, 0.0]))
+
+    def fake_text_emb(text):
+        if text == "apple":
+            return np.array([1.0, 0.0])  # keyword matches image perfectly
+        return np.array([0.0, 1.0])  # sentence does not match at all
+
+    monkeypatch.setattr(ms, "_text_embedding", fake_text_emb)
+
+    results = rerank_pooled_candidates(
+        narration_text="the company reported record phone sales",
+        keyword_text="apple",
+        candidates_by_source={
+            "Pexels": [{"url": "http://x/a.mp4", "thumbnail": "http://x/a.jpg", "width": 1080, "height": 1920}]
+        },
+        now=time.time(),
+        top_k=1,
+    )
+    assert len(results) == 1
+    item = results[0]
+    assert item["_gate_a"] == pytest.approx(1.0)
+    assert item["_gate_b"] == pytest.approx(0.0)
+    assert item["_relevance_score"] == pytest.approx(0.5)
+
+
+def test_mmr_penalty_against_previous_media(monkeypatch):
+    """A candidate visually identical to an already-selected clip is penalised."""
+    monkeypatch.setenv("MS_MMR_LAMBDA", "0.85")
+    img = Image.new("RGB", (64, 64))
+    monkeypatch.setattr(ms, "_fetch_thumbnail_image", lambda url: img)
+    monkeypatch.setattr(ms, "_image_embedding", lambda im: np.array([1.0, 0.0]))
+    monkeypatch.setattr(ms, "_text_embedding", lambda t: None)
+    monkeypatch.setattr(ms, "clip_relevance_score", lambda text, thumb: 0.8)
+
+    pool = {"Pexels": [{"url": "http://x/a.mp4", "thumbnail": "http://x/a.jpg", "width": 1080, "height": 1920}]}
+    previous = [{"url": "http://x/b.mp4", "thumbnail": "http://x/b.jpg"}]
+
+    without_prev = rerank_pooled_candidates(
+        narration_text="n", candidates_by_source=dict(pool), now=time.time(), top_k=1
+    )[0]["_score"]
+    with_prev = rerank_pooled_candidates(
+        narration_text="n", candidates_by_source=dict(pool), now=time.time(), top_k=1,
+        previous_media=previous,
+    )[0]
+
+    assert with_prev["_mmr_sim"] == pytest.approx(1.0)
+    assert with_prev["_score"] == pytest.approx(0.85 * without_prev - 0.15 * 1.0)
+
+
+def test_mmr_disabled_at_lambda_one(monkeypatch):
+    """MS_MMR_LAMBDA=1.0 restores the legacy (no diversity penalty) behaviour."""
+    monkeypatch.setenv("MS_MMR_LAMBDA", "1.0")
+    img = Image.new("RGB", (64, 64))
+    monkeypatch.setattr(ms, "_fetch_thumbnail_image", lambda url: img)
+    monkeypatch.setattr(ms, "clip_relevance_score", lambda text, thumb: 0.8)
+
+    pool = {"Pexels": [{"url": "http://x/a.mp4", "thumbnail": "http://x/a.jpg", "width": 1080, "height": 1920}]}
+    res = rerank_pooled_candidates(
+        narration_text="n", candidates_by_source=pool, now=time.time(), top_k=1,
+        previous_media=[{"url": "http://x/b.mp4", "thumbnail": "http://x/b.jpg"}],
+    )
+    assert "_mmr_sim" not in res[0]

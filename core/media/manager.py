@@ -70,6 +70,9 @@ class MediaManager:
         # Maximum attempts across sources to improve hit rate
         self.MAX_ATTEMPTS = 3
         self._used_media_urls = set()
+        # Candidates already chosen for earlier slides in the CURRENT video;
+        # fed to the reranker as the MMR diversity reference set.
+        self._selected_media: List[dict] = []
         # Bandit tracking
         self._source_usage_count = defaultdict(int)
         self._source_last_used = {}
@@ -306,6 +309,8 @@ class MediaManager:
             top_k=1,
             target_width=1080,
             target_height=1920,
+            keyword_text=query,
+            previous_media=self._selected_media,
         )
 
         if not best_clips:
@@ -355,9 +360,20 @@ class MediaManager:
             cache_key = (query, preferred_source)
             self.search_cache[cache_key] = str(output_path)
             self._used_media_urls.add(best_media.get("url"))
+            self._selected_media.append(best_media)
             return output_path
 
         return None
+
+    def reset_media_selection(self) -> None:
+        """Reset per-video selection state (MMR reference set + used URLs).
+
+        Called at the start of each generation so the diversity penalty
+        compares against clips of the current video only, and clips used in a
+        previous video become eligible again (local cache still applies).
+        """
+        self._selected_media = []
+        self._used_media_urls = set()
 
     @staticmethod
     def _compute_quality_score(media: dict) -> float:
