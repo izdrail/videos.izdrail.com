@@ -19,6 +19,9 @@ from .searxng import SearXNGAPI
 from .openverse import OpenverseProvider
 from .wikimedia import WikimediaProvider
 from .internet_archive import InternetArchiveProvider
+from .nasa import NASAProvider
+from .library_of_congress import LibraryOfCongressProvider
+from .mixkit import MixkitProvider
 from .base import MediaType, Media
 from core.nlp.neuron_extractor import NeuronExtractor
 from core.nlp.entity import EntityHandler
@@ -44,6 +47,9 @@ class MediaManager:
             "Openverse": OpenverseProvider(),
             "Wikimedia": WikimediaProvider(),
             "InternetArchive": InternetArchiveProvider(),
+            "NASA": NASAProvider(),
+            "LibraryOfCongress": LibraryOfCongressProvider(),
+            "Mixkit": MixkitProvider(),
         }
         self.neuron_extractor = NeuronExtractor(
             model=config.AI_MODEL if config else "gemma4:e2b"
@@ -56,6 +62,9 @@ class MediaManager:
             "Wikimedia",
             "SearXNG",
             "InternetArchive",
+            "NASA",
+            "LibraryOfCongress",
+            "Mixkit",
             "YouTube",
             "Pexels",
             "Pixabay",
