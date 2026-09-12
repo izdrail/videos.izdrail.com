@@ -11,6 +11,9 @@ This document describes the open, key-less media providers added to the
 | Wikimedia Commons | `WikimediaProvider` | `commons.wikimedia.org/w/api.php` (search + imageinfo)                | image, video       | No |
 | Internet Archive | `InternetArchiveProvider` | `archive.org/advancedsearch.php`, `archive.org/metadata/{id}` | image, video, audio | No |
 | YouTube (yt-dlp) | `YouTubeAPI`        | `yt-dlp` subprocess (`ytsearch:`)                                      | video              | No |
+| NASA             | `NASAProvider`       | `images-api.nasa.gov/search` + per-item asset manifest                 | video, image       | No |
+| Library of Congress | `LibraryOfCongressProvider` | `www.loc.gov/search/?fo=json&fa=format:film,video`        | video              | No |
+| Mixkit           | `MixkitProvider`     | scrapes `mixkit.co/free-stock-video/<slug>/` (no official API)         | video              | No |
 
 The existing commercial providers (Pexels, Pixabay, Unsplash, Giphy) and the
 SearXNG image search remain available. **YouTube via `yt-dlp` already existed**
@@ -39,8 +42,9 @@ The shared `Media` dataclass and `MediaType` enum live in `core/media/base.py`.
 `manager.search(query, media_type=MediaType.ANY, limit=50, min_results=50)`:
 
 1. Walks `preferred_order` (open providers first):
-   `Openverse → Wikimedia → SearXNG → InternetArchive → YouTube → Pexels →
-   Pixabay → Unsplash → Giphy`.
+   `Openverse → Wikimedia → SearXNG → InternetArchive → NASA →
+   LibraryOfCongress → Mixkit → YouTube → Pexels → Pixabay → Unsplash →
+   Giphy`.
 2. Skips a provider when it doesn't support the requested `media_type` or
    requires a missing API key (per `capabilities()`).
 3. Collects results from each provider until `min_results` are gathered or the
