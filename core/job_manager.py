@@ -159,5 +159,22 @@ class JobManager:
         )
         return self.submit_job(params)
 
+    def recover_interrupted_jobs(self) -> int:
+        """Mark jobs stuck in 'queued'/'processing' from a previous run as failed.
+
+        Worker threads are in-memory only: after an app restart any job left in
+        those states will never move again. Reclassifying them as failed (with a
+        clear message) is what makes them restartable via the UI retry button.
+        Returns the number of jobs recovered.
+        """
+        now = datetime.now().isoformat()
+        with DB.lock, sqlite3.connect(DB.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET status='failed', error_message=?, updated_at=? "
+                "WHERE status IN ('queued','processing')",
+                ("Interrupted: app restarted before this job finished. Safe to retry.", now),
+            )
+            return cur.rowcount
+
     def shutdown(self):
         self._stop.set()
