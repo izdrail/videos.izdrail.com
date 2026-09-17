@@ -35,7 +35,8 @@ def test_generate_script():
         payload = kwargs['json']
         
         assert payload['model'] == "gemma4:e2b"
-        assert "Generate a tts readys script no [pause]" in payload['prompt']
+        assert "Generate a TTS-ready script" in payload['prompt']
+        assert "Remove [pause] tags" in payload['prompt']
         assert result == "Here is the clean script without pauses."
         print("✅ Test passed!")
 
