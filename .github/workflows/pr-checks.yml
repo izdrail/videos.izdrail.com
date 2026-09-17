@@ -13,7 +13,7 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: pip install --prefer-binary -r requirements.txt pytest
-      - run: pytest tests -q
+      - run: PYTHONPATH=. pytest tests -q
 
   container:
     runs-on: ubuntu-latest
