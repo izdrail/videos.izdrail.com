@@ -13,6 +13,7 @@ import yt_dlp
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
+from core.media.identity import unique_slide_assets
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
@@ -1285,6 +1286,12 @@ class FFmpegVideoGenerator:
                             f"❌ [Pipeline] Emergency fallback also failed for slide {s_num}: {e2}"
                         )
 
+        # Final safety boundary: a generated video cannot contain the same source
+        # asset twice, including symlink/path aliases supplied by UI overrides.
+        slide_videos, duplicate_count = unique_slide_assets(slide_videos)
+        if duplicate_count:
+            print(f"🛡️ [Selection] Removed {duplicate_count} duplicate slide asset(s); affected slides use the normal gradient fallback.")
+
         # --- Stage 2.5: Apply Temporal Coherence Optimization ---
         try:
             from core.visual.temporal_coherence import TemporalCoherenceOptimizer
@@ -1317,6 +1324,13 @@ class FFmpegVideoGenerator:
                     slide_videos[s_num] = opt_clip
         except Exception as e:
             print(f"⚠️ [TemporalCoherence] Post-processing skipped: {e}")
+
+        # Temporal optimisation may replace clips, so re-assert the invariant at
+        # the last boundary before rendering.
+        slide_videos, post_optimization_duplicates = unique_slide_assets(slide_videos)
+        if post_optimization_duplicates:
+            duplicate_count += post_optimization_duplicates
+            print(f"🛡️ [Selection] Removed {post_optimization_duplicates} duplicate asset(s) introduced during post-processing.")
 
         # --- Stage 3: Parallel Rendering ---
         print(
@@ -1758,6 +1772,12 @@ class TextToVideoGenerator:
 
         # Reset keywords for this session
         self.keyword_extractor.clear_used()
+        # Reset per-video media selection state (MMR diversity + used URLs)
+        try:
+            if self.video_generator and self.video_generator.media_manager:
+                self.video_generator.media_manager.reset_media_selection()
+        except Exception:
+            pass
         input_params = {
             "text": text,
             "speaker_id": speaker_id,

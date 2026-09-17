@@ -447,3 +447,9 @@ When asked to **improve** this codebase, an agent should:
 ## 🚀 Quick Start (Gen Z TL;DR)
 
 **Input:** Text → **Output:** Viral 9:16 video w/ voice, music, vibe. **Command:** `python main.py` → `http://localhost:1603` → 🔥 TikTok-ready.
+
+## Video selection identity, diversity, and diagnostics
+
+SNN mode sequences keywords; candidate retrieval still uses the normal media providers. Exact video identity is provider + stable asset ID when available, otherwise a canonical source URL. Concurrent selectors reserve that identity atomically, and the final renderer also rejects duplicate real files (including symlink aliases).
+
+Ranking blends keyword and narration relevance and uses MMR to avoid repeatedly choosing visually similar clips. Tune with `MS_GATE_B_WEIGHT` (default `0.5`) and `MS_MMR_LAMBDA` (default `0.85`; set `1` to disable the MMR penalty). See `docs/research/snn-selection-dedup-and-diversity.md` for the investigation, trade-offs and benchmark command.

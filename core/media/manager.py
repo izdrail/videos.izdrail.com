@@ -6,6 +6,7 @@ Coordinates multiple media source APIs to find the best background media
 import random
 import time
 import concurrent.futures
+import threading
 from collections import defaultdict
 import re
 from typing import List, Dict, Optional, Tuple
@@ -20,6 +21,7 @@ from .openverse import OpenverseProvider
 from .wikimedia import WikimediaProvider
 from .internet_archive import InternetArchiveProvider
 from .base import MediaType, Media
+from .identity import candidate_identity, path_identity
 from core.nlp.neuron_extractor import NeuronExtractor
 from core.nlp.entity import EntityHandler
 from media_scoring import (
@@ -70,6 +72,13 @@ class MediaManager:
         # Maximum attempts across sources to improve hit rate
         self.MAX_ATTEMPTS = 3
         self._used_media_urls = set()
+        # Candidates already chosen for earlier slides in the CURRENT video;
+        # fed to the reranker as the MMR diversity reference set.
+        self._selected_media: List[dict] = []
+        self._selection_lock = threading.RLock()
+        self._reserved_candidate_ids = set()
+        self._used_asset_ids = set()
+        self.last_selection_stats = {}
         # Bandit tracking
         self._source_usage_count = defaultdict(int)
         self._source_last_used = {}
@@ -113,6 +122,11 @@ class MediaManager:
             if ck in self.search_cache:
                 cp = self.search_cache[ck]
                 if cp and Path(cp).exists():
+                    key = path_identity(cp)
+                    with self._selection_lock:
+                        if key in self._used_asset_ids:
+                            return None
+                        self._used_asset_ids.add(key)
                     return Path(cp)
             return None
 
@@ -303,16 +317,28 @@ class MediaManager:
             source_last_used=self._source_last_used,
             now=now,
             preferred_source=preferred_source,
-            top_k=1,
+            top_k=sum(len(v) for v in source_results.values()),
             target_width=1080,
             target_height=1920,
+            keyword_text=query,
+            previous_media=self._selected_media,
         )
 
         if not best_clips:
             print(f"💡 [Rerank] No eligible candidate clips after reranking for '{query}'.")
             return None
 
-        best_media = best_clips[0]
+        best_media = None
+        with self._selection_lock:
+            for candidate in best_clips:
+                identity = candidate_identity(candidate, candidate.get("_source"))
+                if identity not in self._reserved_candidate_ids:
+                    self._reserved_candidate_ids.add(identity)
+                    best_media = candidate
+                    break
+        if best_media is None:
+            print(f"💡 [Dedup] All {len(best_clips)} ranked candidates were already selected.")
+            return None
         best_src = best_media.get("_source", "Unknown")
         best_score = best_media.get("_score", 0.0)
 
@@ -354,10 +380,36 @@ class MediaManager:
             self._source_last_used[best_src] = now
             cache_key = (query, preferred_source)
             self.search_cache[cache_key] = str(output_path)
-            self._used_media_urls.add(best_media.get("url"))
+            with self._selection_lock:
+                self._used_media_urls.add(best_media.get("url"))
+                self._selected_media.append(best_media)
+                self._used_asset_ids.add(path_identity(output_path))
+                self.last_selection_stats = {
+                    "candidate_count": sum(len(v) for v in source_results.values()),
+                    "unique_candidate_count": len(best_clips),
+                    "duplicates_removed": sum(len(v) for v in source_results.values()) - len(best_clips),
+                    "selected_identity": str(candidate_identity(best_media, best_src)),
+                    "score": best_score,
+                }
             return output_path
 
+        with self._selection_lock:
+            self._reserved_candidate_ids.discard(candidate_identity(best_media, best_src))
         return None
+
+    def reset_media_selection(self) -> None:
+        """Reset per-video selection state (MMR reference set + used URLs).
+
+        Called at the start of each generation so the diversity penalty
+        compares against clips of the current video only, and clips used in a
+        previous video become eligible again (local cache still applies).
+        """
+        with self._selection_lock:
+            self._selected_media = []
+            self._used_media_urls = set()
+            self._reserved_candidate_ids = set()
+            self._used_asset_ids = set()
+            self.last_selection_stats = {}
 
     @staticmethod
     def _compute_quality_score(media: dict) -> float:

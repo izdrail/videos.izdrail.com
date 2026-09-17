@@ -741,7 +741,7 @@ class KeywordExtractor:
                             score + step,
                             seq + [kw],
                             kw,
-                            emb_hist + ([kw_emb] if kw_emb is not None else []),
+                            emb_hist + [kw],
                         )
                     )
 
@@ -764,26 +764,24 @@ class KeywordExtractor:
                 self.add_used_keyword(kw)
         return chosen
 
-    def _unique_against(self, kw: str, emb_history) -> bool:
-        """Read-only uniqueness check against already-used keywords/embeddings
-        plus a local ``emb_history`` (without mutating global state).
-
-        Used by the beam search so partial sequences can be scored without
-        permanently marking keywords as used until a final sequence is chosen.
-        """
+    def _unique_against(self, kw: str, keyword_history) -> bool:
+        """Check exact and semantic uniqueness within a beam without global mutation."""
         if not kw:
             return False
-        if kw in self.used_keywords:
+        normalized = " ".join(kw.casefold().split())
+        if normalized in {" ".join(str(x).casefold().split()) for x in self.used_keywords}:
+            return False
+        if normalized in {" ".join(str(x).casefold().split()) for x in keyword_history}:
             return False
         emb = self._embedding(kw)
         if emb is None:
             return True
-        history = list(self.used_embeddings) + list(emb_history)
-        for used_emb in history:
-            norm = float(np.linalg.norm(emb) * np.linalg.norm(used_emb))
-            if norm == 0.0:
+        for prior in list(self.used_keywords) + list(keyword_history):
+            used_emb = self._embedding(prior)
+            if used_emb is None:
                 continue
-            if float(np.dot(emb, used_emb) / norm) > self.semantic_threshold:
+            norm = float(np.linalg.norm(emb) * np.linalg.norm(used_emb))
+            if norm and float(np.dot(emb, used_emb) / norm) > self.semantic_threshold:
                 return False
         return True
 
