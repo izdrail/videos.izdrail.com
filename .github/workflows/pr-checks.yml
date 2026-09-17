@@ -6,6 +6,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - "tests/test_keyword_selection_overhaul.py tests/test_neuron_keyword_search.py tests/test_ollama_resilience.py tests/test_ollama_script.py tests/test_selection_uniqueness.py"
+          - "tests/test_media_providers.py tests/test_media_scoring.py tests/test_visual_providers.py tests/test_youtube_audio.py"
+          - "tests/test_kokoro_load.py tests/test_mms_romanian.py tests/test_sd_turbo.py tests/test_tier2_features.py"
+          - "tests/test_parallel_pipeline.py tests/test_video_pipeline.py tests/test_video_progress_and_concat.py"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -13,7 +21,7 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: pip install --prefer-binary -r requirements.txt pytest
-      - run: PYTHONPATH=. pytest tests -q
+      - run: PYTHONPATH=. pytest ${{ matrix.group }} -q
 
   container:
     runs-on: ubuntu-latest
