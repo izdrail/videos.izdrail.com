@@ -9,6 +9,7 @@ import io
 import os
 import logging
 from functools import lru_cache
+from core.media.identity import canonical_url, candidate_identity
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
@@ -96,7 +97,7 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _canonical_url(url: Any) -> Optional[str]:
+def _legacy_canonical_url(url: Any) -> Optional[str]:
     """Canonical dedupe key for a media URL (scheme+host+path, lower-cased).
 
     The same clip surfacing on two providers (or twice on one) must not occupy
@@ -407,7 +408,7 @@ def rerank_pooled_candidates(
                 continue
 
             # Canonical-URL dedupe across sources within the pool
-            ckey = _canonical_url(candidate_url)
+            ckey = candidate_identity(candidate, source_name)
             if ckey and ckey in seen_keys:
                 continue
             if ckey:
