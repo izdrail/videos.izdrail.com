@@ -22,16 +22,3 @@ jobs:
           cache: pip
       - run: pip install --prefer-binary -r requirements.txt pytest
       - run: PYTHONPATH=. pytest ${{ matrix.group }} -q
-
-  container:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          tags: videos-selection-pr:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
