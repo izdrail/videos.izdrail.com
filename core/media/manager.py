@@ -235,29 +235,66 @@ class MediaManager:
                 self.search_cache[cache_key] = str(selected_existing)
                 return selected_existing
 
-        # ── Stage 2: search EVERY eligible source in parallel ──
+        # ── Stage 2: search EVERY configured, eligible source in parallel ──
+        # Providers pre-date the unified interface, so image-only sources may
+        # expose search_images/search_photos instead of search_videos. Treat all
+        # three as discovery entry points; otherwise Unsplash was silently skipped.
         def _search_source(source_name: str):
             api = self.apis.get(source_name)
-            if not api or not hasattr(api, "search_videos"):
+            if not api:
+                print(f"⚠️ [MediaSearch] source={source_name} query={query!r} skipped=no_provider")
                 return None
-            # Skip a source only if it genuinely requires a key that is missing.
-            # Key-less open providers (Openverse, Wikimedia, Internet Archive,
-            # YouTube, SearXNG) must never be filtered out here.
             try:
-                requires_key = api.capabilities().get(
+                capabilities = api.capabilities() if hasattr(api, "capabilities") else {}
+                requires_key = capabilities.get(
                     "requires_key", bool(getattr(api, "api_key", None))
                 )
-            except Exception:
+            except Exception as exc:
+                print(
+                    f"⚠️ [MediaSearch] source={source_name} query={query!r} "
+                    f"capabilities_error={type(exc).__name__}: {exc}"
+                )
                 requires_key = bool(getattr(api, "api_key", None))
             if requires_key and not getattr(api, "api_key", None):
+                print(
+                    f"⏭️ [MediaSearch] source={source_name} query={query!r} "
+                    "skipped=missing_api_key"
+                )
                 return None
+
+            search_method = None
+            method_name = None
+            for candidate in ("search_videos", "search_images", "search_photos"):
+                if hasattr(api, candidate):
+                    search_method = getattr(api, candidate)
+                    method_name = candidate
+                    break
+            if not search_method:
+                print(
+                    f"⚠️ [MediaSearch] source={source_name} query={query!r} "
+                    "skipped=no_search_method"
+                )
+                return None
+
+            print(
+                f"🔎 [MediaSearch] source={source_name} query={query!r} "
+                f"method={method_name} status=started"
+            )
             try:
-                raw = api.search_videos(query, per_page=10)
-                if not raw:
-                    return None
+                raw = search_method(query, per_page=10)
+                raw = raw or []
                 filtered = [r for r in raw if r.get("url") not in self._used_media_urls]
-                return filtered if filtered else raw
-            except Exception:
+                usable = filtered if filtered else raw
+                print(
+                    f"📊 [MediaSearch] source={source_name} query={query!r} "
+                    f"status=complete results={len(raw)} unused={len(filtered)}"
+                )
+                return usable or None
+            except Exception as exc:
+                print(
+                    f"❌ [MediaSearch] source={source_name} query={query!r} "
+                    f"status=failed error={type(exc).__name__}: {exc}"
+                )
                 return None
 
         source_results: Dict[str, list] = {}
@@ -275,8 +312,18 @@ class MediaManager:
                     print(
                         f"⏱️ [Bandit] {src} timed out after {source_timeout}s for '{query}'. Skipping."
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(
+                        f"❌ [MediaSearch] source={src} query={query!r} "
+                        f"status=future_failed error={type(exc).__name__}: {exc}"
+                    )
+
+        searched = sorted(source_results)
+        print(
+            f"🧾 [MediaSearch] query={query!r} configured={ordered_sources} "
+            f"sources_with_results={searched} counts="
+            f"{ {s: len(v) for s, v in source_results.items()} }"
+        )
 
         if entity_dict:
             print(
@@ -372,7 +419,12 @@ class MediaManager:
         )
 
         api = self.apis.get(best_src)
-        if api and api.download_video(best_media.get("url"), output_path):
+        downloader = None
+        if api:
+            downloader = getattr(api, "download_video", None) or getattr(
+                api, "download_photo", None
+            )
+        if downloader and downloader(best_media.get("url"), output_path):
             print(f"✅ [Bandit] Downloaded from {best_src} for query: '{query}'")
             self.source_success_counts[best_src] += 1
             self.successful_keywords[query] += 1
