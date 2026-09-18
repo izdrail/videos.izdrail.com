@@ -294,3 +294,74 @@ def test_manager_search_skips_unsupported_type():
     mm.preferred_order = ["Openverse"]
     res = mm.search("cat", MediaType.VIDEO, limit=50, min_results=50)
     assert res == []  # Openverse only serves images here -> skipped for VIDEO
+
+# ---------------------------------------------------------------------------
+# Exhaustive source search and legacy image-only provider adapters
+# ---------------------------------------------------------------------------
+
+
+def test_search_and_download_queries_every_configured_source(tmp_path, monkeypatch, capsys):
+    from core.media.manager import MediaManager
+
+    class FakeConfig:
+        VIDEOS_DIR = tmp_path
+        UNSPLASH_ACCESS_KEY = None
+        AI_MODEL = "test"
+
+    class EmptyProvider:
+        api_key = None
+
+        def capabilities(self):
+            return {"requires_key": False}
+
+        def search_videos(self, query, per_page=10):
+            return []
+
+    class LegacyImageProvider:
+        api_key = "configured"
+
+        def search_photos(self, query, per_page=10):
+            return []
+
+    mm = MediaManager(config=FakeConfig())
+    mm.apis = {"VideoSource": EmptyProvider(), "ImageSource": LegacyImageProvider()}
+    mm.preferred_order = ["VideoSource", "ImageSource"]
+
+    assert mm._search_and_download("robot", None) is None
+    output = capsys.readouterr().out
+    assert "source=VideoSource" in output
+    assert "source=ImageSource" in output
+    assert "method=search_photos" in output
+    assert "configured=['VideoSource', 'ImageSource']" in output
+
+
+def test_legacy_image_source_can_supply_gradient_fallback_asset(tmp_path, monkeypatch):
+    from core.media.manager import MediaManager
+
+    class FakeConfig:
+        VIDEOS_DIR = tmp_path
+        UNSPLASH_ACCESS_KEY = None
+        AI_MODEL = "test"
+
+    class LegacyImageProvider:
+        api_key = "configured"
+
+        def search_photos(self, query, per_page=10):
+            return [{"url": "https://example.test/robot.jpg", "source": "ImageSource", "ext": ".jpg"}]
+
+        def download_photo(self, url, output_path):
+            output_path.write_bytes(b"image")
+            return True
+
+    mm = MediaManager(config=FakeConfig())
+    mm.apis = {"ImageSource": LegacyImageProvider()}
+    mm.preferred_order = ["ImageSource"]
+    monkeypatch.setattr(
+        "core.media.manager.rerank_pooled_candidates",
+        lambda **kwargs: [dict(kwargs["candidates_by_source"]["ImageSource"][0], _source="ImageSource", _score=1.0)],
+    )
+
+    result = mm._search_and_download("robot", None)
+    assert result is not None
+    assert result.suffix == ".jpg"
+    assert result.read_bytes() == b"image"

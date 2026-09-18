@@ -121,3 +121,9 @@ class TestVisualProviderFactory:
     def test_create_mixed(self):
         prov = VisualProviderFactory.create("mixed")
         assert isinstance(prov, MixedProvider)
+
+
+def test_gradient_fallback_enlarges_text_is_scoped_to_missing_visual():
+    source = open("core/video/ffmpeg_generator.py", encoding="utf-8").read()
+    assert "base_font_size = int(base_font_size * 1.35)" in source
+    assert "gradient_fallback=not bool(video_path)" in source
