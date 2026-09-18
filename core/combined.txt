@@ -6371,11 +6371,10 @@ class Config:
 
         # Additional directory paths
         self.VIDEO_OVERLAYS_DIR = self.ROOT_DIR / "video-overlays"
-        self.CIRCLE_OVERLAYS_DIR = self.ROOT_DIR / "circle_overlays"
         self.SD_MODEL_DIR = self.ROOT_DIR / "models/sd-turbo"
 
         # Ensure additional directories exist
-        for d in [self.VIDEO_OVERLAYS_DIR, self.CIRCLE_OVERLAYS_DIR]:
+        for d in [self.VIDEO_OVERLAYS_DIR]:
             d.mkdir(parents=True, exist_ok=True)
 
         # Video configuration

@@ -4,6 +4,7 @@ temp/
 backup_output/
 background_videos/
 background_images/
+circle_overlays/
 background_music/
 voice_samples/
 sd_generated_images/
