@@ -40,7 +40,7 @@ User Text / Topic
       │                                      └─ File cache + availability check + random selection
       │
       └─► [RENDER] FFmpegVideoGenerator
-                   ├─ get_background_video() 4-tier fallback chain
+                   ├─ get_background_video() stock / SD / gradient chain
                    ├─ _create_slide_with_ffmpeg() per-slide FFmpeg graph
                    ├─ ThreadPoolExecutor pools (NLP 20, TTS 4, MEDIA 10, RENDER 4)
                    └─ create_final_video() concat + music mix + thumbnail
@@ -98,7 +98,6 @@ User Text / Topic
 ├── background_images/               # Local fallback images
 ├── background_music/                # .mp3/.wav/.m4a — get_available_music_files()
 ├── voice_samples/<voice>/reference.wav  # XTTS cloning samples
-├── circle_overlays/*.mp4            # PiP / fullscreen fallback overlays (girl-1.mp4 etc.)
 ├── video-overlays/                  # Additional overlays
 ├── intro/intro-tv-noise.mp4         # FIXED intro background (never deleted) — intro slides force this
 ├── temp/                            # All ephemeral: audio_cache/, slide temps, gradients, masks
@@ -132,7 +131,7 @@ User Text / Topic
 
 ### 4.1 `core/config.py` — `Config`
 
-- **Paths created on init:** `VOICE_SAMPLES_DIR`, `VIDEOS_DIR`, `MUSIC_DIR`, `IMAGES_DIR`, `TEMP_DIR`, `OUTPUT_DIR`, `BACKUP_OUTPUT_DIR`, `IMAGE_GENERATION_CACHE_DIR`, `VIDEO_OVERLAYS_DIR`, `CIRCLE_OVERLAYS_DIR`. Alias `BACKGROUND_VIDEOS_DIR = VIDEOS_DIR`. `TEMP_AUDIO_DIR = TEMP_DIR/audio_cache`.
+- **Paths created on init:** `VOICE_SAMPLES_DIR`, `VIDEOS_DIR`, `MUSIC_DIR`, `IMAGES_DIR`, `TEMP_DIR`, `OUTPUT_DIR`, `BACKUP_OUTPUT_DIR`, `IMAGE_GENERATION_CACHE_DIR`, `VIDEO_OVERLAYS_DIR`. Alias `BACKGROUND_VIDEOS_DIR = VIDEOS_DIR`. `TEMP_AUDIO_DIR = TEMP_DIR/audio_cache`.
 - **Device:** `DEVICE="cpu"` (override via `utils/gpu.py` detection; Dockerfile reserves GPU).
 - **Video defaults:** `VIDEO_WIDTH=1080, VIDEO_HEIGHT=1920, VIDEO_SIZE=(1080,1920), FPS=30, VIDEO_PRESET="ultrafast", VIDEO_CRF=28, VIDEO_CODEC="libx264", AUDIO_CODEC="aac"`. `MIXED_MODE_SD_RATIO=0.2`, `SENTENCE_MERGE_ENABLED=False`, `MAX_PARALLEL_SLIDES=4`, `MIN_IMAGE_DURATION=10.0`.
 - **Worker pools:** `WORKER_POOL_NLP=20, WORKER_POOL_TTS=4, WORKER_POOL_MEDIA=10, WORKER_POOL_RENDERING=4`.
@@ -205,24 +204,24 @@ User Text / Topic
   - `LARAVEL_BG_GRADIENT (#0f172a→#2a1030)`, `LARAVEL_ACCENT_GRADIENT (#7c3aed→#ec4899)`, `create_gradient_image(size, colors, direction)` Pillow composite.
   - `split_into_sentences(text)` regex paragraphs + protected `Dr./Mr./Mrs./Ms./X.` placeholders + `[.!?。！？]` split, ensures terminal punctuation, logs counts.
   - `_find_logo()`, `_clean_text()` strips `[\d+ levels](…)` tags, `_discover_fonts()`, `get_available_music_files()` / `get_music_by_name()`.
-  - **`get_background_video(keyword, sentence, language, preferred_source, use_snn, theme, entity, script_id, sentence_idx, candidate_keywords)` 4-tier fallback:** (1) enriched keyword via `sanitize+enrich_keyword_context` → `media_manager.get_random_media(return_keyword=True)`; (2) availability fallback: check `candidate_keywords[:3]` via `is_keyword_available()` then generic `generate_fallback_keywords()`; (3) `SDTurboGenerator.generate_image()` if `sd_manager`; (4) `get_circle_overlay_video()`; else gradient. Every decision → `DB.log_keyword_selection()`.
+  - **`get_background_video(keyword, sentence, language, preferred_source, use_snn, theme, entity, script_id, sentence_idx, candidate_keywords)` fallback:** (1) enriched keyword via `sanitize+enrich_keyword_context` → `media_manager.get_random_media(return_keyword=True)`; (2) availability fallback: check `candidate_keywords[:3]` via `is_keyword_available()` then generic `generate_fallback_keywords()`; (3) `SDTurboGenerator.generate_image()` if `sd_manager`; else an explicit branded gradient. Every decision → `DB.log_keyword_selection()`.
   - Text PNGs: `_create_text_overlay_png()` (wraps 35 cols, font scaling, gradient text via mask, stroke shadow, bottom_margin), `_create_intro_text_png()` / `_create_cta_text_png()` similarly with LARAVEL gradient.
   - `_generate_overlay_mask(shape, diameter)` Pillow high-res 2× then LANCZOS downscale: Circle/Square/Rounded Rectangle/Star(5-point polygon).
   - **`_create_slide_with_ffmpeg(sentence, audio_path, video_path, output_path, slide_num, is_intro, is_cta, circle_video, circle_config, language, hide_text, export_fps, overlay_shape, video_width/height)`** — Pre-flight validates audio (silent 1.5s fallback if missing/empty), forces `INTRO_VIDEO_PATH=intro/intro-tv-noise.mp4` for intro, validates `video_path`/`circle_video`. Builds FFmpeg filter graph:
     - Split Screen (if `overlay_shape=="Split Screen"` and circle exists): top `scale+ crop` background + bottom circle `scale+crop`, `vstack`, `fps`, `trim=duration`, `setpts`.
-    - Normal: image (`-loop 1`) vs video (`-stream_loop -1`) → `scale:force_original_aspect_ratio=decrease, pad`, `fps`, `trim`, `setpts`; fallback to circle-as-fullscreen or branded gradient PNG.
+    - Normal: image (`-loop 1`) vs video (`-stream_loop -1`) → `scale:force_original_aspect_ratio=decrease, pad`, `fps`, `trim`, `setpts`; fallback to a branded gradient PNG.
     - Dimming: `format=rgba,colorchannelmixer=aa=0.6`.
     - Text overlay: `-loop 1` PNG → `overlay=0:0`.
     - Logo: `scale=150:150` → `overlay=position`.
-    - Circle PiP: mask PNG → `alphaextract` → `alphamerge` → `overlay=position` (`top-left|top-right|bottom-left|bottom-right|center` diameter 300 default).
+    - Upload-only Circle PiP: mask PNG → `alphaextract` → `alphamerge` → `overlay=position` (`top-left|top-right|bottom-left|bottom-right|center` diameter 300 default).
     - Audio: `-map [final]:v -map audio_idx:a -c:v libx264 -preset <preset> -crf <crf> -pix_fmt yuv420p -c:a aac -b:a 192k -r fps -shortest -movflags +faststart`. Timeout 600s, captures stderr.
-  - **`create_final_video(sentences, audio_paths, keywords, intro_audio, cta_audio, music_path, music_volume_db, circle_video, circle_config, circle_selection, language, preferred_media_source, selected_background_video, pre_selected_videos, hide_text, export_fps, overlay_shape, intro_text, use_snn, enable_crossfade, crossfade_duration, progress_callback, theme, entity, script_id, candidate_map)`**:
+  - **`create_final_video(sentences, audio_paths, keywords, intro_audio, cta_audio, music_path, music_volume_db, circle_video, circle_config, language, preferred_media_source, selected_background_video, pre_selected_videos, hide_text, export_fps, overlay_shape, intro_text, use_snn, enable_crossfade, crossfade_duration, progress_callback, theme, entity, script_id, candidate_map)`**:
     - Stage 1: Assemble `slides_data` (content + intro inserted at random idx 2-5 + CTA appended).
     - Stage 2: Parallel fetch via `VisualProviderFactory` + `ThreadPoolExecutor(WORKER_POOL_MEDIA)` respecting `pre_selected_videos["__gradient__"]` and `selected_background_video`; emergency fallback `["cityscape","abstract","office"]`.
     - Stage 3: Parallel render via `ThreadPoolExecutor(WORKER_POOL_RENDERING)` calling `_create_slide_with_ffmpeg` per slide; progress callbacks `fetching (completed/total*2)` + `rendering`.
     - Stage 4: Concatenate slides via `concat_videos` (or FFmpeg complex with crossfade), mix background music (`music_volume_db -20`, ducking, fade 3s), generate thumbnail, write `output/video_<stamp>_<lang>/`, log to `video_logs`.
 
-- **Gradio UI (bottom of main.py):** `gr.Blocks` with inputs: text/topic, language dropdown, voice selector (from `VOICE_SAMPLES_DIR`), random voice toggle, speed/stress sliders, visual source `stock|ai|mixed`, preferred media source, theme/entity fields, background video picker, circle overlay shape `Circle|Square|Rectangle|Star|Split Screen`, hide text, aspect ratio `ASPECT_RATIOS`, quality preset `QUALITY_PRESETS`, music file + volume, intro/CTA toggles, `use_snn`, crossfade. Live `progress_callback` bar, video + audio preview, download, viral description textbox. Launch `app.launch(server_name="0.0.0.0", server_port=1603, share=False)`.
+- **Gradio UI (bottom of main.py):** `gr.Blocks` with inputs: text/topic, language dropdown, voice selector (from `VOICE_SAMPLES_DIR`), random voice toggle, speed/stress sliders, visual source `stock|ai|mixed`, preferred media source, theme/entity fields, background video picker, upload-only circle overlay and shape `Circle|Square|Rectangle|Star|Split Screen`, hide text, aspect ratio `ASPECT_RATIOS`, quality preset `QUALITY_PRESETS`, music file + volume, intro/CTA toggles, `use_snn`, crossfade. Live `progress_callback` bar, video + audio preview, download, viral description textbox. Launch `app.launch(server_name="0.0.0.0", server_port=1603, share=False)`.
 
 ---
 

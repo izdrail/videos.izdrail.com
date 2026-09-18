@@ -220,8 +220,8 @@ class FFmpegVideoGenerator:
         1. Video from keyword/media API (checking provided keyword only).
         2. Availability fallback: next-ranked candidate keyword that actually has
            stock results, then the generic ``generate_fallback_keywords`` map.
-        3. Random local video file.
-        4. Circle overlay video as full-screen fallback.
+        3. SD-generated image when configured.
+        4. Branded gradient when no visual is available.
 
         The search query is disambiguated with sentence context (polysemy) and,
         if ``entity`` is supplied, enriched with that entity. Every finalized
@@ -340,19 +340,6 @@ class FFmpegVideoGenerator:
                     return sd_img
             except Exception as e:
                 print(f"⚠️ [SD] Generation failed: {e}")
-        circle_video = self.get_circle_overlay_video()
-        if circle_video:
-            print(
-                f"🎨 [Fallback] Using circle overlay video as background: {circle_video.name}"
-            )
-            DB.log_keyword_selection(
-                script_id,
-                sentence_idx,
-                keyword,
-                context_preview=sentence or "",
-                was_used=False,
-            )
-            return circle_video
         print("💡 [Fallback] No video found; gradient will be used.")
         DB.log_keyword_selection(
             script_id,
@@ -362,13 +349,6 @@ class FFmpegVideoGenerator:
             was_used=False,
         )
         return None
-
-    def get_circle_overlay_video(self) -> Optional[Path]:
-        videos = []
-        for ext in ["*.mp4", "*.mov", "*.avi", "*.webm"]:
-            if self.config.CIRCLE_OVERLAYS_DIR.exists():
-                videos.extend(self.config.CIRCLE_OVERLAYS_DIR.glob(ext))
-        return random.choice(videos) if videos else None
 
     def _create_text_overlay_png(
         self,
@@ -802,13 +782,6 @@ class FFmpegVideoGenerator:
             filter_parts = []
             input_count = 0
 
-            if overlay_shape == "Split Screen" and (
-                not circle_video or not Path(circle_video).exists()
-            ):
-                auto = self.get_circle_overlay_video()
-                if auto and auto.exists():
-                    circle_video = auto
-                    print(f"🔀 [SplitScreen] Auto-selected circle video: {auto.name}")
             is_split_screen = (
                 overlay_shape == "Split Screen"
                 and circle_video
@@ -872,38 +845,21 @@ class FFmpegVideoGenerator:
                 )
                 input_count = 1
             else:
-                # No video found – try using circle overlay as full-screen background
-                circle_bg = self.get_circle_overlay_video()
-                if circle_bg and circle_bg.exists():
-                    print(
-                        f"🔁 [FFmpeg] Slide {slide_num}: Using circle overlay video as full background"
-                    )
-                    inputs.extend(["-stream_loop", "-1", "-i", str(circle_bg)])
-                    filter_parts.append(
-                        f"[0:v]scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
-                        f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,"
-                        f"setsar=1,"
-                        f"fps={export_fps},"
-                        f"trim=duration={duration},"
-                        f"setpts=PTS-STARTPTS[bg_scaled]"
-                    )
-                    input_count = 1
-                else:
-                    print(
-                        f"🎨 [FFmpeg] Slide {slide_num}: Using branded gradient background (fallback)"
-                    )
-                    grad_path = (
-                        self.config.TEMP_DIR
-                        / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
-                    )
-                    create_gradient_image((vw, vh), LARAVEL_BG_GRADIENT, "135deg").save(
-                        str(grad_path)
-                    )
-                    inputs.extend(["-loop", "1", "-i", str(grad_path)])
-                    filter_parts.append(
-                        f"[0:v]fps={export_fps},trim=duration={duration}[bg_scaled]"
-                    )
-                    input_count = 1
+                print(
+                    f"🎨 [FFmpeg] Slide {slide_num}: No visual available; using branded gradient background"
+                )
+                grad_path = (
+                    self.config.TEMP_DIR
+                    / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
+                )
+                create_gradient_image((vw, vh), LARAVEL_BG_GRADIENT, "135deg").save(
+                    str(grad_path)
+                )
+                inputs.extend(["-loop", "1", "-i", str(grad_path)])
+                filter_parts.append(
+                    f"[0:v]fps={export_fps},trim=duration={duration}[bg_scaled]"
+                )
+                input_count = 1
 
             filter_parts.append(
                 "[bg_scaled]format=rgba,colorchannelmixer=aa=0.6[dimmed]"
@@ -1074,7 +1030,6 @@ class FFmpegVideoGenerator:
         music_volume_db: int = -20,
         circle_video: Optional[Path] = None,
         circle_config: Optional[Dict] = None,
-        circle_selection: str = "Random",
         language: str = "en",
         preferred_media_source: Optional[str] = None,
         selected_background_video: Optional[Path] = None,
@@ -1583,7 +1538,6 @@ class TextToVideoGenerator:
         self.yt_audio_library = YouTubeAudioLibraryAPI(self.config)
         self.available_voices = self._get_available_voices()
         self.available_music = self._get_available_music()
-        self.available_circles = self._get_available_circles()
         self.available_languages = list(SUPPORTED_LANGUAGES.keys())
         self.available_models = self.keyword_extractor.get_available_models()
         self.available_background_videos = self._get_available_background_videos()
@@ -1680,13 +1634,6 @@ class TextToVideoGenerator:
         music_files = self.video_generator.get_available_music_files()
         return ["Random", "Auto (YouTube Library)"] + [m["name"] for m in music_files]
 
-    def _get_available_circles(self) -> List[str]:
-        circles = []
-        for ext in ["*.mp4", "*.mov", "*.avi", "*.webm"]:
-            if self.config.CIRCLE_OVERLAYS_DIR.exists():
-                circles.extend(list(self.config.CIRCLE_OVERLAYS_DIR.glob(ext)))
-        return ["Random"] + [v.name for v in sorted(circles)]
-
     def _get_available_background_videos(self) -> List[str]:
         videos = []
         for ext in ["*.mp4", "*.mov", "*.avi", "*.webm"]:
@@ -1748,7 +1695,6 @@ class TextToVideoGenerator:
         circle_diameter: int = 300,
         circle_position: str = "top-right",
         circle_border_width: int = 5,
-        circle_selection: str = "Random",
         circle_upload_path: Optional[str] = None,
         hide_text: bool = False,
         export_fps: int = 30,
@@ -1795,7 +1741,6 @@ class TextToVideoGenerator:
             "circle_diameter": circle_diameter,
             "circle_position": circle_position,
             "circle_border_width": circle_border_width,
-            "circle_selection": circle_selection,
             "circle_upload_path": str(circle_upload_path)
             if circle_upload_path
             else None,
@@ -2289,26 +2234,15 @@ class TextToVideoGenerator:
                 circle_video_path = None
                 if enable_circle_overlay:
                     if circle_upload_path and Path(circle_upload_path).exists():
-                        # Move uploaded file to session dir just in case
                         uploaded_path = Path(circle_upload_path)
                         circle_video_path = (
                             session_dir / f"uploaded_circle_{uploaded_path.name}"
                         )
                         shutil.copy(circle_upload_path, circle_video_path)
-                    elif circle_selection and circle_selection != "Random":
-                        circle_video_path = (
-                            self.config.CIRCLE_OVERLAYS_DIR / circle_selection
-                        )
-                        if not circle_video_path.exists():
-                            print(
-                                f"[Circle] Selected overlay {circle_selection} not found, falling back to random"
-                            )
-                            circle_video_path = (
-                                self.video_generator.get_circle_overlay_video()
-                            )
                     else:
-                        circle_video_path = (
-                            self.video_generator.get_circle_overlay_video()
+                        print(
+                            "⚠️ [Circle] Overlay enabled without an uploaded video; "
+                            "continuing without the overlay."
                         )
 
                 # Apply aspect ratio and quality to generator
@@ -2333,7 +2267,6 @@ class TextToVideoGenerator:
                     music_volume_db=music_volume_db,
                     circle_video=circle_video_path,
                     circle_config=circle_config,
-                    circle_selection=circle_selection,
                     language=language,
                     preferred_media_source=preferred_media_source,
                     selected_background_video=selected_bg_video_path,
@@ -2519,7 +2452,6 @@ class TextToVideoGenerator:
                 "random_voices": use_random_voices,
                 "circle_overlay_enabled": enable_circle_overlay,
                 "circle_position": circle_position if enable_circle_overlay else None,
-                "circle_selection": circle_selection if enable_circle_overlay else None,
                 "hide_text_overlay": hide_text,
             }
 
@@ -2725,12 +2657,6 @@ def setup_ui(generator: TextToVideoGenerator):
                             with gr.TabItem("⭕ Overlays"):
                                 enable_circle = gr.Checkbox(
                                     label="Enable Picture-in-Picture Circle", value=False
-                                )
-                                circle_selection = gr.Dropdown(
-                                    label="Circle Content (Local Folder)",
-                                    choices=generator.available_circles,
-                                    value="Random",
-                                    info="Select a video from the local 'circle_overlays' folder",
                                 )
                                 circle_upload = gr.File(
                                     label="📤 Upload Custom Circle Video", file_types=["video"]
@@ -2978,11 +2904,11 @@ def setup_ui(generator: TextToVideoGenerator):
                     return "Canceled" if ok else "Cannot cancel"
                 cancel_btn.click(fn=_cancel, inputs=[job_id_dropdown], outputs=[job_status_msg])
 
-        def _submit_job_wrapper(text, language, speaker, use_random, visual_source, media_source, keyword, selected_background_video_name, enable_music, music_select, music_vol, enable_circle, circle_sel, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val, enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, audio_only_val, normalize_audio_val, aspect_ratio_val, quality_val, enable_crossfade_val, pre_selected_videos, js_json, override_text, slide_data, entity):
+        def _submit_job_wrapper(text, language, speaker, use_random, visual_source, media_source, keyword, selected_background_video_name, enable_music, music_select, music_vol, enable_circle, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val, enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, audio_only_val, normalize_audio_val, aspect_ratio_val, quality_val, enable_crossfade_val, pre_selected_videos, js_json, override_text, slide_data, entity):
             if not text or not text.strip():
                 return "❌ Enter text first."
             # build params dict matching generate_video signature
-            params = dict(text=text, language=language, speaker_id=speaker, pexels_keyword=keyword.strip() if keyword else None, preferred_media_source=media_source, visual_source=visual_source, selected_background_video_name=selected_background_video_name, pre_selected_videos=pre_selected_videos, enable_background_music=enable_music, music_selection=music_select, music_volume_db=music_vol, add_intro_slide=enable_intro, add_call_to_action=enable_cta, use_random_voices=use_random, enable_circle_overlay=enable_circle, circle_diameter=circle_diam, circle_position=circle_pos, circle_border_width=circle_border, circle_selection=circle_sel, circle_upload_path=circle_upload_path, hide_text=hide_text, export_fps=export_fps_val, overlay_shape=overlay_shape_val, ai_model=ai_model_val, ai_api_url=ai_api_url_val, stress_level=stress_level_val, use_snn=use_snn_val, audio_only=audio_only_val, normalize_audio=normalize_audio_val, aspect_ratio=aspect_ratio_val, quality=quality_val, enable_crossfade=enable_crossfade_val, entity=entity)
+            params = dict(text=text, language=language, speaker_id=speaker, pexels_keyword=keyword.strip() if keyword else None, preferred_media_source=media_source, visual_source=visual_source, selected_background_video_name=selected_background_video_name, pre_selected_videos=pre_selected_videos, enable_background_music=enable_music, music_selection=music_select, music_volume_db=music_vol, add_intro_slide=enable_intro, add_call_to_action=enable_cta, use_random_voices=use_random, enable_circle_overlay=enable_circle, circle_diameter=circle_diam, circle_position=circle_pos, circle_border_width=circle_border, circle_upload_path=circle_upload_path, hide_text=hide_text, export_fps=export_fps_val, overlay_shape=overlay_shape_val, ai_model=ai_model_val, ai_api_url=ai_api_url_val, stress_level=stress_level_val, use_snn=use_snn_val, audio_only=audio_only_val, normalize_audio=normalize_audio_val, aspect_ratio=aspect_ratio_val, quality=quality_val, enable_crossfade=enable_crossfade_val, entity=entity)
             # merge visual selections same as generate_wrapper does
             import json as _json
             final_pre = dict(pre_selected_videos) if isinstance(pre_selected_videos, dict) else {}
@@ -3037,7 +2963,7 @@ def setup_ui(generator: TextToVideoGenerator):
         # hook submit button to job queue (keep original generate_wrapper for direct preview)
         submit_job_btn = gr.Button("📋 Submit as Background Job", variant="secondary")
         job_submit_status = gr.Markdown("")
-        submit_job_btn.click(fn=_submit_job_wrapper, inputs=[text_input, language_dropdown, speaker_dropdown, use_random_voices, visual_source_radio, media_source_dropdown, pexels_keyword, background_video_dropdown, enable_music, music_dropdown, music_volume, enable_circle, circle_selection, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape, enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level, use_snn_checkbox, audio_only_checkbox, normalize_audio_checkbox, aspect_ratio_dropdown, quality_dropdown, enable_crossfade_checkbox, pre_selected_videos_state, js_selections, custom_selections_input, preview_data_state, entity_input], outputs=[job_submit_status])
+        submit_job_btn.click(fn=_submit_job_wrapper, inputs=[text_input, language_dropdown, speaker_dropdown, use_random_voices, visual_source_radio, media_source_dropdown, pexels_keyword, background_video_dropdown, enable_music, music_dropdown, music_volume, enable_circle, circle_upload, circle_diameter, circle_border_width, circle_position, overlay_shape, enable_intro, enable_cta, hide_text, export_fps, ai_model_dropdown, ai_api_url, stress_level, use_snn_checkbox, audio_only_checkbox, normalize_audio_checkbox, aspect_ratio_dropdown, quality_dropdown, enable_crossfade_checkbox, pre_selected_videos_state, js_selections, custom_selections_input, preview_data_state, entity_input], outputs=[job_submit_status])
 
         def generate_wrapper(
             text,
@@ -3052,7 +2978,6 @@ def setup_ui(generator: TextToVideoGenerator):
             music_select,
             music_vol,
             enable_circle,
-            circle_sel,
             circle_upload_path,
             circle_diam,
             circle_border,
@@ -3221,7 +3146,6 @@ def setup_ui(generator: TextToVideoGenerator):
                 circle_diameter=circle_diam,
                 circle_position=circle_pos,
                 circle_border_width=circle_border,
-                circle_selection=circle_sel,
                 circle_upload_path=final_circle_path,
                 hide_text=hide_text,
                 export_fps=export_fps_val,
@@ -3380,7 +3304,6 @@ def setup_ui(generator: TextToVideoGenerator):
                 music_dropdown,
                 music_volume,
                 enable_circle,
-                circle_selection,
                 circle_upload,
                 circle_diameter,
                 circle_border_width,
@@ -3943,7 +3866,7 @@ if __name__ == "__main__":
     print("  ✓ Aspect ratio: 9:16, 16:9, 1:1, 4:5")
     print("  ✓ Quality presets: Low/Medium/High/Ultra")
     print("  ✓ Crossfade transitions between slides")
-    print("  ✓ Circle overlay videos (PIP style)")
+    print("  ✓ Upload-only circle overlay videos (PIP style)")
     print("  ✓ FFmpeg native processing (5-10x faster)")
     print("  ✓ SQLite caching (TTS + videos)")
     print("  ✓ Parallel slide generation")
@@ -3982,14 +3905,13 @@ if __name__ == "__main__":
         print("\n📊 RESOURCES:")
         print(f"  🗣️  Voices: {len(generator.available_voices)}")
         print(f"  🎵 Music tracks: {len(generator.available_music) - 1}")
-        print(f"  ⭕ Circle overlays: {generator.available_circles[0]}")
 
         print("\n💡 SETUP CHECKLIST:")
         print("  1. Set PEXELS_API_KEY in .env file")
         print("  2. Set PIXABAY_API_KEY in .env file")
         print("  3. Set GIPHY_API_KEY in .env file")
         print("  4. Run: ollama serve (for keyword extraction)")
-        print("  5. Add circle overlay videos to circle_overlays/ folder")
+        print("  5. Upload a video in the Overlays tab to use Picture-in-Picture")
         print("  6. Add background music to background_music/ folder")
         print("  7. Add logo image to background_images/ folder")
 
