@@ -22,26 +22,9 @@ class MixedProvider(VisualProvider):
         self._counter = 0
 
     def get_visual(self, context: Dict[str, Any], **kwargs) -> VisualAsset:
-        self._counter += 1
-
-        # Deterministic alternation if ratio is 0.5, else random based on ratio
-        if self.ratio == 0.5:
-            use_ai = (self._counter % 2 == 0)
-        else:
-            use_ai = (random.random() < self.ratio)
-
-        if use_ai:
-            asset = self.ai_provider.get_visual(context, **kwargs)
-            # If AI provider fails / falls back to gradient, try stock provider
-            if asset.is_gradient() and self.stock_provider:
-                stock_asset = self.stock_provider.get_visual(context, **kwargs)
-                if not stock_asset.is_gradient():
-                    return stock_asset
-            return asset
-        else:
-            asset = self.stock_provider.get_visual(context, **kwargs)
-            if asset.is_gradient() and self.ai_provider:
-                ai_asset = self.ai_provider.get_visual(context, **kwargs)
-                if not ai_asset.is_gradient():
-                    return ai_asset
-            return asset
+        # Legacy callers also obey video-first rather than alternating away
+        # from available footage. Stock provider normally owns the AI fallback.
+        try:
+            return self.stock_provider.get_visual(context, **kwargs)
+        except RuntimeError:
+            return self.ai_provider.get_visual(context, **kwargs)

@@ -201,7 +201,7 @@ class TextToVideoGenerator:
         for ext in ["*.mp4", "*.mov", "*.avi", "*.webm"]:
             if self.config.BACKGROUND_VIDEOS_DIR.exists():
                 videos.extend(list(self.config.BACKGROUND_VIDEOS_DIR.glob(ext)))
-        return ["Auto-select (Pexels/Giphy/Local)", "Branded Gradient"] + [
+        return ["Auto-select (Pexels/Giphy/Local)"] + [
             v.name for v in sorted(videos)
         ]
 
@@ -715,8 +715,8 @@ class TextToVideoGenerator:
                         f"[Debug] Confirmed background video exists: {selected_bg_video_path}"
                     )
             elif selected_background_video_name == "Branded Gradient":
-                print("[Debug] Using Branded Gradient background")
-                selected_bg_video_path = None  # This will trigger the gradient background in _create_slide_with_ffmpeg
+                print("[Debug] Legacy gradient choice replaced by automatic media selection")
+                selected_bg_video_path = None
             else:
                 print("[Debug] Auto-select enabled (default behavior)")
 
@@ -1141,10 +1141,10 @@ def setup_ui(generator: TextToVideoGenerator):
 
                             with gr.TabItem("🎥 Media"):
                                 visual_source_radio = gr.Radio(
-                                    choices=["Stock Media", "AI Generated Images", "Mixed"],
+                                    choices=["Stock Media"],
                                     value="Stock Media",
                                     label="🖼️ Visual Source",
-                                    info="Choose background source for scenes: Stock Media, AI Images (SD-Turbo), or Mixed",
+                                    info="Video first; missing footage uses an AI-generated image (SD-Turbo).",
                                 )
                                 media_source_dropdown = gr.Dropdown(
                                     label="🎞️ Preferred Media Source",
@@ -1365,7 +1365,7 @@ def setup_ui(generator: TextToVideoGenerator):
                                     placeholder=(
                                         "Format: slide_num:action, one per line\n\n"
                                         "Examples:\n"
-                                        "  1:gradient\n"
+                                        "  1:/path/to/video.mp4\n"
                                         "  3:skip\n"
                                         "  5:/path/to/video.mp4\n\n"
                                         "Leave empty to use suggested videos."
@@ -1503,7 +1503,7 @@ def setup_ui(generator: TextToVideoGenerator):
                     try: s_num=int(parts[0].strip())
                     except: continue
                     act=parts[1].strip().lower()
-                    if act=="gradient": final_pre[s_num]="__gradient__"
+                    if act=="gradient": final_pre.pop(s_num,None)
                     elif act=="skip": final_pre.pop(s_num,None)
                     elif act.startswith("/") or act.startswith("."):
                         from pathlib import Path as _P
@@ -1660,7 +1660,7 @@ def setup_ui(generator: TextToVideoGenerator):
                         continue
                     action = parts[1].strip().lower()
                     if action == "gradient":
-                        final_pre_selected[s_num] = "__gradient__"
+                        final_pre_selected.pop(s_num, None)
                     elif action == "skip":
                         final_pre_selected.pop(s_num, None)
                     elif action.startswith("/") or action.startswith("."):
@@ -1671,10 +1671,9 @@ def setup_ui(generator: TextToVideoGenerator):
                             print(f"⚠️ [Generate] Override path not found: {action}")
 
             if final_pre_selected:
-                gc = sum(1 for v in final_pre_selected.values() if v == "__gradient__")
-                vc = len(final_pre_selected) - gc
+                vc = len(final_pre_selected)
                 print(
-                    f"🎯 [Generate] Using {vc} custom video(s) + {gc} gradient(s) from visual selections."
+                    f"🎯 [Generate] Using {vc} custom visual(s); other slides use video-first selection."
                 )
 
             # Gradio 3/4 compatibility for file upload
@@ -2224,7 +2223,7 @@ def setup_ui(generator: TextToVideoGenerator):
                     action = parts[1].strip().lower()
 
                     if action == "gradient":
-                        pre_selected[s_num] = "__gradient__"
+                        pre_selected.pop(s_num, None)
                     elif action == "skip":
                         if s_num in pre_selected:
                             DB.log_clip_performance(
@@ -2249,12 +2248,8 @@ def setup_ui(generator: TextToVideoGenerator):
                             print(f"⚠️ Override: path not found: {action}")
 
             count = len(pre_selected)
-            gradient_count = len(
-                [v for v in pre_selected.values() if v == "__gradient__"]
-            )
-            video_count = count - gradient_count
-            auto_count = total - video_count - gradient_count
-            msg = f"✅ {video_count} custom video(s), {gradient_count} gradient(s). {auto_count} slide(s) will auto-select during generation."
+            auto_count = total - count
+            msg = f"✅ {count} custom visual(s). {auto_count} slide(s) use video-first selection with AI image fallback."
             return pre_selected, msg
 
         apply_btn.click(

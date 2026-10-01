@@ -12,8 +12,7 @@ from core.media.identity import unique_slide_assets
 from core.media.manager import MediaManager
 from core.nlp.keyword_extractor import KeywordExtractor
 from core.utils.video import get_video_duration, validate_background_asset, validate_slide
-from core.visual import VisualProviderFactory
-LARAVEL_BG_GRADIENT = ("#0f172a", "#2a1030")
+from core.visual import VisualProviderFactory, AIImageProvider
 LARAVEL_ACCENT_GRADIENT = ("#7c3aed", "#ec4899")
 
 def create_gradient_image(
@@ -58,7 +57,7 @@ class FFmpegVideoGenerator:
         self.keyword_extractor = keyword_extractor or KeywordExtractor()
         self.logo_path = self._find_logo()
         self.sd_manager = None
-        if SD_AVAILABLE:
+        if SD_AVAILABLE and getattr(config, "IMAGE_GENERATION_ENABLED", True):
             try:
                 self.sd_manager = SDTurboGenerator(config=self.config)
                 print("[SD-Turbo] Enabled")
@@ -145,8 +144,7 @@ class FFmpegVideoGenerator:
         1. Video from keyword/media API (checking provided keyword only).
         2. Availability fallback: next-ranked candidate keyword that actually has
            stock results, then the generic ``generate_fallback_keywords`` map.
-        3. SD-generated image when configured.
-        4. Branded gradient when no visual is available.
+        Missing stock visuals are resolved by the AI provider or render boundary.
 
         The search query is disambiguated with sentence context (polysemy) and,
         if ``entity`` is supplied, enriched with that entity. Every finalized
@@ -167,7 +165,7 @@ class FFmpegVideoGenerator:
                 search_keywords.append(sanitized)
 
         if not search_keywords:
-            print("💡 [Fallback] No keyword available; gradient will be used.")
+            print("💡 [Fallback] No keyword available; AI image generation will be required.")
             DB.log_keyword_selection(
                 script_id,
                 sentence_idx,
@@ -185,6 +183,7 @@ class FFmpegVideoGenerator:
             return_keyword=True,
             theme=theme,
             entity=entity,
+            videos_only=True,
         )
 
         # Availability fallback: if the chosen keyword yields no footage, try the
@@ -205,6 +204,7 @@ class FFmpegVideoGenerator:
                         return_keyword=True,
                         theme=theme,
                         entity=entity,
+                        videos_only=True,
                     )
                     if v:
                         video, used_kw = v, uk
@@ -227,6 +227,7 @@ class FFmpegVideoGenerator:
                         return_keyword=True,
                         theme=theme,
                         entity=entity,
+                        videos_only=True,
                     )
                     if v:
                         video, used_kw = v, uk
@@ -243,37 +244,23 @@ class FFmpegVideoGenerator:
             )
             return video
 
-        if self.sd_manager:
-            try:
-                sd_prompt = sentence or keyword or "abstract cinematic background"
-                sd_img = self.sd_manager.generate_image(
-                    sd_prompt,
-                    keyword=keyword,
-                    size=(self.video_width, self.video_height),
-                )
-                if sd_img and sd_img.exists():
-                    print(
-                        f"🎨 [SD] Generated fallback image: {sd_img.name} for '{keyword}'"
-                    )
-                    DB.log_keyword_selection(
-                        script_id,
-                        sentence_idx,
-                        keyword,
-                        context_preview=sentence or "",
-                        was_used=False,
-                    )
-                    return sd_img
-            except Exception as e:
-                print(f"⚠️ [SD] Generation failed: {e}")
-        print("💡 [Fallback] No video found; gradient will be used.")
         DB.log_keyword_selection(
-            script_id,
-            sentence_idx,
-            keyword,
-            context_preview=sentence or "",
-            was_used=False,
+            script_id, sentence_idx, keyword,
+            context_preview=sentence or "", was_used=False,
         )
         return None
+
+    def _generate_background_image(self, sentence, slide_num, target_size):
+        """Use the existing SD-Turbo implementation, never a gradient."""
+        asset = AIImageProvider(self.sd_manager).get_visual(
+            {"sentence": sentence, "sentence_idx": slide_num},
+            target_size=target_size,
+        )
+        path = asset.get_path_obj()
+        valid, reason = validate_background_asset(path)
+        if not valid:
+            raise RuntimeError(f"Generated background is invalid: {reason}")
+        return path
 
     def _create_text_overlay_png(
         self,
@@ -281,16 +268,12 @@ class FFmpegVideoGenerator:
         output_path: Path,
         vw: Optional[int] = None,
         vh: Optional[int] = None,
-        gradient_fallback: bool = False,
     ) -> Path:
         text = self._clean_text(text)
         vw = vw or self.video_width
         vh = vh or self.video_height
         img_size = (vw, vh)
         base_font_size = self.config.TEXT_SIZE_CONFIG["font_size"]
-        if gradient_fallback:
-            base_font_size = int(base_font_size * 1.35)
-            print(f"🔠 [Fallback] Enlarging text overlay for gradient-only slide ({base_font_size}px)")
         if len(text) > 60:
             font_size = max(30, int(base_font_size * (1.0 - (len(text) - 60) / 200)))
         else:
@@ -306,7 +289,7 @@ class FFmpegVideoGenerator:
             font = ImageFont.load_default()
 
         # 2. Wrap text and calculate bounding box
-        wrapped_text = textwrap.fill(text, width=28 if gradient_fallback else 35)
+        wrapped_text = textwrap.fill(text, width=35)
         # Create a temp image to calculate bbox
         temp_draw = ImageDraw.Draw(Image.new("L", (1, 1)))
         bbox = temp_draw.textbbox((0, 0), wrapped_text, font=font)
@@ -671,9 +654,12 @@ class FFmpegVideoGenerator:
                 valid_bg, bg_reason = validate_background_asset(video_path)
                 if not valid_bg:
                     print(
-                        f"⚠️ [FFmpeg] Slide {slide_num}: Background video validation failed ({bg_reason}) for path: '{video_path}'. Falling back to gradient background."
+                        f"⚠️ [FFmpeg] Slide {slide_num}: Background video validation failed ({bg_reason}) for path: '{video_path}'. Generating an AI background image."
                     )
                     video_path = None
+
+            if not video_path:
+                video_path = self._generate_background_image(sentence, slide_num, (vw, vh))
 
             # Pre-flight check on circle_video
             if circle_video:
@@ -703,7 +689,7 @@ class FFmpegVideoGenerator:
                 elif is_cta:
                     self._create_cta_text_png(text_overlay_path, language)
                 else:
-                    self._create_text_overlay_png(sentence, text_overlay_path, gradient_fallback=not bool(video_path))
+                    self._create_text_overlay_png(sentence, text_overlay_path)
             else:
                 text_overlay_path = None
 
@@ -722,24 +708,13 @@ class FFmpegVideoGenerator:
                 )
 
             if is_split_screen:
-                # Top part: Background video or gradient fallback
-                if video_path and video_path.exists():
-                    inputs.extend(
-                        ["-stream_loop", "-1", "-i", str(video_path)]
-                    )  # Input 0
-                    filter_parts.append(
-                        f"[0:v]scale={vw}:{vh // 2}:force_original_aspect_ratio=increase,crop={vw}:{vh // 2},setsar=1[top]"
-                    )
-                else:
-                    grad_path = (
-                        self.config.TEMP_DIR
-                        / f"grad_top_{slide_num}_{uuid.uuid4().hex[:8]}.png"
-                    )
-                    create_gradient_image(
-                        (vw, vh // 2), LARAVEL_BG_GRADIENT, "135deg"
-                    ).save(str(grad_path))
-                    inputs.extend(["-loop", "1", "-i", str(grad_path)])  # Input 0
-                    filter_parts.append(f"[0:v]scale={vw}:{vh // 2},setsar=1[top]")
+                # Top part: validated footage or generated still image.
+                is_image = video_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+                inputs.extend(["-loop", "1", "-i", str(video_path)] if is_image
+                              else ["-stream_loop", "-1", "-i", str(video_path)])
+                filter_parts.append(
+                    f"[0:v]scale={vw}:{vh // 2}:force_original_aspect_ratio=increase,crop={vw}:{vh // 2},setsar=1[top]"
+                )
 
                 # Bottom part: Video Overlay
                 inputs.extend(
@@ -758,7 +733,7 @@ class FFmpegVideoGenerator:
                 )
                 input_count = 2
             elif video_path and video_path.exists():
-                is_image = video_path.suffix.lower() in [".jpg", ".jpeg", ".png"]
+                is_image = video_path.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]
                 if is_image:
                     inputs.extend(["-loop", "1", "-i", str(video_path)])
                 else:
@@ -774,21 +749,7 @@ class FFmpegVideoGenerator:
                 )
                 input_count = 1
             else:
-                print(
-                    f"🎨 [FFmpeg] Slide {slide_num}: No visual available; using branded gradient background"
-                )
-                grad_path = (
-                    self.config.TEMP_DIR
-                    / f"grad_{slide_num}_{uuid.uuid4().hex[:8]}.png"
-                )
-                create_gradient_image((vw, vh), LARAVEL_BG_GRADIENT, "135deg").save(
-                    str(grad_path)
-                )
-                inputs.extend(["-loop", "1", "-i", str(grad_path)])
-                filter_parts.append(
-                    f"[0:v]fps={export_fps},trim=duration={duration}[bg_scaled]"
-                )
-                input_count = 1
+                raise RuntimeError("Validated background disappeared before composition; retry the render.")
 
             filter_parts.append(
                 "[bg_scaled]format=rgba,colorchannelmixer=aa=0.6[dimmed]"
@@ -870,7 +831,7 @@ class FFmpegVideoGenerator:
                 input_count += 2  # Incremented by 2 (video + mask)
 
             print(
-                f"🎬 [FFmpeg] Slide {slide_num}: Composition started. Layers: bg={video_path.name if video_path else 'Branded Gradient'}, text={text_overlay_path.name if text_overlay_path else 'None'} split={is_split_screen}"
+                f"🎬 [FFmpeg] Slide {slide_num}: Composition started. Layers: bg={video_path.name}, text={text_overlay_path.name if text_overlay_path else 'None'} split={is_split_screen}"
             )
             if is_split_screen:
                 print(
@@ -1069,10 +1030,7 @@ class FFmpegVideoGenerator:
         if pre_selected_videos:
             for s_num, s_path in pre_selected_videos.items():
                 if isinstance(s_path, str) and s_path == "__gradient__":
-                    slide_videos[s_num] = None
-                    print(
-                        f"🎨 [Pipeline] User chose gradient background for slide {s_num}"
-                    )
+                    print(f"[Pipeline] Ignoring retired gradient override for slide {s_num}; using video-first selection.")
                 else:
                     p = Path(s_path) if not isinstance(s_path, Path) else s_path
                     if p.exists():
@@ -1157,7 +1115,7 @@ class FFmpegVideoGenerator:
                     # Edge case: Fallback to local random video if it fails
                     try:
                         fallback_video = self.media_manager.get_random_media(
-                            ["cityscape", "abstract", "office"]
+                            ["cityscape", "abstract", "office"], videos_only=True
                         )  # Broad generic queries
                         if fallback_video:
                             print(
@@ -1174,7 +1132,7 @@ class FFmpegVideoGenerator:
         # asset twice, including symlink/path aliases supplied by UI overrides.
         slide_videos, duplicate_count = unique_slide_assets(slide_videos)
         if duplicate_count:
-            print(f"🛡️ [Selection] Removed {duplicate_count} duplicate slide asset(s); affected slides use the normal gradient fallback.")
+            print(f"🛡️ [Selection] Removed {duplicate_count} duplicate slide asset(s); affected slides require generated images.")
 
         # --- Stage 2.5: Apply Temporal Coherence Optimization ---
         try:
@@ -1291,8 +1249,9 @@ class FFmpegVideoGenerator:
                     )
 
         if len(valid_slide_paths) != len(slides_data):
-            print(
-                f"⚠️ [Pipeline] Validation warning: {len(valid_slide_paths)} of {len(slides_data)} slides passed pre-concatenation validation."
+            raise RuntimeError(
+                f"Render incomplete: {len(valid_slide_paths)} of {len(slides_data)} slides passed validation. "
+                "Check background image generation and FFmpeg logs, then retry."
             )
 
         slide_paths = valid_slide_paths

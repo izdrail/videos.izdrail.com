@@ -2,6 +2,8 @@
 AI image provider using SD-Turbo.
 """
 import logging
+from pathlib import Path
+from PIL import Image
 from typing import Dict, Any, Optional
 from .asset import VisualAsset, AssetType
 from .provider import VisualProvider
@@ -34,29 +36,34 @@ class AIImageProvider(VisualProvider):
             sentence=sentence, keyword=keyword, entities=entities
         )
 
-        image_path = None
-        if self.sd_generator:
+        try:
             image_path = self.sd_generator.generate(
                 prompt=prompt,
                 keyword=keyword,
                 scene_index=context.get("sentence_idx"),
                 target_size=target_size,
-            )
+            ) if self.sd_generator else None
+        except Exception as exc:
+            raise RuntimeError("AI background image generation failed; retry the render after checking SD-Turbo.") from exc
 
-        if image_path and image_path.exists():
-            return VisualAsset(
-                asset_type=AssetType.IMAGE,
-                path=image_path,
-                duration=duration,
-                metadata={"prompt": prompt, "provider": "sd_turbo"},
-            )
+        if image_path:
+            image_path = Path(image_path)
+            if image_path.is_file() and image_path.stat().st_size > 0:
+                try:
+                    with Image.open(image_path) as image:
+                        image.verify()
+                except Exception as exc:
+                    raise RuntimeError("Generated background image is corrupt; retry generation.") from exc
+                return VisualAsset(
+                    asset_type=AssetType.IMAGE,
+                    path=image_path,
+                    duration=duration,
+                    metadata={"prompt": prompt, "provider": "sd_turbo"},
+                )
 
-        logger.warning("[AIImageProvider] AI generation failed or returned None. Triggering fallback.")
-        if self.fallback_provider:
-            return self.fallback_provider.get_visual(context, **kwargs)
-
-        return VisualAsset(
-            asset_type=AssetType.GRADIENT,
-            duration=duration,
-            metadata={"source": "gradient_fallback"},
+        # Do not hide unavailable image generation behind a gradient or a
+        # recursive stock/AI fallback. The job must be retriable instead.
+        raise RuntimeError(
+            "No background image was generated. Check IMAGE_GENERATION_ENABLED, "
+            "SD-Turbo model availability and the image-generation logs, then retry."
         )

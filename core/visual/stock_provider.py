@@ -10,7 +10,8 @@ from .provider import VisualProvider
 class StockMediaProvider(VisualProvider):
     """Stock media provider using MediaManager / local video stock."""
 
-    def __init__(self, media_manager=None, background_video_fetcher=None):
+    def __init__(self, media_manager=None, background_video_fetcher=None, fallback_provider=None):
+        self.fallback_provider = fallback_provider
         self.media_manager = media_manager
         self.background_video_fetcher = background_video_fetcher
 
@@ -31,14 +32,14 @@ class StockMediaProvider(VisualProvider):
             )
             if video_path:
                 return VisualAsset(
-                    asset_type=AssetType.VIDEO,
+                    asset_type=(AssetType.IMAGE if Path(video_path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"} else AssetType.VIDEO),
                     path=video_path,
                     duration=duration,
                     metadata={"source": "stock_fetcher"},
                 )
 
         # Fallback to direct media manager call if available
-        if self.media_manager and hasattr(self.media_manager, "get_random_media"):
+        if not self.background_video_fetcher and self.media_manager and hasattr(self.media_manager, "get_random_media"):
             search_keywords = []
             if context.get("keyword"):
                 search_keywords.append(context["keyword"])
@@ -51,18 +52,16 @@ class StockMediaProvider(VisualProvider):
                     preferred_source=context.get("preferred_source"),
                     theme=context.get("theme"),
                     entity=context.get("entity"),
+                    videos_only=True,
                 )
                 if video_path:
                     return VisualAsset(
-                        asset_type=AssetType.VIDEO,
+                        asset_type=(AssetType.IMAGE if Path(video_path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"} else AssetType.VIDEO),
                         path=video_path,
                         duration=duration,
                         metadata={"source": "media_manager"},
                     )
 
-        # If no video path returned, return gradient fallback
-        return VisualAsset(
-            asset_type=AssetType.GRADIENT,
-            duration=duration,
-            metadata={"source": "gradient_fallback"},
-        )
+        if self.fallback_provider:
+            return self.fallback_provider.get_visual(context, **kwargs)
+        raise RuntimeError("No stock visual found and AI image generation is unavailable.")

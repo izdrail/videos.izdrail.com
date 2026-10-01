@@ -72,7 +72,7 @@ class TestSDTurboGenerator:
         generator = SDTurboGenerator(config=mock_config)
         prompt = "test cache hit"
         cache_key = generator._generate_cache_key(prompt, 512, 512, 1, 0.0)
-        cache_file = mock_config.IMAGE_GENERATION_CACHE_DIR / f"{cache_key}.png"
+        cache_file = mock_config.IMAGE_GENERATION_CACHE_DIR / f"{cache_key}_1080x1920.png"
 
         # Create dummy image in cache
         img = Image.new("RGB", (1080, 1920), color="blue")

@@ -56,6 +56,7 @@ class SDTurboGenerator:
         self._device = None
         self._loaded = False
         self._load_lock = threading.Lock()
+        self._generation_lock = threading.Lock()
         self.cache_dir = getattr(
             self.config,
             "IMAGE_GENERATION_CACHE_DIR",
@@ -122,7 +123,13 @@ class SDTurboGenerator:
         )
         return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
-    def generate(
+    def generate(self, *args, **kwargs) -> Optional[Path]:
+        # A single diffusers pipeline is not safe across parallel slide workers.
+        # Hold through cache writes too, so readers never see half-written PNGs.
+        with self._generation_lock:
+            return self._generate_locked(*args, **kwargs)
+
+    def _generate_locked(
         self,
         prompt: str,
         keyword: Optional[str] = None,
@@ -162,14 +169,24 @@ class SDTurboGenerator:
         )
 
         cache_key = self._generate_cache_key(prompt, w, h, num_steps, g_scale)
-        cache_path = self.cache_dir / f"{cache_key}.png"
+        output_key = f"{cache_key}_{target_size[0]}x{target_size[1]}" if target_size else cache_key
+        cache_path = self.cache_dir / f"{output_key}.png"
 
+        cache_valid = False
         if cache_path.exists():
+            try:
+                with Image.open(cache_path) as cached_image:
+                    cached_image.verify()
+                cache_valid = True
+            except Exception:
+                logger.warning("[IMAGE] Ignoring corrupt cached image: %s", cache_path)
+                cache_path.unlink(missing_ok=True)
+        if cache_valid:
             logger.info(f"[IMAGE] Provider: Stability AI")
             logger.info(f"[IMAGE] Model: {self.model_name}")
             logger.info(f"[IMAGE] Device: {self._device or self.requested_device}")
             logger.info(f"[IMAGE] Scene: {scene_index}")
-            logger.info(f"[IMAGE] Resolution: {target_size[0]}x{target_size[1] if target_size else h}")
+            logger.info(f"[IMAGE] Resolution: {target_size if target_size else (w, h)}")
             logger.info(f"[IMAGE] Steps: {num_steps}")
             logger.info(f"[IMAGE] Cache: HIT")
             logger.info(f"[IMAGE] Generation: 0.00s")
@@ -200,7 +217,12 @@ class SDTurboGenerator:
                         pil_image, target_size, method=Image.Resampling.LANCZOS
                     )
 
-                pil_image.save(cache_path, "PNG", quality=95)
+                temp_path = cache_path.with_name(f"{cache_path.stem}_{uuid.uuid4().hex}.tmp")
+                try:
+                    pil_image.save(temp_path, "PNG", quality=95)
+                    temp_path.replace(cache_path)
+                finally:
+                    temp_path.unlink(missing_ok=True)
                 duration = time.time() - start_time
 
                 logger.info(f"[IMAGE] Provider: Stability AI")
@@ -208,7 +230,7 @@ class SDTurboGenerator:
                 logger.info(f"[IMAGE] Device: {self._device}")
                 logger.info(f"[IMAGE] Scene: {scene_index}")
                 logger.info(
-                    f"[IMAGE] Resolution: {target_size[0]}x{target_size[1]}"
+                    f"[IMAGE] Resolution: {target_size if target_size else (w, h)}"
                 )
                 logger.info(f"[IMAGE] Steps: {num_steps}")
                 logger.info(f"[IMAGE] Cache: MISS")

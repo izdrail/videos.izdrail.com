@@ -95,6 +95,7 @@ class MediaManager:
         return_keyword: bool = False,
         theme: Optional[str] = None,
         entity: Optional[str] = None,
+        videos_only: bool = False,
     ):
         """Fetch a background video for a list of *queries*.
         Tries each query in the list across all sources.
@@ -121,7 +122,7 @@ class MediaManager:
             ck = (q, preferred_source)
             if ck in self.search_cache:
                 cp = self.search_cache[ck]
-                if cp and Path(cp).exists():
+                if cp and Path(cp).exists() and (not videos_only or Path(cp).suffix.lower() in {".mp4", ".mov", ".avi", ".webm", ".mkv"}):
                     key = path_identity(cp)
                     with self._selection_lock:
                         if key in self._used_asset_ids:
@@ -145,6 +146,7 @@ class MediaManager:
                 use_snn=use_snn,
                 theme=theme,
                 entity=entity,
+                videos_only=videos_only,
             )
             if result:
                 return (result, query) if return_keyword else result
@@ -162,12 +164,13 @@ class MediaManager:
                     context=context,
                     theme=theme,
                     entity=entity,
+                    videos_only=videos_only,
                 )
                 if result:
                     return (result, simplified) if return_keyword else result
 
         # 3. Local file fallback
-        for ext in ["*.mp4", "*.mov", "*.avi", "*.jpg", "*.png"]:
+        for ext in (["*.mp4", "*.mov", "*.avi", "*.webm"] if videos_only else ["*.mp4", "*.mov", "*.avi", "*.jpg", "*.png"]):
             if self.config and self.config.VIDEOS_DIR.exists():
                 files = list(self.config.VIDEOS_DIR.glob(ext))
                 if files:
@@ -187,6 +190,7 @@ class MediaManager:
         source_timeout: int = 60,
         theme: Optional[str] = None,
         entity: Optional[str] = None,
+        videos_only: bool = False,
     ) -> Optional[Path]:
         """Semantic Multi-Armed Bandit: search all sources in parallel,
         score each by semantic_match, quality, freshness & diversity,
@@ -226,7 +230,7 @@ class MediaManager:
             existing_images = list(keyword_folder.glob("*.jpg")) + list(
                 keyword_folder.glob("*.png")
             )
-            if existing_images:
+            if existing_images and not videos_only:
                 selected_existing = random.choice(existing_images)
                 print(
                     f"🔁 [MediaManager] Reusing existing local image for '{query}': {selected_existing.name}"
@@ -264,7 +268,7 @@ class MediaManager:
 
             search_method = None
             method_name = None
-            for candidate in ("search_videos", "search_images", "search_photos"):
+            for candidate in (("search_videos",) if videos_only else ("search_videos", "search_images", "search_photos")):
                 if hasattr(api, candidate):
                     search_method = getattr(api, candidate)
                     method_name = candidate
@@ -283,6 +287,10 @@ class MediaManager:
             try:
                 raw = search_method(query, per_page=10)
                 raw = raw or []
+                if videos_only:
+                    raw = [r for r in raw
+                           if str(r.get("ext", "mp4")).lower().lstrip(".") not in {"jpg", "jpeg", "png", "webp", "gif", "bmp", "svg"}
+                           and str(r.get("media_type", "video")).lower() not in {"image", "audio"}]
                 filtered = [r for r in raw if r.get("url") not in self._used_media_urls]
                 usable = filtered if filtered else raw
                 print(
@@ -345,6 +353,7 @@ class MediaManager:
                         context=context,
                         use_snn=use_snn,
                         source_timeout=source_timeout,
+                        videos_only=videos_only,
                     )
                     if theme_result:
                         return theme_result

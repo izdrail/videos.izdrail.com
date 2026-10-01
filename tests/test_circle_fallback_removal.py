@@ -15,7 +15,7 @@ def test_bundled_circle_fallback_assets_are_removed():
         assert not any(ROOT.rglob(name))
 
 
-def test_no_visual_returns_explicit_empty_state():
+def test_stock_lookup_returns_empty_for_ai_provider_to_resolve():
     generator = FFmpegVideoGenerator.__new__(FFmpegVideoGenerator)
     generator.keyword_extractor = SimpleNamespace(
         sanitize_keyword=lambda value: value,

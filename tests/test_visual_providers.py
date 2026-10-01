@@ -1,129 +1,98 @@
-"""
-Unit tests for visual providers and VisualProviderFactory.
-"""
+"""Video-first backgrounds with required AI images, never gradients."""
 from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
-
-from core.visual import (
-    AssetType,
-    VisualAsset,
-    StockMediaProvider,
-    AIImageProvider,
-    MixedProvider,
-    VisualProviderFactory,
-)
+from PIL import Image
+from core.visual import AssetType, VisualAsset, StockMediaProvider, AIImageProvider, MixedProvider, VisualProviderFactory
 
 
-class TestVisualAsset:
-    def test_asset_properties(self, tmp_path):
-        f = tmp_path / "test.png"
-        f.touch()
-
-        asset = VisualAsset(asset_type=AssetType.IMAGE, path=f, duration=5.0)
-        assert asset.is_image() is True
-        assert asset.is_video() is False
-        assert asset.get_path_obj() == f
+def generated_file(tmp_path):
+    path = tmp_path / "generated.png"
+    Image.new("RGB", (64, 96), "green").save(path)
+    return path
 
 
-class TestStockMediaProvider:
-    def test_get_visual_video(self, tmp_path):
-        dummy_video = tmp_path / "sample.mp4"
-        dummy_video.touch()
-
-        mock_fetcher = MagicMock(return_value=dummy_video)
-        provider = StockMediaProvider(background_video_fetcher=mock_fetcher)
-
-        ctx = {"keyword": "nature", "sentence": "A beautiful river in the forest"}
-        asset = provider.get_visual(ctx)
-
-        assert asset.is_video() is True
-        assert asset.get_path_obj() == dummy_video
-
-    def test_get_visual_fallback(self):
-        mock_fetcher = MagicMock(return_value=None)
-        provider = StockMediaProvider(background_video_fetcher=mock_fetcher)
-
-        asset = provider.get_visual({"keyword": "nonexistent"})
-        assert asset.is_gradient() is True
+def test_visual_asset(tmp_path):
+    path = generated_file(tmp_path)
+    asset = VisualAsset(AssetType.IMAGE, path)
+    assert asset.is_image() and not asset.is_video()
+    assert asset.get_path_obj() == path
 
 
-class TestAIImageProvider:
-    def test_get_visual_success(self, tmp_path):
-        img_path = tmp_path / "gen.png"
-        img_path.touch()
-
-        mock_sd = MagicMock()
-        mock_sd.generate.return_value = img_path
-
-        provider = AIImageProvider(sd_generator=mock_sd)
-        asset = provider.get_visual({"sentence": "A robotic arm assembling a car"})
-
-        assert asset.is_image() is True
-        assert asset.get_path_obj() == img_path
-
-    def test_get_visual_failure_triggers_fallback(self, tmp_path):
-        fallback_path = tmp_path / "stock.mp4"
-        fallback_path.touch()
-
-        fallback_provider = StockMediaProvider(
-            background_video_fetcher=MagicMock(return_value=fallback_path)
-        )
-
-        mock_sd = MagicMock()
-        mock_sd.generate.return_value = None
-
-        provider = AIImageProvider(
-            sd_generator=mock_sd, fallback_provider=fallback_provider
-        )
-        asset = provider.get_visual({"sentence": "Test sentence"})
-
-        assert asset.is_video() is True
-        assert asset.get_path_obj() == fallback_path
+@pytest.mark.parametrize("source", ["stock", "ai", "ai_generated_images", "mixed", None])
+def test_all_legacy_modes_choose_video_first(source, tmp_path):
+    video = tmp_path / "stock.mp4"
+    video.write_bytes(b"video")
+    sd = MagicMock()
+    provider = VisualProviderFactory.create(source, sd_generator=sd, background_video_fetcher=lambda **kw: video)
+    asset = provider.get_visual({"sentence": "A city"})
+    assert asset.is_video() and asset.get_path_obj() == video
+    sd.generate.assert_not_called()
 
 
-class TestMixedProvider:
-    def test_alternation(self, tmp_path):
-        stock_path = tmp_path / "stock.mp4"
-        stock_path.touch()
-        ai_path = tmp_path / "ai.png"
-        ai_path.touch()
-
-        stock_prov = StockMediaProvider(
-            background_video_fetcher=MagicMock(return_value=stock_path)
-        )
-        mock_sd = MagicMock()
-        mock_sd.generate.return_value = ai_path
-        ai_prov = AIImageProvider(sd_generator=mock_sd)
-
-        mixed_prov = MixedProvider(
-            stock_provider=stock_prov, ai_provider=ai_prov, ratio=0.5
-        )
-
-        # Call 1 -> ratio 0.5 alternate: _counter=1 (odd -> stock)
-        a1 = mixed_prov.get_visual({"sentence": "First slide"})
-        assert a1.is_video() is True
-
-        # Call 2 -> _counter=2 (even -> AI)
-        a2 = mixed_prov.get_visual({"sentence": "Second slide"})
-        assert a2.is_image() is True
+@pytest.mark.parametrize("source", ["stock", "ai", "mixed"])
+def test_missing_video_generates_image(source, tmp_path):
+    sd = MagicMock()
+    sd.generate.return_value = generated_file(tmp_path)
+    provider = VisualProviderFactory.create(source, sd_generator=sd, background_video_fetcher=lambda **kw: None)
+    asset = provider.get_visual({"sentence": "A river", "sentence_idx": 3}, target_size=(320, 480))
+    assert asset.is_image() and not asset.is_gradient()
+    sd.generate.assert_called_once()
+    assert sd.generate.call_args.kwargs["target_size"] == (320, 480)
+    assert sd.generate.call_args.kwargs["scene_index"] == 3
 
 
-class TestVisualProviderFactory:
-    def test_create_stock(self):
-        prov = VisualProviderFactory.create("stock")
-        assert isinstance(prov, StockMediaProvider)
+@pytest.mark.parametrize("failure", [None, "missing", "empty", "exception"])
+def test_ai_failure_is_explicit_never_gradient(failure, tmp_path):
+    sd = MagicMock()
+    if failure == "exception":
+        sd.generate.side_effect = ValueError("out of memory")
+    elif failure == "empty":
+        path = tmp_path / "empty.png"
+        path.touch()
+        sd.generate.return_value = path
+    else:
+        sd.generate.return_value = tmp_path / "missing.png" if failure == "missing" else None
+    with pytest.raises(RuntimeError, match="background image"):
+        AIImageProvider(sd).get_visual({"sentence": "A mountain"})
 
-    def test_create_ai(self):
-        prov = VisualProviderFactory.create("ai_generated_images")
-        assert isinstance(prov, AIImageProvider)
 
-    def test_create_mixed(self):
-        prov = VisualProviderFactory.create("mixed")
-        assert isinstance(prov, MixedProvider)
+def test_disabled_generator_fails_explicitly():
+    with pytest.raises(RuntimeError, match="IMAGE_GENERATION_ENABLED"):
+        VisualProviderFactory.create("stock").get_visual({})
 
 
-def test_gradient_fallback_enlarges_text_is_scoped_to_missing_visual():
-    source = open("core/video/ffmpeg_generator.py", encoding="utf-8").read()
-    assert "base_font_size = int(base_font_size * 1.35)" in source
-    assert "gradient_fallback=not bool(video_path)" in source
+def test_stock_direct_call_requests_only_videos(tmp_path):
+    manager = MagicMock()
+    manager.get_random_media.return_value = tmp_path / "city.mp4"
+    asset = StockMediaProvider(media_manager=manager).get_visual({"keyword": "city"})
+    assert asset.is_video()
+    assert manager.get_random_media.call_args.kwargs["videos_only"] is True
+
+
+def test_exhausted_fetcher_does_not_repeat_stock_search(tmp_path):
+    manager = MagicMock()
+    sd = MagicMock()
+    sd.generate.return_value = generated_file(tmp_path)
+    provider = VisualProviderFactory.create("stock", media_manager=manager, sd_generator=sd, background_video_fetcher=lambda **kw: None)
+    assert provider.get_visual({"keyword": "city"}).is_image()
+    manager.get_random_media.assert_not_called()
+
+
+def test_legacy_mixed_always_prefers_stock(tmp_path):
+    stock = MagicMock()
+    stock.get_visual.return_value = VisualAsset(AssetType.VIDEO, tmp_path / "v.mp4")
+    ai = MagicMock()
+    provider = MixedProvider(stock, ai)
+    for _ in range(3):
+        assert provider.get_visual({}).is_video()
+    ai.get_visual.assert_not_called()
+
+
+def test_corrupt_generated_image_is_not_accepted(tmp_path):
+    path = tmp_path / "corrupt.png"
+    path.write_bytes(b"not an image")
+    sd = MagicMock()
+    sd.generate.return_value = path
+    with pytest.raises(RuntimeError, match="corrupt"):
+        AIImageProvider(sd).get_visual({})
