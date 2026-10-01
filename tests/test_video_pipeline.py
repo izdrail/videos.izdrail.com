@@ -4,6 +4,7 @@ Integration tests for video generation pipeline with visual provider selection.
 import unittest
 import tempfile
 import shutil
+import subprocess
 from pathlib import Path
 import torch
 
