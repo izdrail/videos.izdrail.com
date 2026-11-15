@@ -2534,6 +2534,12 @@ if __name__ == "__main__":
         job_manager.set_generator_factory(lambda: TextToVideoGenerator())
         print(f"📋 Job queue ready: {job_manager.max_workers} workers")
         demo = setup_ui(generator)
+        # Authenticated still-image endpoint for sibling services (Social):
+        # POST /api/image on the same FastAPI app, guarded by IMAGE_API_KEY,
+        # single-flight so it cannot starve video jobs.
+        from core.api.image_api import register_image_api
+
+        register_image_api(demo.app, lambda: generator.video_generator.sd_manager)
         demo.queue()
         # Behind a TLS-terminating proxy (Coolify/Traefik) the app sees plain
         # http and would emit http:// asset/API URLs, which browsers block as
