@@ -1,0 +1,9 @@
+# Thin patch image: layer current source over the last full CI build.
+# Full Dockerfile unchanged; use this when the dell host has the previous
+# image cached and registry pulls are too slow.
+FROM izdrail/videos.izdrail.com@sha256:d273c8aa5fd379828ef7c87a02e93665f382627786c1805481c44d96ba3852cc
+WORKDIR /app
+COPY . .
+EXPOSE 1603 1604
+ENTRYPOINT []
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
