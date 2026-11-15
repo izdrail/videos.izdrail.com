@@ -137,11 +137,19 @@ class GenerationDB:
                 ]
                 if "thumbnail_path" not in cols:
                     conn.execute("ALTER TABLE jobs ADD COLUMN thumbnail_path TEXT")
+                if "interrupt_count" not in cols:
+                    conn.execute(
+                        "ALTER TABLE jobs ADD COLUMN interrupt_count INTEGER DEFAULT 0"
+                    )
             except Exception:
                 pass
             try:
+                # Mid-flight jobs orphaned by a server restart become
+                # 'interrupted' (not 'failed') so the job manager can tell them
+                # apart from real failures and auto-restart them safely. The
+                # interrupt counter guards against crash-loop restarts.
                 conn.execute(
-                    "UPDATE jobs SET status='failed', updated_at=?, error_message=COALESCE(error_message,'Interrupted by server restart') WHERE status='processing'",
+                    "UPDATE jobs SET status='interrupted', interrupt_count=COALESCE(interrupt_count,0)+1, updated_at=?, error_message=COALESCE(error_message,'Interrupted by server restart') WHERE status='processing'",
                     (datetime.now().isoformat(),),
                 )
             except Exception:

@@ -198,11 +198,15 @@ class TextToVideoGenerator:
 
     def _get_available_background_videos(self) -> List[str]:
         videos = []
-        for ext in ["*.mp4", "*.mov", "*.avi", "*.webm"]:
-            if self.config.BACKGROUND_VIDEOS_DIR.exists():
+        # Case variants matter on case-sensitive filesystems (Linux containers):
+        # a file saved as CLIP.MP4 was invisible to the old lowercase-only glob.
+        exts = ["*.mp4", "*.mov", "*.avi", "*.webm", "*.mkv"]
+        exts += [e.upper() for e in exts]
+        if self.config.BACKGROUND_VIDEOS_DIR.exists():
+            for ext in exts:
                 videos.extend(list(self.config.BACKGROUND_VIDEOS_DIR.glob(ext)))
         return ["Auto-select (Pexels/Giphy/Local)"] + [
-            v.name for v in sorted(videos)
+            v.name for v in sorted(set(videos))
         ]
 
     def search_audio_library(self, query: str) -> List[Tuple[str, str]]:
@@ -395,6 +399,16 @@ class TextToVideoGenerator:
                         )
                         sentence_keywords_map[idx] = []
 
+            _used_fb = set()
+
+            def _fb_kw():
+                # Theme-first fallback keeps failed extractions on-topic;
+                # generic keywords only once the theme is already used.
+                if theme and str(theme).strip() and str(theme).strip() not in _used_fb:
+                    _used_fb.add(str(theme).strip())
+                    return str(theme).strip()
+                return random.choice(DEFAULT_FALLBACK_KEYWORDS)
+
             if use_snn:
                 # Use the spiking-neural-network coherence optimizer to select a
                 # globally coherent keyword sequence (balances engagement + flow).
@@ -411,7 +425,7 @@ class TextToVideoGenerator:
                         if not kw:
                             # LLM/neuron selection failed for this sentence — fall
                             # back to a generic keyword so the render is never blocked.
-                            kw = random.choice(DEFAULT_FALLBACK_KEYWORDS)
+                            kw = _fb_kw()
                             print(
                                 f"  - Sentence {i}: no SNN keyword; using fallback '{kw}'"
                             )
@@ -465,7 +479,7 @@ class TextToVideoGenerator:
                     # Never let that abort the render — fall back to a generic
                     # keyword so the background finder still produces footage.
                     if not selected_kw:
-                        selected_kw = random.choice(DEFAULT_FALLBACK_KEYWORDS)
+                        selected_kw = _fb_kw()
                         print(
                             f"  - Sentence {i}: no keyword extracted; using fallback '{selected_kw}'"
                         )
@@ -1184,6 +1198,24 @@ def setup_ui(generator: TextToVideoGenerator):
                                     value="Auto-select (Pexels/Giphy/Local)",
                                     info="Choose a specific video from your 'background_videos' folder or let the system auto-select.",
                                 )
+                                refresh_bg_btn = gr.Button(
+                                    "🔄 Refresh background list", size="sm"
+                                )
+
+                                def _refresh_backgrounds():
+                                    # Rescan the folder so videos added while the
+                                    # app runs appear without a restart.
+                                    generator.available_background_videos = (
+                                        generator._get_available_background_videos()
+                                    )
+                                    return gr.Dropdown(
+                                        choices=generator.available_background_videos
+                                    )
+
+                                refresh_bg_btn.click(
+                                    fn=_refresh_backgrounds,
+                                    outputs=[background_video_dropdown],
+                                )
                                 with gr.Row():
                                     enable_music = gr.Checkbox(
                                         label="🎵 Add background music", value=True
@@ -1417,10 +1449,12 @@ def setup_ui(generator: TextToVideoGenerator):
                 jobs_df = gr.Dataframe(value=_jobs_dataframe(), headers=["Job ID","Status","Progress","Created","Error"], interactive=False, wrap=True)
                 with gr.Row():
                     job_id_dropdown = gr.Dropdown(label="Select Job (completed)", choices=[], value=None)
+                    restart_dropdown = gr.Dropdown(label="Select Job (failed/interrupted)", choices=[], value=None)
                     refresh_jobs_btn = gr.Button("🔄 Refresh", size="sm")
                 with gr.Row():
                     download_btn = gr.Button("⬇️ Download Video", variant="primary")
                     retry_btn = gr.Button("🔁 Retry Failed", variant="secondary")
+                    restart_btn = gr.Button("♻️ Restart Interrupted", variant="secondary")
                     cancel_btn = gr.Button("⛔ Cancel", size="sm")
                 download_file = gr.File(label="Download", interactive=False)
                 job_status_msg = gr.Markdown("")
@@ -1432,11 +1466,12 @@ def setup_ui(generator: TextToVideoGenerator):
                     html = _jobs_html()
                     df = _jobs_dataframe()
                     choices = [j['job_id'] for j in jobs if j['status']=='completed']
+                    restart_choices = [j['job_id'] for j in jobs if j['status'] in ('failed','interrupted')]
                     labels = [f"{j['job_id'][:8]} — {j['status']} {j['progress']}%" for j in jobs]
                     # dropdown choices as job_ids
-                    return html, df, gr.Dropdown(choices=choices)
-                jobs_timer.tick(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown])
-                refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown])
+                    return html, df, gr.Dropdown(choices=choices), gr.Dropdown(choices=restart_choices)
+                jobs_timer.tick(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown])
+                refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown])
 
                 def _download(job_id):
                     if not job_id or not job_manager:
@@ -1458,6 +1493,18 @@ def setup_ui(generator: TextToVideoGenerator):
                     new_id = job_manager.retry_job(job_id)
                     return f"Retried as {new_id[:8]}" if new_id else "Retry failed"
                 retry_btn.click(fn=_retry, inputs=[job_id_dropdown], outputs=[job_status_msg])
+
+                def _restart(job_id):
+                    if not job_id or not job_manager:
+                        return "No job selected"
+                    j = job_manager.get_job(job_id)
+                    if not j:
+                        return "Job not found"
+                    if j['status'] not in ('failed', 'interrupted'):
+                        return f"Job is {j['status']}, not interrupted/failed"
+                    new_id = job_manager.retry_job(job_id)
+                    return f"Restarted as {new_id[:8]}" if new_id else "Restart failed"
+                restart_btn.click(fn=_restart, inputs=[restart_dropdown], outputs=[job_status_msg])
 
                 def _cancel(job_id):
                     if not job_id or not job_manager:

@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 import sqlite3
 import threading
@@ -24,6 +25,7 @@ class JobManager:
         self._generator_factory: Optional[Callable[[], Any]] = None
         self._gpu_sem = threading.Semaphore(self.max_workers)
         self._start_workers()
+        self.recover_interrupted_jobs()
 
     def set_generator_factory(self, factory: Callable[[], Any]):
         self._generator_factory = factory
@@ -158,6 +160,53 @@ class JobManager:
             else job["params"]
         )
         return self.submit_job(params)
+
+    def recover_interrupted_jobs(self, auto_restart: Optional[bool] = None):
+        """Recover jobs orphaned by a server restart.
+
+        Jobs left 'queued' never started: they go back on the in-memory
+        queue, oldest first. Jobs the database layer marked 'interrupted'
+        (they were mid-processing when the server stopped) are restarted as
+        fresh jobs with new ids, so no duplicate outputs are ever produced
+        for the same job id. A job interrupted 3+ times is left for manual
+        restart from the Jobs tab to avoid crash-looping on a poisoned job.
+        Set VIDEOS_AUTO_RESTART_INTERRUPTED=0 to leave every interrupted
+        job for manual restart instead.
+
+        Returns (requeued, restarted) counts.
+        """
+        if auto_restart is None:
+            auto_restart = (
+                os.environ.get("VIDEOS_AUTO_RESTART_INTERRUPTED", "1") != "0"
+            )
+        try:
+            with DB.lock, sqlite3.connect(DB.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                queued = conn.execute(
+                    "SELECT job_id FROM jobs WHERE status='queued' ORDER BY created_at ASC"
+                ).fetchall()
+                interrupted = conn.execute(
+                    "SELECT job_id, interrupt_count FROM jobs WHERE status='interrupted' ORDER BY created_at ASC"
+                ).fetchall()
+        except Exception as e:
+            print(f"[Jobs] Recovery scan failed: {e}")
+            return 0, 0
+        for row in queued:
+            self.queue.put(row["job_id"])
+        if queued:
+            print(f"[Jobs] Re-queued {len(queued)} job(s) after restart")
+        restarted = 0
+        for row in interrupted:
+            if auto_restart and (row["interrupt_count"] or 0) < 3:
+                if self.retry_job(row["job_id"]):
+                    restarted += 1
+        if restarted:
+            print(f"[Jobs] Auto-restarted {restarted} interrupted job(s)")
+        elif interrupted:
+            print(
+                f"[Jobs] {len(interrupted)} interrupted job(s) waiting - restart them from the Jobs tab"
+            )
+        return len(queued), restarted
 
     def shutdown(self):
         self._stop.set()
