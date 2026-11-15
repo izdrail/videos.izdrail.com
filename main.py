@@ -2483,8 +2483,16 @@ if __name__ == "__main__":
         print(f"📋 Job queue ready: {job_manager.max_workers} workers")
         demo = setup_ui(generator)
         demo.queue()
+        # Behind a TLS-terminating proxy (Coolify/Traefik) the app sees plain
+        # http and would emit http:// asset/API URLs, which browsers block as
+        # mixed content on the https page. GRADIO_ROOT_PATH accepts a full URL
+        # and is returned verbatim as the public root, forcing https links.
         demo.launch(
-            server_name="0.0.0.0", server_port=1603, share=False, show_error=True
+            server_name="0.0.0.0",
+            server_port=1603,
+            share=False,
+            show_error=True,
+            root_path=os.environ.get("GRADIO_ROOT_PATH") or None,
         )
     except Exception as e:
         print(f"\n❌ FATAL ERROR: {e}")
