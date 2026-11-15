@@ -4,6 +4,7 @@ Centralized database operations for caching TTS and video generation
 """
 
 import logging
+import os
 import sqlite3
 import hashlib
 import json
@@ -417,5 +418,9 @@ class GenerationDB:
             return 0.0
 
 
-# Default instance for shared use
-DB = GenerationDB()
+# Default instance for shared use. GENERATION_DB_PATH lets deployments put the
+# jobs/cache database on persistent storage (host-path volume) so job history
+# and restart recovery survive container rebuilds.
+DB = GenerationDB(
+    db_path=Path(os.environ.get("GENERATION_DB_PATH", "generation_cache.db"))
+)

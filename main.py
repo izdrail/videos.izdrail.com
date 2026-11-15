@@ -2497,7 +2497,9 @@ if __name__ == "__main__":
     try:
         import sqlite3
 
-        with sqlite3.connect("generation_cache.db") as conn:
+        with sqlite3.connect(
+            os.environ.get("GENERATION_DB_PATH", "generation_cache.db")
+        ) as conn:
             tts_count = conn.execute("SELECT COUNT(*) FROM tts_cache").fetchone()[0]
             video_count = conn.execute("SELECT COUNT(*) FROM video_logs").fetchone()[0]
             print(f"\n📊 CACHE: {tts_count} TTS entries, {video_count} video logs")
