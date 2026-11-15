@@ -2534,24 +2534,22 @@ if __name__ == "__main__":
         job_manager.set_generator_factory(lambda: TextToVideoGenerator())
         print(f"📋 Job queue ready: {job_manager.max_workers} workers")
         demo = setup_ui(generator)
+        demo.queue()
         # Authenticated still-image endpoint for sibling services (Social):
-        # POST /api/image on the same FastAPI app, guarded by IMAGE_API_KEY,
-        # single-flight so it cannot starve video jobs.
+        # POST /api/image, guarded by IMAGE_API_KEY, single-flight so it
+        # cannot starve video jobs. demo.launch() rebuilds the FastAPI app
+        # and would drop extra routes, so we mount Gradio on our own app
+        # instead and serve it with uvicorn directly.
+        import gradio as gr
+        import uvicorn
+        from fastapi import FastAPI
+
         from core.api.image_api import register_image_api
 
-        register_image_api(demo.app, lambda: generator.video_generator.sd_manager)
-        demo.queue()
-        # Behind a TLS-terminating proxy (Coolify/Traefik) the app sees plain
-        # http and would emit http:// asset/API URLs, which browsers block as
-        # mixed content on the https page. GRADIO_ROOT_PATH accepts a full URL
-        # and is returned verbatim as the public root, forcing https links.
-        demo.launch(
-            server_name="0.0.0.0",
-            server_port=1603,
-            share=False,
-            show_error=True,
-            root_path=os.environ.get("GRADIO_ROOT_PATH") or None,
-        )
+        app = FastAPI()
+        register_image_api(app, lambda: generator.video_generator.sd_manager)
+        gr.mount_gradio_app(app, demo, path="/")
+        uvicorn.run(app, host="0.0.0.0", port=1603)
     except Exception as e:
         print(f"\n❌ FATAL ERROR: {e}")
         import traceback
