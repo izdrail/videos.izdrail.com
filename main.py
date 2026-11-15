@@ -204,9 +204,12 @@ class TextToVideoGenerator:
         exts += [e.upper() for e in exts]
         if self.config.BACKGROUND_VIDEOS_DIR.exists():
             for ext in exts:
-                videos.extend(list(self.config.BACKGROUND_VIDEOS_DIR.glob(ext)))
+                # Recursive: the local cache is organized in theme
+                # subdirectories; a top-level glob misses all of them.
+                videos.extend(list(self.config.BACKGROUND_VIDEOS_DIR.rglob(ext)))
         return ["Auto-select (Pexels/Giphy/Local)"] + [
-            v.name for v in sorted(set(videos))
+            str(v.relative_to(self.config.BACKGROUND_VIDEOS_DIR))
+            for v in sorted(set(videos))
         ]
 
     def search_audio_library(self, query: str) -> List[Tuple[str, str]]:
