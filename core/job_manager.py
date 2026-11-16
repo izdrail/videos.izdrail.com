@@ -24,6 +24,7 @@ class JobManager:
         self._lock = threading.Lock()
         self._generator_factory: Optional[Callable[[], Any]] = None
         self._factory_ready = threading.Event()
+        self._recovery_enqueued = set()
         self._gpu_sem = threading.Semaphore(self.max_workers)
         self._start_workers()
         self.recover_interrupted_jobs()
@@ -172,14 +173,11 @@ class JobManager:
     def recover_interrupted_jobs(self, auto_restart: Optional[bool] = None):
         """Recover jobs orphaned by a server restart.
 
-        Jobs left 'queued' never started: they go back on the in-memory
-        queue, oldest first. Jobs the database layer marked 'interrupted'
-        (they were mid-processing when the server stopped) are restarted as
-        fresh jobs with new ids, so no duplicate outputs are ever produced
-        for the same job id. A job interrupted 3+ times is left for manual
-        restart from the Jobs tab to avoid crash-looping on a poisoned job.
-        Set VIDEOS_AUTO_RESTART_INTERRUPTED=0 to leave every interrupted
-        job for manual restart instead.
+        Queued jobs re-enter the queue oldest first. Interrupted jobs resume
+        under the same id, preserving their interrupt count and the 3-attempt
+        guard. Legacy interrupted rows already covered by identical completed
+        or active work stay untouched for audit, rather than spawning duplicates.
+        Set VIDEOS_AUTO_RESTART_INTERRUPTED=0 to disable interrupted recovery.
 
         Returns (requeued, restarted) counts.
         """
@@ -194,19 +192,35 @@ class JobManager:
                     "SELECT job_id FROM jobs WHERE status='queued' ORDER BY created_at ASC"
                 ).fetchall()
                 interrupted = conn.execute(
-                    "SELECT job_id, interrupt_count FROM jobs WHERE status='interrupted' ORDER BY created_at ASC"
+                    "SELECT job_id, interrupt_count, params FROM jobs WHERE status='interrupted' ORDER BY created_at ASC"
                 ).fetchall()
         except Exception as e:
             print(f"[Jobs] Recovery scan failed: {e}")
             return 0, 0
         for row in queued:
-            self.queue.put(row["job_id"])
+            if row["job_id"] not in self._recovery_enqueued:
+                self._recovery_enqueued.add(row["job_id"])
+                self.queue.put(row["job_id"])
         if queued:
             print(f"[Jobs] Re-queued {len(queued)} job(s) after restart")
         restarted = 0
         for row in interrupted:
             if auto_restart and (row["interrupt_count"] or 0) < 3:
-                if self.retry_job(row["job_id"]):
+                with DB.lock, sqlite3.connect(DB.db_path) as conn:
+                    covered = conn.execute(
+                        "SELECT params FROM jobs WHERE job_id != ? AND status IN ('queued','processing','completed')",
+                        (row["job_id"],),
+                    ).fetchall()
+                    if any(json.loads(other[0]) == json.loads(row["params"]) for other in covered):
+                        print(f"[Jobs] Interrupted {row['job_id']} already covered by matching active/completed work")
+                        continue
+                    changed = conn.execute(
+                        "UPDATE jobs SET status='queued', progress=0, error_message=NULL, updated_at=? WHERE job_id=? AND status='interrupted'",
+                        (datetime.now().isoformat(), row["job_id"]),
+                    ).rowcount
+                if changed:
+                    self._recovery_enqueued.add(row["job_id"])
+                    self.queue.put(row["job_id"])
                     restarted += 1
         if restarted:
             print(f"[Jobs] Auto-restarted {restarted} interrupted job(s)")

@@ -3,8 +3,8 @@
 A container restart kills the in-memory queue but the SQLite jobs table
 survives. On startup the database layer marks 'processing' jobs 'interrupted'
 (bumping interrupt_count), and JobManager puts 'queued' jobs back on the
-queue and restarts interrupted ones as fresh jobs (new ids - no duplicate
-outputs for the same job id).
+queue and resumes interrupted ones under their original id. Legacy rows
+already covered by active/completed work are not replayed.
 """
 import json
 import sqlite3
@@ -69,22 +69,45 @@ def test_queued_jobs_are_requeued_and_interrupted_autorestarted(tmp_path, monkey
 
     jm = _make_manager(monkeypatch)
 
-    # The never-started job is back on the in-memory queue, and the
-    # interrupted job was restarted as a NEW queued job.
+    # Existing queued work with identical params covers the legacy interruption.
     queued_ids = {jm.queue.get_nowait() for _ in range(jm.queue.qsize())}
-    assert "job_queued" in queued_ids
-    assert "job_running" not in queued_ids  # old id never re-runs
-    new_ids = queued_ids - {"job_queued"}
-    assert len(new_ids) == 1
+    assert queued_ids == {"job_queued"}
+    assert jm.get_job("job_running")["status"] == "interrupted"
+    assert len(jm.get_all_jobs()) == 2
+
+
+def test_interrupted_reuses_id_once_and_keeps_attempt_count(tmp_path, monkeypatch):
+    db_path = _setup_db(tmp_path)
+    _insert_job(db_path, "same_id", "interrupted", "2026-11-15T08:00:00", interrupt_count=2)
+    jm = _make_manager(monkeypatch)
+    assert jm.queue.get_nowait() == "same_id"
+    assert jm.get_job("same_id")["status"] == "queued"
+    assert jm.get_job("same_id")["interrupt_count"] == 2
+    jm.recover_interrupted_jobs()
+    assert jm.queue.empty()
+    assert len(jm.get_all_jobs()) == 1
+
+
+@pytest.mark.parametrize("cover_status", ["completed", "processing", "queued"])
+def test_legacy_interrupted_covered_by_existing_work_not_replayed(tmp_path, monkeypatch, cover_status):
+    db_path = _setup_db(tmp_path)
+    _insert_job(db_path, "old_interruption", "interrupted", "2026-11-15T08:00:00", 1)
+    _insert_job(db_path, "successor", cover_status, "2026-11-15T08:01:00")
+    jm = _make_manager(monkeypatch)
+    assert jm.get_job("old_interruption")["status"] == "interrupted"
+    assert len(jm.get_all_jobs()) == 2
+    assert list(jm.queue.queue) == (["successor"] if cover_status == "queued" else [])
+
+
+def test_different_params_do_not_suppress_recovery(tmp_path, monkeypatch):
+    db_path = _setup_db(tmp_path)
+    _insert_job(db_path, "resume", "interrupted", "2026-11-15T08:00:00", 1)
+    _insert_job(db_path, "other", "completed", "2026-11-15T08:01:00")
     with sqlite3.connect(db_path) as conn:
-        old = conn.execute(
-            "SELECT status FROM jobs WHERE job_id='job_running'"
-        ).fetchone()
-        new = conn.execute(
-            "SELECT status FROM jobs WHERE job_id=?", (new_ids.pop(),)
-        ).fetchone()
-    assert old[0] == "interrupted"  # kept for audit, no duplicate outputs
-    assert new[0] == "queued"
+        conn.execute("UPDATE jobs SET params=? WHERE job_id='other'", (json.dumps({"text":"different"}),))
+    jm = _make_manager(monkeypatch)
+    assert jm.queue.get_nowait() == "resume"
+    assert jm.get_job("resume")["status"] == "queued"
 
 
 def test_auto_restart_can_be_disabled(tmp_path, monkeypatch):
