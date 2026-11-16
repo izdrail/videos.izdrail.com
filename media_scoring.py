@@ -12,6 +12,7 @@ from functools import lru_cache
 from core.media.identity import canonical_url, candidate_identity
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+from urllib.parse import urlparse, urljoin
 
 import requests
 from PIL import Image
@@ -65,27 +66,65 @@ def _get_clip_model(model_name: str = "ViT-B-32"):
         return None, None, None
 
 
+def _thumbnail_ref(item):
+    """Use provider thumbnails, never download a whole video for scoring."""
+    if not isinstance(item, dict):
+        return item
+    ref = item.get("thumbnail_url") or item.get("thumbnail") or item.get("image")
+    if ref is not None:
+        return ref
+    url = item.get("url")
+    if isinstance(url, str) and urlparse(url).path.lower().endswith(
+        (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+    ):
+        return url
+    return None
+
+
 @lru_cache(maxsize=512)
 def _fetch_thumbnail_image(thumbnail_url: str) -> Optional[Image.Image]:
-    """
-    Fetch thumbnail image from URL with LRU caching.
-    Returns PIL Image or None on failure.
-    """
+    """Read a bounded image only. Socket timeout alone permits endless trickles."""
     if not thumbnail_url or not isinstance(thumbnail_url, str):
         return None
-
+    max_bytes = 2 * 1024 * 1024
+    deadline = time.monotonic() + 8
     try:
         if thumbnail_url.startswith(("http://", "https://")):
-            response = requests.get(thumbnail_url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
-            response.raise_for_status()
-            image = Image.open(io.BytesIO(response.content)).convert("RGB")
-            return image
+            url = thumbnail_url
+            for _ in range(4):
+                # Disable requests' redirect-body buffering; close each hop ourselves.
+                with requests.get(url, stream=True, allow_redirects=False,
+                                  timeout=(3, 3),
+                                  headers={"User-Agent": "Mozilla/5.0"}) as response:
+                    if time.monotonic() >= deadline:
+                        return None
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        url = urljoin(url, response.headers.get("Location", ""))
+                        if not url.startswith(("http://", "https://")):
+                            return None
+                        continue
+                    response.raise_for_status()
+                    mime = response.headers.get("Content-Type", "").split(";")[0].lower()
+                    if not mime.startswith("image/"):
+                        return None
+                    if int(response.headers.get("Content-Length", 0)) > max_bytes:
+                        return None
+                    data = bytearray()
+                    # Small chunks ensure a trickling peer cannot hide the deadline.
+                    for chunk in response.iter_content(chunk_size=1):
+                        if time.monotonic() >= deadline or len(data) + len(chunk) > max_bytes:
+                            return None
+                        data.extend(chunk)
+                    with Image.open(io.BytesIO(data)) as image:
+                        return image.convert("RGB")
+            return None
         elif os.path.exists(thumbnail_url):
-            image = Image.open(thumbnail_url).convert("RGB")
-            return image
+            if os.path.getsize(thumbnail_url) > max_bytes:
+                return None
+            with Image.open(thumbnail_url) as image:
+                return image.convert("RGB")
     except Exception as e:
         logger.debug(f"Failed to fetch thumbnail image from {thumbnail_url}: {e}")
-
     return None
 
 
@@ -193,11 +232,7 @@ def clip_relevance_score(text: str, thumbnail_url: Any, model_name: str = "ViT-B
     # Extract URL or PIL Image if dict passed
     image_input = thumbnail_url
     if isinstance(thumbnail_url, dict):
-        image_input = (
-            thumbnail_url.get("thumbnail")
-            or thumbnail_url.get("image")
-            or thumbnail_url.get("url")
-        )
+        image_input = _thumbnail_ref(thumbnail_url)
 
     pil_image = None
     if isinstance(image_input, Image.Image):
@@ -374,7 +409,7 @@ def rerank_pooled_candidates(
         for prev in previous_media:
             if not isinstance(prev, dict):
                 continue
-            pref = prev.get("thumbnail") or prev.get("image") or prev.get("url")
+            pref = _thumbnail_ref(prev)
             pimg = None
             if isinstance(pref, Image.Image):
                 pimg = pref.convert("RGB")
@@ -418,7 +453,7 @@ def rerank_pooled_candidates(
             item = dict(candidate)
 
             # --- Two-gate relevance via shared embeddings (legacy fallback) ---
-            ref = item.get("thumbnail") or item.get("image") or candidate_url
+            ref = _thumbnail_ref(item)
             img = None
             if isinstance(ref, Image.Image):
                 img = ref.convert("RGB")
@@ -438,7 +473,7 @@ def rerank_pooled_candidates(
             else:
                 relevance = clip_relevance_score(
                     narration_text,
-                    item.get("thumbnail") or item.get("image") or candidate_url,
+                    _thumbnail_ref(item),
                 )
 
             quality = compute_quality_score(item, target_w=target_width, target_h=target_height)
