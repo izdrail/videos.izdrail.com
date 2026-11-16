@@ -1933,7 +1933,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 cards_html += f"""
                 <div class="slide-section">
                     <div class="slide-hdr">
-                        <span class="slide-num">Slide {i + 1}</span>
+                        <span class="slide-num">Slide {i}</span>
                         <span class="slide-kw">Keyword: {kw_display}</span>
                     </div>
                     <div class="slide-txt">{display_sentence}</div>
