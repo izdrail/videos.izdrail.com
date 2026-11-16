@@ -1455,7 +1455,7 @@ def setup_ui(generator: TextToVideoGenerator):
                     restart_dropdown = gr.Dropdown(label="Select Job (failed/interrupted)", choices=[], value=None)
                     refresh_jobs_btn = gr.Button("🔄 Refresh", size="sm")
                 with gr.Row():
-                    download_btn = gr.Button("⬇️ Download Video", variant="primary")
+                    download_btn = gr.Button("⬇️ Download Result", variant="primary")
                     retry_btn = gr.Button("🔁 Retry Failed", variant="secondary")
                     restart_btn = gr.Button("♻️ Restart Interrupted", variant="secondary")
                     cancel_btn = gr.Button("⛔ Cancel", size="sm")
@@ -1477,15 +1477,10 @@ def setup_ui(generator: TextToVideoGenerator):
                 refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown])
 
                 def _download(job_id):
-                    if not job_id or not job_manager:
-                        return None
-                    j = job_manager.get_job(job_id)
-                    if not j or j['status']!='completed' or not j.get('video_path'):
-                        return None
-                    p = j['video_path']
-                    import pathlib as _pl
-                    return str(_pl.Path(p)) if _pl.Path(p).exists() else None
-                download_btn.click(fn=_download, inputs=[job_id_dropdown], outputs=[download_file])
+                    from core.downloads import job_download
+                    job = job_manager.get_job(job_id) if job_id and job_manager else None
+                    return job_download(job)
+                download_btn.click(fn=_download, inputs=[job_id_dropdown], outputs=[download_file, job_status_msg])
 
                 def _retry(job_id):
                     if not job_id or not job_manager:
