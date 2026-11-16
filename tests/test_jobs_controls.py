@@ -21,7 +21,7 @@ def test_refresh_updates_cancel_selector():
         c=next(n for n in calls(name) if n.func.attr in ('tick','click'))
         outputs=next(k.value for k in c.keywords if k.arg=='outputs')
         assert outputs.elts[-1].id=='cancel_dropdown'
-    assert "j['status'] in ('queued', 'processing')" in SOURCE
+    assert "job_choices(jobs, {'queued', 'processing'})" in SOURCE
 
 def test_retry_does_not_duplicate_completed_job():
     fn=next(n for n in ast.walk(TREE) if isinstance(n,ast.FunctionDef) and n.name=='_retry')

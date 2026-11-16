@@ -1090,6 +1090,7 @@ def _jobs_html():
 
 from core.media.selection import SELECTION_JS, candidate_key, resolve_selections
 from core.media.preview_search import preview_query, youtube_relevant
+from core.job_choices import job_choices
 
 def setup_ui(generator: TextToVideoGenerator):
     with gr.Blocks(
@@ -1450,15 +1451,17 @@ def setup_ui(generator: TextToVideoGenerator):
                 jobs_html = gr.HTML(value=_jobs_html())
                 jobs_df = gr.Dataframe(value=_jobs_dataframe(), headers=["Job ID","Status","Progress","Created","Error"], interactive=False, wrap=True)
                 with gr.Row():
-                    job_id_dropdown = gr.Dropdown(label="Select Job (completed)", choices=[], value=None)
-                    restart_dropdown = gr.Dropdown(label="Select Job (failed/interrupted)", choices=[], value=None)
-                    cancel_dropdown = gr.Dropdown(label="Select Job (queued/processing)", choices=[], value=None)
-                    refresh_jobs_btn = gr.Button("🔄 Refresh", size="sm")
-                with gr.Row():
-                    download_btn = gr.Button("⬇️ Download Result", variant="primary")
-                    retry_btn = gr.Button("🔁 Retry Failed", variant="secondary")
-                    restart_btn = gr.Button("♻️ Restart Interrupted", variant="secondary")
-                    cancel_btn = gr.Button("⛔ Cancel", size="sm")
+                    with gr.Column():
+                        job_id_dropdown = gr.Dropdown(label="Completed job to download", choices=[], value=None, info="ID, status, time and script. Only completed jobs appear.")
+                        download_btn = gr.Button("⬇️ Download Result", variant="primary")
+                    with gr.Column():
+                        restart_dropdown = gr.Dropdown(label="Failed or interrupted job to retry", choices=[], value=None, info="Retry creates a new job; the original remains in history.")
+                        retry_btn = gr.Button("🔁 Retry Failed / Interrupted", variant="secondary")
+                        restart_btn = gr.Button("♻️ Restart Interrupted", variant="secondary", visible=False)
+                    with gr.Column():
+                        cancel_dropdown = gr.Dropdown(label="Queued or processing job to cancel", choices=[], value=None, info="Completed jobs cannot be canceled.")
+                        cancel_btn = gr.Button("⛔ Cancel Selected Job", size="sm")
+                refresh_jobs_btn = gr.Button("🔄 Refresh Jobs", size="sm")
                 download_file = gr.File(label="Download", interactive=False)
                 job_status_msg = gr.Markdown("")
                 jobs_timer = gr.Timer(value=2, active=True)
@@ -1468,11 +1471,10 @@ def setup_ui(generator: TextToVideoGenerator):
                     jobs = job_manager.get_all_jobs(limit=50) if job_manager else []
                     html = _jobs_html()
                     df = _jobs_dataframe()
-                    choices = [j['job_id'] for j in jobs if j['status']=='completed']
-                    restart_choices = [j['job_id'] for j in jobs if j['status'] in ('failed','interrupted')]
-                    labels = [f"{j['job_id'][:8]} — {j['status']} {j['progress']}%" for j in jobs]
-                    # dropdown choices as job_ids
-                    return html, df, gr.Dropdown(choices=choices), gr.Dropdown(choices=restart_choices), gr.Dropdown(choices=[j['job_id'] for j in jobs if j['status'] in ('queued', 'processing')])
+                    choices = job_choices(jobs, {'completed'})
+                    restart_choices = job_choices(jobs, {'failed', 'interrupted'})
+                    cancel_choices = job_choices(jobs, {'queued', 'processing'})
+                    return html, df, gr.Dropdown(choices=choices), gr.Dropdown(choices=restart_choices), gr.Dropdown(choices=cancel_choices)
                 jobs_timer.tick(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown, cancel_dropdown])
                 refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown, cancel_dropdown])
 
@@ -1509,6 +1511,9 @@ def setup_ui(generator: TextToVideoGenerator):
                 def _cancel(job_id):
                     if not job_id or not job_manager:
                         return "No job selected"
+                    job = job_manager.get_job(job_id)
+                    if not job or job["status"] not in ("queued", "processing"):
+                        return "This job is no longer queued or processing. Refresh and choose an active job."
                     ok = job_manager.cancel_job(job_id)
                     return "Canceled" if ok else "Cannot cancel"
                 cancel_btn.click(fn=_cancel, inputs=[cancel_dropdown], outputs=[job_status_msg])
