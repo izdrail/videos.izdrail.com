@@ -1080,7 +1080,7 @@ def _jobs_html():
         jobs=[]
     if not jobs:
         return "<p style='color:#888;text-align:center;padding:20px'>No jobs yet. Generate a video to create one.</p>"
-    html="<table style='width:100%;border-collapse:collapse;font-size:13px'><tr style='background:#2a2a3e;color:#ccc'><th style='padding:6px;border:1px solid #444'>Job ID</th><th style='padding:6px;border:1px solid #444'>Status</th><th style='padding:6px;border:1px solid #444'>Progress</th><th style='padding:6px;border:1px solid #444'>Created</th></tr>"
+    html="<table style='width:100%;border-collapse:collapse;font-size:13px'><tr style='background:#2a2a3e;color:#ccc'><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Job ID</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Status</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Progress</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Created</th></tr>"
     color={"queued":"#888","processing":"#4a9","completed":"#4CAF50","failed":"#e55","canceled":"#aa5"}
     for j in jobs:
         c=color.get(j['status'],"#ccc")
