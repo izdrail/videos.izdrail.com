@@ -1089,6 +1089,7 @@ def _jobs_html():
     return html
 
 from core.media.selection import SELECTION_JS, candidate_key, resolve_selections
+from core.media.preview_search import preview_query, youtube_relevant
 
 def setup_ui(generator: TextToVideoGenerator):
     with gr.Blocks(
@@ -1847,11 +1848,11 @@ def setup_ui(generator: TextToVideoGenerator):
             from html import escape
 
             for i, sentence in enumerate(sentences[:20]):
-                candidates = kw_extractor.extract_keywords(
+                candidates = ([pexels_keyword.strip()] if pexels_keyword and pexels_keyword.strip() else kw_extractor.extract_keywords(
                     sentence, top_n=5, language=kw_lang, entity=entity
-                )
-                kw = None
-                for c in candidates:
+                ))
+                kw = pexels_keyword.strip() if pexels_keyword and pexels_keyword.strip() else None
+                for c in ([] if kw else candidates):
                     if kw_extractor.is_semantically_unique(c):
                         kw = c
                         kw_extractor.add_used_keyword(c)
@@ -1881,7 +1882,10 @@ def setup_ui(generator: TextToVideoGenerator):
                         ):
                             continue
                         try:
-                            results = api.search_videos(search_kw, per_page=3)
+                            query = preview_query(sentence, search_kw, pexels_keyword) if src == "YouTube" else search_kw
+                            results = api.search_videos(query + " b-roll footage" if src == "YouTube" else query, per_page=6 if src == "YouTube" else 3)
+                            if src == "YouTube":
+                                results = [r for r in (results or []) if youtube_relevant(r.get("title", ""), query)]
                             if results:
                                 available_sources.append(src)
                                 for r in results[:3]:
@@ -1921,7 +1925,7 @@ def setup_ui(generator: TextToVideoGenerator):
 
                 if not source_cards:
                     source_cards = (
-                        "<p style='color:#999;padding:12px'>No videos found</p>"
+                        "<p style='color:#999;padding:12px'>No matching clips found. Try a more specific keyword in Media.</p>"
                     )
 
                 display_sentence = (

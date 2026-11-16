@@ -93,7 +93,7 @@ def test_preview_returns_exact_server_candidate_and_safe_text():
     extractor=SimpleNamespace(clear_used=lambda:None,extract_keywords=lambda *a,**k:['test'],is_semantically_unique=lambda x:True,add_used_keyword=lambda x:None)
     media=SimpleNamespace(_get_ordered_sources=lambda x:['Test'],apis={'Test':SimpleNamespace(search_videos=lambda *a,**k:[result])})
     generator=SimpleNamespace(keyword_extractor=extractor,video_generator=SimpleNamespace(split_into_sentences=lambda x:[x],media_manager=media))
-    ns={'generator':generator,'candidate_key':selection.candidate_key}
+    ns={'generator':generator,'candidate_key':selection.candidate_key,'preview_query':lambda s,k,m:k,'youtube_relevant':lambda t,q:True}
     exec(compile(ast.Module(body=[fn],type_ignores=[]),'preview','exec'),ns)
     html,slides,status,storage,applied=ns['preview_backgrounds_action']('<script>alert(1)</script>','en','Test','')
     key=selection.candidate_key('Test',result)
@@ -128,7 +128,7 @@ def test_youtube_media_record_thumbnail_and_title():
     extractor=SimpleNamespace(clear_used=lambda:None,extract_keywords=lambda *a,**k:['forest'],is_semantically_unique=lambda x:True,add_used_keyword=lambda x:None)
     media=SimpleNamespace(_get_ordered_sources=lambda x:['YouTube'],apis={'YouTube':SimpleNamespace(search_videos=lambda *a,**k:[result])})
     gen=SimpleNamespace(keyword_extractor=extractor,video_generator=SimpleNamespace(split_into_sentences=lambda x:[x],media_manager=media))
-    ns={'generator':gen,'candidate_key':selection.candidate_key}
+    ns={'generator':gen,'candidate_key':selection.candidate_key,'preview_query':lambda s,k,m:k,'youtube_relevant':lambda t,q:True}
     exec(compile(ast.Module(body=[fn],type_ignores=[]),'preview','exec'),ns)
     html,*_=ns['preview_backgrounds_action']('Forest scene','en','YouTube','')
     assert result['thumbnail_url'] in html
