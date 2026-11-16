@@ -1080,12 +1080,12 @@ def _jobs_html():
         jobs=[]
     if not jobs:
         return "<p style='color:#888;text-align:center;padding:20px'>No jobs yet. Generate a video to create one.</p>"
-    html="<table style='width:100%;border-collapse:collapse;font-size:13px'><tr style='background:#2a2a3e;color:#ccc'><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Job ID</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Status</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Progress</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Created</th></tr>"
+    html="<div style='width:100%;max-width:100%;overflow-x:auto'><table style='width:100%;border-collapse:collapse;font-size:13px'><tr style='background:#2a2a3e;color:#ccc'><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Job ID</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Status</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Progress</th><th style='padding:6px;border:1px solid #444;background:#263247;color:#fff'>Created</th></tr>"
     color={"queued":"#888","processing":"#4a9","completed":"#4CAF50","failed":"#e55","canceled":"#aa5"}
     for j in jobs:
         c=color.get(j['status'],"#ccc")
         html+=f"<tr><td style='padding:6px;border:1px solid #333'>{j['job_id'][:8]}</td><td style='padding:6px;border:1px solid #333;color:{c}'>{j['status']}</td><td style='padding:6px;border:1px solid #333'><div style='background:#333;border-radius:6px;height:14px'><div style='width:{j['progress']}%;background:{c};height:14px;border-radius:6px'></div></div>{j['progress']}%</td><td style='padding:6px;border:1px solid #333'>{j['created_at'][:19]}</td></tr>"
-    html+="</table>"
+    html+="</table></div>"
     return html
 
 def setup_ui(generator: TextToVideoGenerator):
@@ -1126,7 +1126,7 @@ def setup_ui(generator: TextToVideoGenerator):
                                     ai_model_dropdown = gr.Dropdown(
                                         label="🤖 AI Model",
                                         choices=generator.available_models,
-                                        value="gemma4:e2b",
+                                        value="gemma3:4b",
                                         info="Select LLM for keyword extraction",
                                     )
                                     btn_refresh_models = gr.Button(
@@ -1453,6 +1453,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 with gr.Row():
                     job_id_dropdown = gr.Dropdown(label="Select Job (completed)", choices=[], value=None)
                     restart_dropdown = gr.Dropdown(label="Select Job (failed/interrupted)", choices=[], value=None)
+                    cancel_dropdown = gr.Dropdown(label="Select Job (queued/processing)", choices=[], value=None)
                     refresh_jobs_btn = gr.Button("🔄 Refresh", size="sm")
                 with gr.Row():
                     download_btn = gr.Button("⬇️ Download Result", variant="primary")
@@ -1472,9 +1473,9 @@ def setup_ui(generator: TextToVideoGenerator):
                     restart_choices = [j['job_id'] for j in jobs if j['status'] in ('failed','interrupted')]
                     labels = [f"{j['job_id'][:8]} — {j['status']} {j['progress']}%" for j in jobs]
                     # dropdown choices as job_ids
-                    return html, df, gr.Dropdown(choices=choices), gr.Dropdown(choices=restart_choices)
-                jobs_timer.tick(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown])
-                refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown])
+                    return html, df, gr.Dropdown(choices=choices), gr.Dropdown(choices=restart_choices), gr.Dropdown(choices=[j['job_id'] for j in jobs if j['status'] in ('queued', 'processing')])
+                jobs_timer.tick(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown, cancel_dropdown])
+                refresh_jobs_btn.click(fn=_refresh_jobs, inputs=[], outputs=[jobs_html, jobs_df, job_id_dropdown, restart_dropdown, cancel_dropdown])
 
                 def _download(job_id):
                     from core.downloads import job_download
@@ -1488,9 +1489,11 @@ def setup_ui(generator: TextToVideoGenerator):
                     j = job_manager.get_job(job_id)
                     if not j:
                         return "Job not found"
+                    if j['status'] not in ('failed', 'interrupted'):
+                        return "Select a failed or interrupted job to retry."
                     new_id = job_manager.retry_job(job_id)
                     return f"Retried as {new_id[:8]}" if new_id else "Retry failed"
-                retry_btn.click(fn=_retry, inputs=[job_id_dropdown], outputs=[job_status_msg])
+                retry_btn.click(fn=_retry, inputs=[restart_dropdown], outputs=[job_status_msg])
 
                 def _restart(job_id):
                     if not job_id or not job_manager:
@@ -1509,7 +1512,7 @@ def setup_ui(generator: TextToVideoGenerator):
                         return "No job selected"
                     ok = job_manager.cancel_job(job_id)
                     return "Canceled" if ok else "Cannot cancel"
-                cancel_btn.click(fn=_cancel, inputs=[job_id_dropdown], outputs=[job_status_msg])
+                cancel_btn.click(fn=_cancel, inputs=[cancel_dropdown], outputs=[job_status_msg])
 
         def _submit_job_wrapper(text, language, speaker, use_random, visual_source, media_source, keyword, selected_background_video_name, enable_music, music_select, music_vol, enable_circle, circle_upload_path, circle_diam, circle_border, circle_pos, overlay_shape_val, enable_intro, enable_cta, hide_text, export_fps_val, ai_model_val, ai_api_url_val, stress_level_val, use_snn_val, audio_only_val, normalize_audio_val, aspect_ratio_val, quality_val, enable_crossfade_val, pre_selected_videos, js_json, override_text, slide_data, entity):
             if not text or not text.strip():
