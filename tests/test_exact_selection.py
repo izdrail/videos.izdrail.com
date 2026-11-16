@@ -120,3 +120,17 @@ def test_selection_load_hook_is_inside_blocks_context():
 
 def test_preview_text_contrast_overrides_theme():
     assert '.slide-section, .slide-section * {{ color:#e5e7eb !important; }}' in (ROOT/'main.py').read_text()
+
+def test_youtube_media_record_thumbnail_and_title():
+    tree=ast.parse((ROOT/'main.py').read_text())
+    fn=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='preview_backgrounds_action')
+    result={'url':'https://www.youtube.com/watch?v=actual','thumbnail_url':'https://i.ytimg.com/vi/actual/hqdefault.jpg','title':'Forest <walk> & river'}
+    extractor=SimpleNamespace(clear_used=lambda:None,extract_keywords=lambda *a,**k:['forest'],is_semantically_unique=lambda x:True,add_used_keyword=lambda x:None)
+    media=SimpleNamespace(_get_ordered_sources=lambda x:['YouTube'],apis={'YouTube':SimpleNamespace(search_videos=lambda *a,**k:[result])})
+    gen=SimpleNamespace(keyword_extractor=extractor,video_generator=SimpleNamespace(split_into_sentences=lambda x:[x],media_manager=media))
+    ns={'generator':gen,'candidate_key':selection.candidate_key}
+    exec(compile(ast.Module(body=[fn],type_ignores=[]),'preview','exec'),ns)
+    html,*_=ns['preview_backgrounds_action']('Forest scene','en','YouTube','')
+    assert result['thumbnail_url'] in html
+    assert 'Forest &lt;walk&gt; &amp; river' in html
+    assert '<span style="font-size:24px">' not in html

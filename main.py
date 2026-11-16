@@ -1888,16 +1888,15 @@ def setup_ui(generator: TextToVideoGenerator):
                                     if not r.get("url"): continue
                                     token = candidate_key(src, r)
                                     exact_candidates[token] = {"source":src,"result":dict(r)}
-                                    thumb = ""
-                                    thumb_style = "background:#f0f0f0;display:flex;align-items:center;justify-content:center"
-                                    if src == "YouTube":
+                                    thumb = r.get("thumbnail_url") or r.get("thumbnail") or ""
+                                    if not thumb and src == "YouTube":
                                         vid = r.get("id", "")
                                         if vid:
                                             thumb = f"https://img.youtube.com/vi/{vid}/default.jpg"
-                                    elif r.get("thumbnail"):
-                                        thumb = r["thumbnail"]
-                                    elif src == "Unsplash":
+                                    elif not thumb and src == "Unsplash":
                                         thumb = r.get("url", "")
+                                    title = escape(str(r.get("title") or src), quote=True)
+                                    thumb_style = "background:#f0f0f0;display:flex;align-items:center;justify-content:center"
 
                                     if thumb:
                                         thumb_style = (
@@ -1911,6 +1910,7 @@ def setup_ui(generator: TextToVideoGenerator):
                                             {"" if thumb else f'<span style="font-size:24px">🎬</span>'}
                                         </div>
                                         <div class="vid-source">{src}</div>
+                                        <div class="vid-title" title="{title}">{title}</div>
                                         <div class="vid-check">
                                             <input type="checkbox" tabindex="-1" style="pointer-events:none">
                                             <span>Use this exact clip</span>
@@ -1967,6 +1967,7 @@ def setup_ui(generator: TextToVideoGenerator):
 .vid-card.selected {{ border-color:#4CAF50; background:#1a3a1a; }}
 .vid-thumb {{ width:100%; height:90px; background:#333; }}
 .vid-source {{ font-size:12px; font-weight:600; padding:4px 8px 0 8px; color:#ccc; }}
+.vid-title {{ font-size:11px; padding:4px 8px; line-height:1.35; max-height:48px; overflow:hidden; }}
 .vid-check {{ display:flex; align-items:center; gap:4px; padding:2px 8px 6px 8px; font-size:11px; color:#aaa; }}
 .vid-check input {{ margin:0; }}
 </style>
