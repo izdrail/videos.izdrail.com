@@ -23,12 +23,16 @@ class JobManager:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._generator_factory: Optional[Callable[[], Any]] = None
+        self._factory_ready = threading.Event()
         self._gpu_sem = threading.Semaphore(self.max_workers)
         self._start_workers()
         self.recover_interrupted_jobs()
 
     def set_generator_factory(self, factory: Callable[[], Any]):
+        if not callable(factory):
+            raise TypeError("Generator factory must be callable")
         self._generator_factory = factory
+        self._factory_ready.set()
 
     def _start_workers(self):
         for i in range(self.max_workers):
@@ -40,6 +44,10 @@ class JobManager:
 
     def _worker_loop(self):
         while not self._stop.is_set():
+            if not self._factory_ready.wait(timeout=0.25):
+                continue
+            if self._stop.is_set():
+                break
             try:
                 job_id = self.queue.get(timeout=1)
             except queue.Empty:

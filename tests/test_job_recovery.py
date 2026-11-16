@@ -131,3 +131,26 @@ def test_retry_job_creates_new_id_with_same_params(tmp_path, monkeypatch):
     assert old["status"] == "failed"
     assert new["status"] == "queued"
     assert json.loads(new["params"])["text"] == "hello world"
+
+def test_recovery_waits_for_factory_before_consuming_queue(tmp_path, monkeypatch):
+    import threading
+    import time
+    db_path = _setup_db(tmp_path)
+    _insert_job(db_path,'waiting_factory','queued','2026-11-16T10:00:00')
+    config=Config()
+    config.TEMP_DIR=tmp_path
+    jm=JobManager(config=config,max_workers=1)
+    try:
+        time.sleep(0.1)
+        assert jm.get_job('waiting_factory')['status']=='queued'
+        ran=threading.Event()
+        class Generator:
+            def generate_video(self,**params):
+                ran.set()
+                return {'success':True}
+        jm.set_generator_factory(Generator)
+        assert ran.wait(2)
+        jm.queue.join()
+        assert jm.get_job('waiting_factory')['status']=='completed'
+    finally:
+        jm.shutdown()
