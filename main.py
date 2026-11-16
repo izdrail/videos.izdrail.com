@@ -1394,7 +1394,7 @@ def setup_ui(generator: TextToVideoGenerator):
                                 )
 
                                 custom_selections_input = gr.Textbox(
-                                    label="✏️ Per-Slide Override Rules",
+                                    label="✏️ Per-Slide Override Rules (slide numbers start at 0)",
                                     placeholder=(
                                         "Format: slide_num:action, one per line\n\n"
                                         "Examples:\n"
@@ -1933,7 +1933,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 cards_html += f"""
                 <div class="slide-section">
                     <div class="slide-hdr">
-                        <span class="slide-num">Slide {i}</span>
+                        <span class="slide-num">Slide {i + 1}</span>
                         <span class="slide-kw">Keyword: {kw_display}</span>
                     </div>
                     <div class="slide-txt">{display_sentence}</div>
@@ -1955,6 +1955,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 )
 
             html = f"""<style>
+.slide-section, .slide-section * {{ color:#e5e7eb !important; }}
 .slide-section {{ margin:12px 0; border:1px solid #2a2a3e; border-radius:10px; padding:14px; background:#1a1a2e; }}
 .slide-hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }}
 .slide-num {{ font-weight:700; font-size:15px; color:#e0e0e0; }}

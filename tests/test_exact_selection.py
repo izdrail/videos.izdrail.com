@@ -117,3 +117,6 @@ def test_selection_load_hook_is_inside_blocks_context():
         gr.Textbox()
         demo.load(fn=None,js=selection.SELECTION_JS)
     assert demo.config['dependencies'][-1]['js']==selection.SELECTION_JS
+
+def test_preview_text_contrast_overrides_theme():
+    assert '.slide-section, .slide-section * {{ color:#e5e7eb !important; }}' in (ROOT/'main.py').read_text()
