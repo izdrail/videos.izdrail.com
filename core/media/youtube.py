@@ -121,7 +121,7 @@ class YouTubeAPI(BaseMediaAPI):
                         or f"https://www.youtube.com/watch?v={video_id}",
                         title=title,
                         creator=entry.get("uploader") or entry.get("channel"),
-                        thumbnail_url=entry.get("thumbnail"),
+                        thumbnail_url=entry.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
                         license=None,
                         license_version=None,
                         attribution=entry.get("uploader"),

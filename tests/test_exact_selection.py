@@ -134,3 +134,12 @@ def test_youtube_media_record_thumbnail_and_title():
     assert result['thumbnail_url'] in html
     assert 'Forest &lt;walk&gt; &amp; river' in html
     assert '<span style="font-size:24px">' not in html
+
+def test_youtube_flat_playlist_without_thumbnail(monkeypatch):
+    from core.media.youtube import YouTubeAPI
+    api=YouTubeAPI()
+    monkeypatch.setattr(api,'_yt_dlp_available',lambda:True)
+    monkeypatch.setattr(api,'_run',lambda *a,**k:json.dumps({'id':'Abc123xyz_1','title':'Forest river','duration':40}))
+    result=api.search_videos('forest',per_page=1)[0]
+    assert result['thumbnail_url']=='https://i.ytimg.com/vi/Abc123xyz_1/hqdefault.jpg'
+    assert result['title']=='Forest river'
