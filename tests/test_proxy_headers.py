@@ -1,8 +1,7 @@
 """Gradio emits absolute asset URLs (theme.css) from the inbound
-x-forwarded-proto header. Behind Cloudflare (Flexible) -> Traefik's web
-entrypoint that header arrives as http (or not at all), so the https page
-referenced an http stylesheet, browsers blocked it as mixed content and the
-UI rendered unstyled (prod regression 2026-11-15/16).
+x-forwarded-proto header. Behind the public site's reverse proxy
+entrypoint an http or absent header makes the https page reference an http
+stylesheet, which browsers block as mixed content, leaving the UI unstyled (prod regression 2026-11-15/16).
 
 Fix: FORCE_HTTPS=1 (set in Coolify env) rewrites x-forwarded-proto to https
 at the ASGI layer. These tests pin both the forced scheme and that a page
@@ -11,6 +10,8 @@ http absolute links.
 """
 
 import re
+
+import pytest
 
 import gradio as gr
 from fastapi.responses import JSONResponse
@@ -54,7 +55,8 @@ def test_force_https_page_has_no_http_absolute_links(monkeypatch):
         assert link.startswith("https://"), f"mixed-content link: {link}"
 
 
-def test_gradio_root_url_resolves_https_under_prod_headers(monkeypatch):
+@pytest.mark.parametrize("proto", [None, "http", "https"])
+def test_gradio_root_url_resolves_https_under_prod_headers(monkeypatch, proto):
     # Pin the actual consumer: gradio.route_utils.get_root_url builds the
     # absolute theme.css URL from the request headers.
     from fastapi.responses import JSONResponse as _J
@@ -66,7 +68,10 @@ def test_gradio_root_url_resolves_https_under_prod_headers(monkeypatch):
     app = _app(monkeypatch, force_https=True)
     app.routes.insert(0, Route("/__root_probe", root_probe))
     c = TestClient(app, base_url="http://internal:1603")
-    r = c.get("/__root_probe", headers={"X-Forwarded-Host": "videos.izdrail.com"})
+    headers = {"X-Forwarded-Host": "videos.izdrail.com"}
+    if proto is not None:
+        headers["X-Forwarded-Proto"] = proto
+    r = c.get("/__root_probe", headers=headers)
     assert r.json()["root_url"] == "https://videos.izdrail.com"
 
 

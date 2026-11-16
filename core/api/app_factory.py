@@ -15,9 +15,9 @@ from core.api.image_api import register_image_api
 class ForceForwardedProtoMiddleware:
     """Rewrite the inbound x-forwarded-proto header to https.
 
-    The app sits behind Cloudflare (Flexible) -> Traefik's plain-http web
-    entrypoint, and Traefik overwrites Cloudflare's X-Forwarded-Proto: https
-    with http. Gradio builds absolute asset URLs (theme.css) from that header,
+    The public HTTPS app sits behind proxies that can supply an absent or
+    http X-Forwarded-Proto. Gradio builds absolute asset URLs (theme.css)
+    from that header,
     so the https page references an http stylesheet and browsers block it as
     mixed content, leaving the UI unstyled. The public site is only ever
     served over https, so forcing the proto is safe. Enabled via FORCE_HTTPS=1
