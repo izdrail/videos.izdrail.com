@@ -2540,16 +2540,18 @@ if __name__ == "__main__":
         # cannot starve video jobs. demo.launch() rebuilds the FastAPI app
         # and would drop extra routes, so we mount Gradio on our own app
         # instead and serve it with uvicorn directly.
-        import gradio as gr
         import uvicorn
-        from fastapi import FastAPI
 
-        from core.api.image_api import register_image_api
+        from core.api.app_factory import create_app
 
-        app = FastAPI()
-        register_image_api(app, lambda: generator.video_generator.sd_manager)
-        gr.mount_gradio_app(app, demo, path="/")
-        uvicorn.run(app, host="0.0.0.0", port=1603)
+        app = create_app(demo, lambda: generator.video_generator.sd_manager)
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=1603,
+            proxy_headers=True,
+            forwarded_allow_ips="*",
+        )
     except Exception as e:
         print(f"\n❌ FATAL ERROR: {e}")
         import traceback
