@@ -2151,7 +2151,7 @@ def setup_ui(generator: TextToVideoGenerator):
             inputs=[preset_dropdown],
             outputs=[stress_level, export_fps, music_volume, enable_cta],
         )
-    demo.load(fn=None, js=SELECTION_JS)
+        demo.load(fn=None, js=SELECTION_JS)
     return demo
 
 

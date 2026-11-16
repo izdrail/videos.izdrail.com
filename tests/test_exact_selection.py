@@ -108,3 +108,12 @@ def test_changed_script_rejects_old_selection(tmp_path):
     with pytest.raises(ValueError,match='Script changed'):
         selection.resolve_selections(mgr,json.dumps({'1':key}),slides,current_text='new text')
     assert not api.calls
+
+def test_selection_load_hook_is_inside_blocks_context():
+    import gradio as gr
+    source=(ROOT/'main.py').read_text()
+    assert '\n        demo.load(fn=None, js=SELECTION_JS)\n    return demo' in source
+    with gr.Blocks() as demo:
+        gr.Textbox()
+        demo.load(fn=None,js=selection.SELECTION_JS)
+    assert demo.config['dependencies'][-1]['js']==selection.SELECTION_JS
