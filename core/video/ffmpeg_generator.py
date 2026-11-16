@@ -1033,9 +1033,11 @@ class FFmpegVideoGenerator:
                     print(f"[Pipeline] Ignoring retired gradient override for slide {s_num}; using video-first selection.")
                 else:
                     p = Path(s_path) if not isinstance(s_path, Path) else s_path
+                    if not p.is_file():
+                        raise ValueError(f"Slide {s_num}: selected clip is missing. No substitute was chosen.")
                     if p.exists():
                         slide_videos[s_num] = p
-                        source_videos_to_cleanup.add(p)
+                        # User-selected cached assets persist for repeatable generation.
                         print(
                             f"📁 [Pipeline] Using user-selected video for slide {s_num}: {p.name}"
                         )
@@ -1161,7 +1163,7 @@ class FFmpegVideoGenerator:
                 initial_clips, candidate_clips_per_slide=candidate_clips_map
             )
             for s_num, opt_clip in zip(content_slide_nums, optimized_clips):
-                if opt_clip and opt_clip != slide_videos.get(s_num):
+                if s_num not in pre_selected_videos and opt_clip and opt_clip != slide_videos.get(s_num):
                     print(f"🎬 [TemporalCoherence] Updated slide {s_num} background to {getattr(opt_clip, 'name', str(opt_clip))}")
                     slide_videos[s_num] = opt_clip
         except Exception as e:
@@ -1173,6 +1175,14 @@ class FFmpegVideoGenerator:
         if post_optimization_duplicates:
             duplicate_count += post_optimization_duplicates
             print(f"🛡️ [Selection] Removed {post_optimization_duplicates} duplicate asset(s) introduced during post-processing.")
+
+        # Never silently replace or drop an explicit choice during optimisation/dedup.
+        for s_num, selected_path in pre_selected_videos.items():
+            if not Path(selected_path).is_file() or slide_videos.get(s_num) != Path(selected_path):
+                raise ValueError(f"Slide {s_num}: selected clip could not be preserved. Choose distinct available clips; no substitute was rendered.")
+            valid_selected, selected_reason = validate_background_asset(Path(selected_path))
+            if not valid_selected:
+                raise ValueError(f"Slide {s_num}: selected clip is invalid ({selected_reason}). No substitute was rendered.")
 
         # --- Stage 3: Parallel Rendering ---
         print(

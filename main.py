@@ -1088,6 +1088,8 @@ def _jobs_html():
     html+="</table></div>"
     return html
 
+from core.media.selection import SELECTION_JS, candidate_key, resolve_selections
+
 def setup_ui(generator: TextToVideoGenerator):
     with gr.Blocks(
         title="AI Video Generator Pro", theme=gr.themes.Soft(primary_hue="blue")
@@ -1382,11 +1384,7 @@ def setup_ui(generator: TextToVideoGenerator):
                                     value="""<style>
          .hidden-textbox { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
         </style>
-        <script>
-        document.addEventListener('click',function(e){var c=e.target.closest('.vid-card');if(c){c.classList.toggle('selected');var cb=c.querySelector('input[type=checkbox]');if(cb)cb.checked=c.classList.contains('selected');b();}});
-        document.addEventListener('change',function(e){if(e.target.matches('.vid-card input[type=checkbox]')){var c=e.target.closest('.vid-card');if(c){c.classList.toggle('selected');b();}}});
-        function b(){var s={};document.querySelectorAll('.vid-card.selected').forEach(function(c){var i=c.getAttribute('data-slide');var r=c.getAttribute('data-source');if(!s[i])s[i]=[];s[i].push(r);});var x=document.getElementById('js-selections-storage');if(!x)return;var t=x.tagName==='INPUT'||x.tagName==='TEXTAREA'?x:x.querySelector('input,textarea');if(!t)return;t.value=JSON.stringify(s);t.dispatchEvent(new Event('input',{bubbles:true}));t.dispatchEvent(new Event('change',{bubbles:true}));}
-        </script>"""
+"""
                                 )
 
                                 js_selections = gr.Textbox(
@@ -1401,7 +1399,7 @@ def setup_ui(generator: TextToVideoGenerator):
                                         "Format: slide_num:action, one per line\n\n"
                                         "Examples:\n"
                                         "  1:/path/to/video.mp4\n"
-                                        "  3:skip\n"
+                                        "  3:auto\n"
                                         "  5:/path/to/video.mp4\n\n"
                                         "Leave empty to use suggested videos."
                                     ),
@@ -1519,44 +1517,10 @@ def setup_ui(generator: TextToVideoGenerator):
                 return "❌ Enter text first."
             # build params dict matching generate_video signature
             params = dict(text=text, language=language, speaker_id=speaker, pexels_keyword=keyword.strip() if keyword else None, preferred_media_source=media_source, visual_source=visual_source, selected_background_video_name=selected_background_video_name, pre_selected_videos=pre_selected_videos, enable_background_music=enable_music, music_selection=music_select, music_volume_db=music_vol, add_intro_slide=enable_intro, add_call_to_action=enable_cta, use_random_voices=use_random, enable_circle_overlay=enable_circle, circle_diameter=circle_diam, circle_position=circle_pos, circle_border_width=circle_border, circle_upload_path=circle_upload_path, hide_text=hide_text, export_fps=export_fps_val, overlay_shape=overlay_shape_val, ai_model=ai_model_val, ai_api_url=ai_api_url_val, stress_level=stress_level_val, use_snn=use_snn_val, audio_only=audio_only_val, normalize_audio=normalize_audio_val, aspect_ratio=aspect_ratio_val, quality=quality_val, enable_crossfade=enable_crossfade_val, entity=entity)
-            # merge visual selections same as generate_wrapper does
-            import json as _json
-            final_pre = dict(pre_selected_videos) if isinstance(pre_selected_videos, dict) else {}
-            media_mgr = generator.video_generator.media_manager
-            if js_json and js_json.strip() not in ("", "{}") and slide_data:
-                try:
-                    visual_sel = _json.loads(js_json)
-                    for k,v in visual_sel.items():
-                        try:
-                            s_num=int(k)
-                        except: continue
-                        if not v: continue
-                        src=v[0]
-                        kw=None
-                        for sd in slide_data:
-                            if sd["slide_num"]==s_num: kw=sd.get("keyword"); break
-                        if kw and kw!="N/A":
-                            try:
-                                r=media_mgr.get_random_media([kw], preferred_source=src)
-                                if isinstance(r,tuple): r=r[0]
-                                if r: final_pre[s_num]=str(r)
-                            except: pass
-                except: pass
-            if override_text and override_text.strip():
-                for line in override_text.strip().split("\n"):
-                    line=line.strip()
-                    if not line or line.startswith("#"): continue
-                    parts=line.split(":",1)
-                    if len(parts)!=2: continue
-                    try: s_num=int(parts[0].strip())
-                    except: continue
-                    act=parts[1].strip().lower()
-                    if act=="gradient": final_pre.pop(s_num,None)
-                    elif act=="skip": final_pre.pop(s_num,None)
-                    elif act.startswith("/") or act.startswith("."):
-                        from pathlib import Path as _P
-                        if _P(act).exists(): final_pre[s_num]=str(_P(act))
-            params["pre_selected_videos"]=final_pre
+            try:
+                params["pre_selected_videos"] = resolve_selections(generator.video_generator.media_manager, js_json, slide_data, override_text, current_text=text)
+            except ValueError as exc:
+                return f"❌ {exc}"
             # handle circle upload object
             cp=params.get("circle_upload_path")
             if cp is not None:
@@ -1629,100 +1593,10 @@ def setup_ui(generator: TextToVideoGenerator):
                 progress((current, total), desc=message)
                 return f"{current}/{total}: {message}"
 
-            # Process visually-selected backgrounds inline (no Apply step needed)
-            final_pre_selected = {}
-            if pre_selected_videos is not None and isinstance(
-                pre_selected_videos, dict
-            ):
-                final_pre_selected.update(pre_selected_videos)
-                print(
-                    f"[DEBUG] generate_wrapper: pre_selected_videos state has {len(pre_selected_videos)} entries: {dict(list(pre_selected_videos.items())[:3])}..."
-                )
-            else:
-                print(
-                    f"[DEBUG] generate_wrapper: pre_selected_videos state is {type(pre_selected_videos).__name__}: {pre_selected_videos}"
-                )
-
-            media_mgr = generator.video_generator.media_manager
-            print(
-                f"[DEBUG] generate_wrapper: js_json='{js_json[:200] if js_json else None}', override_text='{override_text[:200] if override_text else None}', slide_data={'present' if slide_data else 'None'}"
-            )
-            if js_json and js_json.strip() and js_json.strip() != "{}" and slide_data:
-                try:
-                    import json as _json
-
-                    visual_sel = _json.loads(js_json)
-                    for slide_num_str, sources in visual_sel.items():
-                        try:
-                            s_num = int(slide_num_str)
-                        except ValueError:
-                            continue
-                        if not sources:
-                            continue
-                        src = sources[0]
-                        kw = None
-                        for sd in slide_data:
-                            if sd["slide_num"] == s_num:
-                                kw = sd.get("keyword")
-                                break
-                        if kw and kw != "N/A":
-                            update_progress(
-                                0, 1, f"Downloading {src} video for slide {s_num}..."
-                            )
-                            print(
-                                f"⬇️ [Generate] Downloading {src} video for slide {s_num} ('{kw}')..."
-                            )
-                            try:
-                                result = media_mgr.get_random_media(
-                                    [kw], preferred_source=src
-                                )
-                                if result and isinstance(result, tuple):
-                                    result = result[0]
-                                if result:
-                                    final_pre_selected[s_num] = str(result)
-                                    print(
-                                        f"✅ [Generate] Slide {s_num} <- {src}: {Path(result).name}"
-                                    )
-                            except Exception as e:
-                                print(
-                                    f"⚠️ [Generate] Download failed slide {s_num} from {src}: {e}"
-                                )
-                except Exception as e:
-                    print(f"⚠️ [Generate] Failed to parse visual selections: {e}")
-
-            # Apply text overrides (overwrites visual selections)
-            print(
-                f"[DEBUG] generate_wrapper: after JS processing, final_pre_selected has {len(final_pre_selected)} entries"
-            )
-            if override_text and override_text.strip():
-                for line in override_text.strip().split("\n"):
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split(":", 1)
-                    if len(parts) != 2:
-                        continue
-                    try:
-                        s_num = int(parts[0].strip())
-                    except ValueError:
-                        continue
-                    action = parts[1].strip().lower()
-                    if action == "gradient":
-                        final_pre_selected.pop(s_num, None)
-                    elif action == "skip":
-                        final_pre_selected.pop(s_num, None)
-                    elif action.startswith("/") or action.startswith("."):
-                        p = Path(action)
-                        if p.exists():
-                            final_pre_selected[s_num] = str(p)
-                        else:
-                            print(f"⚠️ [Generate] Override path not found: {action}")
-
-            if final_pre_selected:
-                vc = len(final_pre_selected)
-                print(
-                    f"🎯 [Generate] Using {vc} custom visual(s); other slides use video-first selection."
-                )
+            try:
+                final_pre_selected = resolve_selections(generator.video_generator.media_manager, js_json, slide_data, override_text, current_text=text)
+            except ValueError as exc:
+                raise gr.Error(str(exc))
 
             # Gradio 3/4 compatibility for file upload
             final_circle_path = None
@@ -1956,6 +1830,7 @@ def setup_ui(generator: TextToVideoGenerator):
                     "<p style='color:red'>Please enter text first.</p>",
                     [],
                     "*Please enter text first.*",
+                    "{}", None,
                 )
 
             kw_lang = language if language != "auto" else "en"
@@ -1969,6 +1844,7 @@ def setup_ui(generator: TextToVideoGenerator):
 
             slide_data = []
             cards_html = ""
+            from html import escape
 
             for i, sentence in enumerate(sentences[:20]):
                 candidates = kw_extractor.extract_keywords(
@@ -1986,6 +1862,7 @@ def setup_ui(generator: TextToVideoGenerator):
 
                 source_cards = ""
                 available_sources = []
+                exact_candidates = {}
 
                 if kw:
                     # Enrich the preview search with the entity for sharper,
@@ -2007,35 +1884,38 @@ def setup_ui(generator: TextToVideoGenerator):
                             results = api.search_videos(search_kw, per_page=3)
                             if results:
                                 available_sources.append(src)
-                                r = results[0]
-                                thumb = ""
-                                thumb_style = "background:#f0f0f0;display:flex;align-items:center;justify-content:center"
-                                if src == "YouTube":
-                                    vid = r.get("id", "")
-                                    if vid:
-                                        thumb = f"https://img.youtube.com/vi/{vid}/default.jpg"
-                                elif r.get("thumbnail"):
-                                    thumb = r["thumbnail"]
-                                elif src == "Unsplash":
-                                    thumb = r.get("url", "")
+                                for r in results[:3]:
+                                    if not r.get("url"): continue
+                                    token = candidate_key(src, r)
+                                    exact_candidates[token] = {"source":src,"result":dict(r)}
+                                    thumb = ""
+                                    thumb_style = "background:#f0f0f0;display:flex;align-items:center;justify-content:center"
+                                    if src == "YouTube":
+                                        vid = r.get("id", "")
+                                        if vid:
+                                            thumb = f"https://img.youtube.com/vi/{vid}/default.jpg"
+                                    elif r.get("thumbnail"):
+                                        thumb = r["thumbnail"]
+                                    elif src == "Unsplash":
+                                        thumb = r.get("url", "")
 
-                                if thumb:
-                                    thumb_style = (
-                                        f"background-image:url({thumb});"
-                                        f"background-size:cover;background-position:center"
-                                    )
+                                    if thumb:
+                                        thumb_style = (
+                                            f"background-image:url(&quot;{escape(thumb, quote=True)}&quot;);"
+                                            f"background-size:cover;background-position:center"
+                                        )
 
-                                source_cards += f"""
-                                <div class="vid-card" data-slide="{i}" data-source="{src}">
-                                    <div class="vid-thumb" style="{thumb_style}">
-                                        {"" if thumb else f'<span style="font-size:24px">🎬</span>'}
-                                    </div>
-                                    <div class="vid-source">{src}</div>
-                                    <div class="vid-check">
-                                        <input type="checkbox">
-                                        <span>Use this</span>
-                                    </div>
-                                </div>"""
+                                    source_cards += f"""
+                                    <div class="vid-card" role="button" tabindex="0" aria-pressed="false" data-slide="{i}" data-candidate="{token}">
+                                        <div class="vid-thumb" style="{thumb_style}">
+                                            {"" if thumb else f'<span style="font-size:24px">🎬</span>'}
+                                        </div>
+                                        <div class="vid-source">{src}</div>
+                                        <div class="vid-check">
+                                            <input type="checkbox" tabindex="-1" style="pointer-events:none">
+                                            <span>Use this exact clip</span>
+                                        </div>
+                                    </div>"""
                         except Exception:
                             continue
 
@@ -2047,7 +1927,8 @@ def setup_ui(generator: TextToVideoGenerator):
                 display_sentence = (
                     sentence[:80] + "..." if len(sentence) > 80 else sentence
                 )
-                kw_display = kw or "N/A"
+                display_sentence = escape(display_sentence)
+                kw_display = escape(kw or "N/A")
 
                 cards_html += f"""
                 <div class="slide-section">
@@ -2064,6 +1945,8 @@ def setup_ui(generator: TextToVideoGenerator):
                 slide_data.append(
                     {
                         "slide_num": i,
+                        "candidates": exact_candidates,
+                        "script": text.strip(),
                         "keyword": kw or "N/A",
                         "found_source": (
                             ", ".join(available_sources) if available_sources else "N/A"
@@ -2088,9 +1971,9 @@ def setup_ui(generator: TextToVideoGenerator):
 </style>
 {cards_html}"""
 
-            status_text = f"✅ {len(slide_data)} slides previewed. Click cards to select videos, then click Apply."
+            status_text = f"✅ {len(slide_data)} slides previewed. Choose one exact clip per slide. Click again to clear. Apply checks downloads; Generate keeps the same clips."
 
-            return html, slide_data, status_text
+            return html, slide_data, status_text, "{}", None
 
         preview_btn.click(
             fn=preview_backgrounds_action,
@@ -2105,6 +1988,8 @@ def setup_ui(generator: TextToVideoGenerator):
                 preview_html,
                 preview_data_state,
                 selection_status,
+                js_selections,
+                pre_selected_videos_state,
             ],
         )
 
@@ -2114,6 +1999,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 [],
                 None,
                 "*No backgrounds selected. System will auto-select.*",
+                "{}",
             )
 
         clear_preview_btn.click(
@@ -2124,6 +2010,7 @@ def setup_ui(generator: TextToVideoGenerator):
                 preview_data_state,
                 pre_selected_videos_state,
                 selection_status,
+                js_selections,
             ],
         )
 
@@ -2199,106 +2086,12 @@ def setup_ui(generator: TextToVideoGenerator):
 
         def apply_overrides_action(override_text, slide_data, js_json):
             if not slide_data:
-                return (
-                    None,
-                    "*No slide data. Click 'Preview & Find Backgrounds' first.*",
-                )
-
-            pre_selected = {}
-            total = len(slide_data)
-            media_mgr = generator.video_generator.media_manager
-
-            # 1. Parse visual checkbox selections from the HTML UI
-            if js_json and js_json.strip() and js_json.strip() != "{}":
-                try:
-                    import json as _json
-
-                    visual_sel = _json.loads(js_json)
-                    for slide_num_str, sources in visual_sel.items():
-                        try:
-                            s_num = int(slide_num_str)
-                        except ValueError:
-                            continue
-                        if not sources:
-                            continue
-                        src = sources[0]
-                        kw = None
-                        for sd in slide_data:
-                            if sd["slide_num"] == s_num:
-                                kw = sd.get("keyword")
-                                break
-                        if kw and kw != "N/A":
-                            print(
-                                f"⬇️ Downloading {src} video for slide {s_num} ('{kw}')..."
-                            )
-                            try:
-                                result = media_mgr.get_random_media(
-                                    [kw], preferred_source=src
-                                )
-                                if result and isinstance(result, tuple):
-                                    result = result[0]
-                                if result:
-                                    pre_selected[s_num] = str(result)
-                                    print(
-                                        f"✅ Slide {s_num} <- {src}: {Path(result).name}"
-                                    )
-                                    DB.log_clip_performance(
-                                        media_url=str(result),
-                                        keyword=kw,
-                                        source=src,
-                                        event_type="select",
-                                    )
-                            except Exception as e:
-                                print(
-                                    f"⚠️ Download failed slide {s_num} from {src}: {e}"
-                                )
-                except Exception as e:
-                    print(f"⚠️ Failed to parse visual selections: {e}")
-
-            # 2. Parse text overrides (overwrites visual selections)
-            if override_text and override_text.strip():
-                for line in override_text.strip().split("\n"):
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split(":", 1)
-                    if len(parts) != 2:
-                        continue
-                    try:
-                        s_num = int(parts[0].strip())
-                    except ValueError:
-                        continue
-                    action = parts[1].strip().lower()
-
-                    if action == "gradient":
-                        pre_selected.pop(s_num, None)
-                    elif action == "skip":
-                        if s_num in pre_selected:
-                            DB.log_clip_performance(
-                                media_url=pre_selected[s_num],
-                                event_type="replace",
-                            )
-                        pass  # Not in dict = auto-select during generation
-                    elif action.startswith("/") or action.startswith("."):
-                        p = Path(action)
-                        if p.exists():
-                            if s_num in pre_selected:
-                                DB.log_clip_performance(
-                                    media_url=pre_selected[s_num],
-                                    event_type="replace",
-                                )
-                            pre_selected[s_num] = str(p)
-                            DB.log_clip_performance(
-                                media_url=str(p),
-                                event_type="select",
-                            )
-                        else:
-                            print(f"⚠️ Override: path not found: {action}")
-
-            count = len(pre_selected)
-            auto_count = total - count
-            msg = f"✅ {count} custom visual(s). {auto_count} slide(s) use video-first selection with AI image fallback."
-            return pre_selected, msg
+                return None, "Preview backgrounds first."
+            try:
+                selected = resolve_selections(generator.video_generator.media_manager, js_json, slide_data, override_text)
+            except ValueError as exc:
+                return None, f"❌ {exc}"
+            return selected, f"✅ {len(selected)} exact clip(s) ready. Other slides use automatic selection. Click a selected card again to clear it."
 
         apply_btn.click(
             fn=apply_overrides_action,
@@ -2358,6 +2151,7 @@ def setup_ui(generator: TextToVideoGenerator):
             inputs=[preset_dropdown],
             outputs=[stress_level, export_fps, music_volume, enable_cta],
         )
+    demo.load(fn=None, js=SELECTION_JS)
     return demo
 
 
