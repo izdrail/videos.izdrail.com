@@ -844,7 +844,17 @@ class FFmpegVideoGenerator:
             filter_complex = ";".join(filter_parts)
             cmd = [
                 "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
                 "-y",
+                # Bound filter thread buffers: WORKER_POOL_RENDERING runs several
+                # of these at once inside one container.
+                "-filter_threads",
+                "1",
+                "-filter_complex_threads",
+                "1",
                 *inputs,
                 "-filter_complex",
                 filter_complex,
@@ -866,9 +876,13 @@ class FFmpegVideoGenerator:
                 "192k",
                 "-r",
                 str(export_fps),
+                "-t",
+                f"{duration + 0.1:.3f}",
                 "-shortest",
                 "-movflags",
                 "+faststart",
+                "-threads",
+                "2",
                 str(output_path),
             ]
             print(f"🎬 [FFmpeg] Slide {slide_num} executing command:\n{' '.join(cmd)}")

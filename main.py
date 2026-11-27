@@ -2204,6 +2204,10 @@ def run_cli(args: argparse.Namespace):
 if __name__ == "__main__":
     import argparse
 
+    from core.utils.memprobe import start_if_enabled as _start_memprobe
+
+    _start_memprobe()
+
     parser = argparse.ArgumentParser(description="Multi-Language Video Generator")
     parser.add_argument(
         "--cli", action="store_true", help="Run in CLI mode (no Gradio UI)"

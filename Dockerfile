@@ -64,7 +64,9 @@ RUN HF_HUB_OFFLINE=0 python download_kokoro.py
 # Set offline mode for runtime
 # ========================================
 ENV HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1
+    TRANSFORMERS_OFFLINE=1 \
+    MALLOC_ARENA_MAX=2 \
+    MALLOC_TRIM_THRESHOLD_=131072
 
 # ========================================
 # Supervisor Config + App
