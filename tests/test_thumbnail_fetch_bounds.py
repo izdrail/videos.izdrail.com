@@ -103,3 +103,16 @@ def test_thumbnail_url_wins_and_video_is_not_thumbnail(scoring):
     assert scoring._thumbnail_ref({'url': 'https://x/v.mp4'}) is None
     assert scoring._thumbnail_ref({'url': 'https://x/watch?v=123'}) is None
     assert scoring._thumbnail_ref({'url': 'https://x/a.jpg?q=1'}) == 'https://x/a.jpg?q=1'
+
+
+def test_cached_thumbnails_are_downscaled_and_cache_bounded(scoring, tmp_path):
+    """Memory regression: the cache must not hold full-resolution decoded images."""
+    big = tmp_path / 'big.png'
+    Image.new('RGB', (3000, 2000), (10, 20, 30)).save(big)
+    scoring._fetch_thumbnail_image.cache_clear()
+    image = scoring._fetch_thumbnail_image(str(big))
+    if image is None:  # file above the 2MB read bound: use a noisy-free smaller one
+        pytest.skip('fixture exceeded byte bound')
+    assert max(image.size) <= scoring._THUMB_MAX_SIDE
+    assert image.mode == 'RGB'
+    assert scoring._fetch_thumbnail_image.cache_info().maxsize <= 128

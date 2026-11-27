@@ -81,7 +81,24 @@ def _thumbnail_ref(item):
     return None
 
 
-@lru_cache(maxsize=512)
+# Thumbnails are only used for CLIP embeddings (preprocess resizes to 224px), so
+# cache them downscaled. The cache used to hold up to 512 full-resolution decoded
+# RGB images (tens of MB each), which grew the heap by GBs across segments.
+_THUMB_MAX_SIDE = 448
+
+
+def _shrink_for_scoring(image: Image.Image) -> Image.Image:
+    """Return a small RGB copy; JPEG draft mode avoids full-size decode."""
+    try:
+        image.draft("RGB", (_THUMB_MAX_SIDE, _THUMB_MAX_SIDE))
+    except Exception:
+        pass
+    rgb = image.convert("RGB")
+    rgb.thumbnail((_THUMB_MAX_SIDE, _THUMB_MAX_SIDE), Image.Resampling.BILINEAR)
+    return rgb
+
+
+@lru_cache(maxsize=128)
 def _fetch_thumbnail_image(thumbnail_url: str) -> Optional[Image.Image]:
     """Read a bounded image only. Socket timeout alone permits endless trickles."""
     if not thumbnail_url or not isinstance(thumbnail_url, str):
@@ -116,13 +133,13 @@ def _fetch_thumbnail_image(thumbnail_url: str) -> Optional[Image.Image]:
                             return None
                         data.extend(chunk)
                     with Image.open(io.BytesIO(data)) as image:
-                        return image.convert("RGB")
+                        return _shrink_for_scoring(image)
             return None
         elif os.path.exists(thumbnail_url):
             if os.path.getsize(thumbnail_url) > max_bytes:
                 return None
             with Image.open(thumbnail_url) as image:
-                return image.convert("RGB")
+                return _shrink_for_scoring(image)
     except Exception as e:
         logger.debug(f"Failed to fetch thumbnail image from {thumbnail_url}: {e}")
     return None
