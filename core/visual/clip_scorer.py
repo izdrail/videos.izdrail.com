@@ -44,19 +44,11 @@ class CLIPScorer:
         if isinstance(image_input, (str, Path)):
             image_str = str(image_input).strip()
             if image_str.startswith("http://") or image_str.startswith("https://"):
-                try:
-                    resp = requests.get(
-                        image_str, timeout=5, headers={"User-Agent": "Mozilla/5.0"}
-                    )
-                    if resp.status_code == 200:
-                        return Image.open(io.BytesIO(resp.content)).convert("RGB")
-                except Exception as e:
-                    logger.debug(
-                        "[CLIPScorer] Failed to download image from %s: %s",
-                        image_str,
-                        e,
-                    )
-                    return None
+                # Bounded fetch: images only, 2MB cap, deadline, downscaled.
+                # Never read an unbounded response body (media urls can be videos).
+                from media_scoring import _fetch_thumbnail_image
+
+                return _fetch_thumbnail_image(image_str)
             else:
                 try:
                     p = Path(image_str)
@@ -65,12 +57,18 @@ class CLIPScorer:
                             from core.utils.video import get_random_middle_frame
 
                             temp_thumb = p.parent / f"clip_thumb_{p.stem}.jpg"
-                            if get_random_middle_frame(p, temp_thumb):
-                                img = Image.open(temp_thumb).convert("RGB")
+                            try:
+                                if get_random_middle_frame(p, temp_thumb):
+                                    from media_scoring import _shrink_for_scoring
+
+                                    with Image.open(temp_thumb) as frame:
+                                        return _shrink_for_scoring(frame)
+                                return None
+                            finally:
                                 temp_thumb.unlink(missing_ok=True)
-                                return img
-                            return None
-                        return Image.open(p).convert("RGB")
+                        from media_scoring import _fetch_thumbnail_image
+
+                        return _fetch_thumbnail_image(str(p))
                 except Exception as e:
                     logger.debug(
                         "[CLIPScorer] Failed to load local image %s: %s", image_str, e
